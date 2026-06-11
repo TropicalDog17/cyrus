@@ -4,6 +4,9 @@ This changelog documents internal development changes, refactors, tooling update
 
 ## [Unreleased]
 
+### Changed
+- Removed stale Slack setup skill guidance that pointed agents back to the retired hosted preview initialization workflow. ([CYHOST-1078](https://linear.app/ceedar/issue/CYHOST-1078/remove-legacy-agent-led-deploy-preview-skills-and-references), [#1310](https://github.com/cyrusagents/cyrus/pull/1310))
+
 ## [0.2.63] - 2026-06-09
 
 ### Fixed
