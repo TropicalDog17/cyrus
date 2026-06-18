@@ -804,11 +804,7 @@ export class GitService {
 			}
 
 			// Then, check for repository setup scripts (cross-platform)
-			await this.runRepoSetupScript(
-				repository.repositoryPath,
-				workspacePath,
-				issue,
-			);
+			await this.runRepoSetupScript(workspacePath, issue);
 
 			return {
 				path: workspacePath,
@@ -968,23 +964,17 @@ export class GitService {
 	}): Promise<void> {
 		const { issueIdentifier, workspacePath, repositories } = opts;
 
-		// Build (repoPath, cwd) tuples. Prefer the explicit list from the caller.
-		const targets: Array<{ repositoryPath: string; cwd: string }> = [];
+		// Build the worktree cwd list. Prefer the explicit list from the caller.
+		const targets: string[] = [];
 
 		if (repositories && repositories.length > 0) {
 			if (repositories.length === 1) {
 				// Single-repo layout: workspace root IS the worktree.
-				targets.push({
-					repositoryPath: repositories[0]!.repositoryPath,
-					cwd: workspacePath,
-				});
+				targets.push(workspacePath);
 			} else {
 				// Multi-repo layout: each repo's worktree is a named subdir.
 				for (const repo of repositories) {
-					targets.push({
-						repositoryPath: repo.repositoryPath,
-						cwd: join(workspacePath, repo.name),
-					});
+					targets.push(join(workspacePath, repo.name));
 				}
 			}
 		}
@@ -997,19 +987,15 @@ export class GitService {
 			return;
 		}
 
-		for (const target of targets) {
+		for (const workspacePath of targets) {
 			try {
-				await this.runRepoTeardownScript(
-					target.repositoryPath,
-					target.cwd,
-					issueIdentifier,
-				);
+				await this.runRepoTeardownScript(workspacePath, issueIdentifier);
 			} catch (error) {
 				// runRepoTeardownScript already swallows execSync failures and
 				// logs them; this catch is defensive against unexpected throws
 				// (e.g. unreadable directory) so one bad repo cannot abort the loop.
 				this.logger.error(
-					`Unexpected error running teardown for ${target.repositoryPath}: ${(error as Error).message}`,
+					`Unexpected error running teardown for ${workspacePath}: ${(error as Error).message}`,
 				);
 			}
 		}
@@ -1093,13 +1079,11 @@ export class GitService {
 	 * Find and run a repository-specific setup script (cyrus-setup.sh/.ps1/.cmd/.bat)
 	 */
 	private async runRepoSetupScript(
-		repositoryPath: string,
 		workspacePath: string,
 		issue: Issue,
 	): Promise<void> {
 		await this.runRepoHookScript({
 			hook: "setup",
-			repositoryPath,
 			workspacePath,
 			env: {
 				LINEAR_ISSUE_ID: issue.id,
@@ -1119,13 +1103,11 @@ export class GitService {
 	 * the terminal-state message bus path does not carry the full Issue object.
 	 */
 	private async runRepoTeardownScript(
-		repositoryPath: string,
 		workspacePath: string,
 		issueIdentifier: string,
 	): Promise<void> {
 		await this.runRepoHookScript({
 			hook: "teardown",
-			repositoryPath,
 			workspacePath,
 			env: {
 				LINEAR_ISSUE_IDENTIFIER: issueIdentifier,
@@ -1136,12 +1118,11 @@ export class GitService {
 
 	/**
 	 * Shared discovery+dispatch for repo-scoped hook scripts (setup and teardown).
-	 * Looks in `repositoryPath` for `cyrus-<hook>.{sh,ps1,cmd,bat}` and runs the
+	 * Looks in `workspacePath` for `cyrus-<hook>.{sh,ps1,cmd,bat}` and runs the
 	 * first compatible variant with `cwd` set to `workspacePath`.
 	 */
 	private async runRepoHookScript(opts: {
 		hook: HookKind;
-		repositoryPath: string;
 		workspacePath: string;
 		env: Record<string, string>;
 		timeoutMs: number;
@@ -1155,7 +1136,7 @@ export class GitService {
 		];
 
 		const available = candidates.find((c) => {
-			const scriptPath = join(opts.repositoryPath, c.file);
+			const scriptPath = join(opts.workspacePath, c.file);
 			const isCompatible = isWindows
 				? c.platform === "windows"
 				: c.platform === "unix";
@@ -1166,7 +1147,7 @@ export class GitService {
 		const fallback =
 			!available && isWindows
 				? candidates.find((c) => {
-						const scriptPath = join(opts.repositoryPath, c.file);
+						const scriptPath = join(opts.workspacePath, c.file);
 						return c.platform === "unix" && existsSync(scriptPath);
 					})
 				: null;
@@ -1174,7 +1155,7 @@ export class GitService {
 		const scriptToRun = available || fallback;
 		if (!scriptToRun) return;
 
-		const scriptPath = join(opts.repositoryPath, scriptToRun.file);
+		const scriptPath = join(opts.workspacePath, scriptToRun.file);
 		await this.runHookScript({
 			scriptPath,
 			hook: opts.hook,

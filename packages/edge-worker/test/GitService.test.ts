@@ -469,6 +469,135 @@ describe("GitService", () => {
 		});
 	});
 
+	describe("createGitWorktree - repo setup hook discovery", () => {
+		const setupSuccessfulWorktreeCreate = () => {
+			mockExecSync.mockImplementation((cmd: any) => {
+				const cmdStr = String(cmd);
+				if (cmdStr === "git rev-parse --git-dir") {
+					return Buffer.from(".git\n");
+				}
+				if (cmdStr === "git worktree list --porcelain") {
+					return "";
+				}
+				if (
+					cmdStr.includes(
+						'git rev-parse --verify "cyrustester/eng-97-fix-shader"',
+					)
+				) {
+					throw new Error("branch not found");
+				}
+				if (cmdStr.includes("git fetch origin")) {
+					return Buffer.from("");
+				}
+				if (cmdStr.includes("git ls-remote")) {
+					return Buffer.from("abc123\trefs/heads/main\n");
+				}
+				if (cmdStr.includes("git worktree add")) {
+					return Buffer.from("");
+				}
+				if (cmdStr.includes("cyrus-setup.sh")) {
+					return Buffer.from("");
+				}
+				return Buffer.from("");
+			});
+		};
+
+		it("runs setup from the worktree when the persistent checkout lacks cyrus-setup.sh", async () => {
+			const issue = makeIssue();
+			const repository = makeRepository();
+			setupSuccessfulWorktreeCreate();
+			mockExistsSync.mockImplementation((path: any) => {
+				const p = String(path);
+				if (p === "/home/user/repo/cyrus-setup.sh") return false;
+				if (p === "/home/user/.cyrus/worktrees/ENG-97/cyrus-setup.sh")
+					return true;
+				return false;
+			});
+			mockStatSync.mockImplementation((path: any) => {
+				if (
+					String(path) === "/home/user/.cyrus/worktrees/ENG-97/cyrus-setup.sh"
+				) {
+					return { mode: 0o755, isFile: () => false } as any;
+				}
+				return { isFile: () => false } as any;
+			});
+
+			const result = await gitService.createGitWorktree(issue, [repository]);
+
+			expect(result.isGitWorktree).toBe(true);
+			expect(mockExecSync).toHaveBeenCalledWith(
+				'bash "/home/user/.cyrus/worktrees/ENG-97/cyrus-setup.sh"',
+				expect.objectContaining({
+					cwd: "/home/user/.cyrus/worktrees/ENG-97",
+					env: expect.objectContaining({
+						LINEAR_ISSUE_ID: "issue-1",
+						LINEAR_ISSUE_IDENTIFIER: "ENG-97",
+						LINEAR_ISSUE_TITLE: "Fix the shader",
+					}),
+					timeout: 5 * 60 * 1000,
+				}),
+			);
+			expect(
+				mockExecSync.mock.calls.some(
+					([cmd]) => String(cmd) === 'bash "/home/user/repo/cyrus-setup.sh"',
+				),
+			).toBe(false);
+		});
+
+		it("runs the worktree setup version when the persistent checkout also has cyrus-setup.sh", async () => {
+			const issue = makeIssue();
+			const repository = makeRepository();
+			setupSuccessfulWorktreeCreate();
+			mockExistsSync.mockImplementation((path: any) => {
+				const p = String(path);
+				if (p === "/home/user/repo/cyrus-setup.sh") return true;
+				if (p === "/home/user/.cyrus/worktrees/ENG-97/cyrus-setup.sh")
+					return true;
+				return false;
+			});
+			mockStatSync.mockImplementation((path: any) => {
+				if (
+					String(path) === "/home/user/.cyrus/worktrees/ENG-97/cyrus-setup.sh"
+				) {
+					return { mode: 0o755, isFile: () => false } as any;
+				}
+				throw new Error(`unexpected stat: ${String(path)}`);
+			});
+
+			await gitService.createGitWorktree(issue, [repository]);
+
+			const setupCommands = mockExecSync.mock.calls
+				.map(([cmd]) => String(cmd))
+				.filter((cmd) => cmd.includes("cyrus-setup.sh"));
+			expect(setupCommands).toEqual([
+				'bash "/home/user/.cyrus/worktrees/ENG-97/cyrus-setup.sh"',
+			]);
+		});
+
+		it("skips repo setup without failing worktree creation when the worktree lacks cyrus-setup.sh", async () => {
+			const issue = makeIssue();
+			const repository = makeRepository();
+			setupSuccessfulWorktreeCreate();
+			mockExistsSync.mockImplementation((path: any) => {
+				const p = String(path);
+				if (p === "/home/user/repo/cyrus-setup.sh") return true;
+				if (p === "/home/user/.cyrus/worktrees/ENG-97/cyrus-setup.sh")
+					return false;
+				return false;
+			});
+
+			const result = await gitService.createGitWorktree(issue, [repository]);
+
+			expect(result.path).toBe("/home/user/.cyrus/worktrees/ENG-97");
+			expect(result.isGitWorktree).toBe(true);
+			expect(
+				mockExecSync.mock.calls.some(([cmd]) =>
+					String(cmd).includes("cyrus-setup.sh"),
+				),
+			).toBe(false);
+		});
+	});
+
 	describe("createGitWorktree - stale worktree detection", () => {
 		it("prunes and recreates worktree when git lists it but directory has no .git file", async () => {
 			const issue = makeIssue();
@@ -802,7 +931,8 @@ describe("GitService", () => {
 				if (p === "/home/user/.cyrus/worktrees/DEF-123") return true;
 				if (p === "/home/user/.cyrus/worktrees/DEF-123/.git") return true;
 				if (p === "/home/user/repos/repo-a") return true;
-				if (p === "/home/user/repos/repo-a/cyrus-teardown.sh") return true;
+				if (p === "/home/user/.cyrus/worktrees/DEF-123/cyrus-teardown.sh")
+					return true;
 				return false;
 			});
 			mockStatSync.mockImplementation((path: any) => {
@@ -810,7 +940,7 @@ describe("GitService", () => {
 				if (p === "/home/user/.cyrus/worktrees/DEF-123/.git") {
 					return { isFile: () => true } as any;
 				}
-				if (p === "/home/user/repos/repo-a/cyrus-teardown.sh") {
+				if (p === "/home/user/.cyrus/worktrees/DEF-123/cyrus-teardown.sh") {
 					return { mode: 0o755, isFile: () => false } as any;
 				}
 				return { isFile: () => false } as any;
@@ -824,7 +954,7 @@ describe("GitService", () => {
 
 			// Should run teardown with cwd set to workspace root (single-repo)
 			expect(mockExecSync).toHaveBeenCalledWith(
-				'bash "/home/user/repos/repo-a/cyrus-teardown.sh"',
+				'bash "/home/user/.cyrus/worktrees/DEF-123/cyrus-teardown.sh"',
 				expect.objectContaining({
 					cwd: "/home/user/.cyrus/worktrees/DEF-123",
 					env: expect.objectContaining({
@@ -865,7 +995,8 @@ describe("GitService", () => {
 				if (p === "/home/user/.cyrus/worktrees/DEF-123") return true;
 				if (p === "/home/user/.cyrus/worktrees/DEF-123/.git") return true;
 				if (p === "/home/user/repos/repo-a") return true;
-				if (p === "/home/user/repos/repo-a/cyrus-teardown.sh") return true;
+				if (p === "/home/user/.cyrus/worktrees/DEF-123/cyrus-teardown.sh")
+					return true;
 				return false;
 			});
 			mockStatSync.mockImplementation((path: any) => {
@@ -873,7 +1004,7 @@ describe("GitService", () => {
 				if (p === "/home/user/.cyrus/worktrees/DEF-123/.git") {
 					return { isFile: () => true } as any;
 				}
-				if (p === "/home/user/repos/repo-a/cyrus-teardown.sh") {
+				if (p === "/home/user/.cyrus/worktrees/DEF-123/cyrus-teardown.sh") {
 					return { mode: 0o755, isFile: () => false } as any;
 				}
 				return { isFile: () => false } as any;
@@ -909,7 +1040,8 @@ describe("GitService", () => {
 				if (p === "/home/user/.cyrus/worktrees/DEF-123") return true;
 				if (p === "/home/user/.cyrus/worktrees/DEF-123/.git") return true;
 				if (p === "/home/user/repos/repo-a") return true;
-				if (p === "/home/user/repos/repo-a/cyrus-teardown.sh") return true;
+				if (p === "/home/user/.cyrus/worktrees/DEF-123/cyrus-teardown.sh")
+					return true;
 				return false;
 			});
 			mockStatSync.mockImplementation((path: any) => {
@@ -917,7 +1049,7 @@ describe("GitService", () => {
 				if (p === "/home/user/.cyrus/worktrees/DEF-123/.git") {
 					return { isFile: () => true } as any;
 				}
-				if (p === "/home/user/repos/repo-a/cyrus-teardown.sh") {
+				if (p === "/home/user/.cyrus/worktrees/DEF-123/cyrus-teardown.sh") {
 					return { mode: 0o644, isFile: () => false } as any;
 				}
 				return { isFile: () => false } as any;
@@ -964,8 +1096,14 @@ describe("GitService", () => {
 					return true;
 				if (p === "/home/user/repos/repo-a") return true;
 				if (p === "/home/user/repos/repo-b") return true;
-				if (p === "/home/user/repos/repo-a/cyrus-teardown.sh") return true;
-				if (p === "/home/user/repos/repo-b/cyrus-teardown.sh") return true;
+				if (
+					p === "/home/user/.cyrus/worktrees/DEF-123/repo-a/cyrus-teardown.sh"
+				)
+					return true;
+				if (
+					p === "/home/user/.cyrus/worktrees/DEF-123/repo-b/cyrus-teardown.sh"
+				)
+					return true;
 				return false;
 			});
 			mockStatSync.mockImplementation((path: any) => {
@@ -1005,13 +1143,13 @@ describe("GitService", () => {
 			});
 
 			expect(mockExecSync).toHaveBeenCalledWith(
-				'bash "/home/user/repos/repo-a/cyrus-teardown.sh"',
+				'bash "/home/user/.cyrus/worktrees/DEF-123/repo-a/cyrus-teardown.sh"',
 				expect.objectContaining({
 					cwd: "/home/user/.cyrus/worktrees/DEF-123/repo-a",
 				}),
 			);
 			expect(mockExecSync).toHaveBeenCalledWith(
-				'bash "/home/user/repos/repo-b/cyrus-teardown.sh"',
+				'bash "/home/user/.cyrus/worktrees/DEF-123/repo-b/cyrus-teardown.sh"',
 				expect.objectContaining({
 					cwd: "/home/user/.cyrus/worktrees/DEF-123/repo-b",
 				}),
@@ -1030,7 +1168,10 @@ describe("GitService", () => {
 				if (p === "/home/user/repos/repo-a") return true;
 				if (p === "/home/user/repos/repo-b") return true;
 				// Only repo-a has a teardown script
-				if (p === "/home/user/repos/repo-a/cyrus-teardown.sh") return true;
+				if (
+					p === "/home/user/.cyrus/worktrees/DEF-123/repo-a/cyrus-teardown.sh"
+				)
+					return true;
 				return false;
 			});
 			mockStatSync.mockImplementation((path: any) => {
@@ -1041,7 +1182,9 @@ describe("GitService", () => {
 				) {
 					return { isFile: () => true } as any;
 				}
-				if (p === "/home/user/repos/repo-a/cyrus-teardown.sh") {
+				if (
+					p === "/home/user/.cyrus/worktrees/DEF-123/repo-a/cyrus-teardown.sh"
+				) {
 					return { mode: 0o755, isFile: () => false } as any;
 				}
 				return { isFile: () => false } as any;
@@ -1073,7 +1216,9 @@ describe("GitService", () => {
 				.map((c) => String(c[0]))
 				.filter((c) => c.includes("cyrus-teardown.sh"));
 			expect(teardownCalls).toHaveLength(1);
-			expect(teardownCalls[0]).toContain("/home/user/repos/repo-a/");
+			expect(teardownCalls[0]).toContain(
+				"/home/user/.cyrus/worktrees/DEF-123/repo-a/",
+			);
 		});
 
 		it("multi-repo: one teardown failing does not skip the other or block rmSync", async () => {
@@ -1087,8 +1232,14 @@ describe("GitService", () => {
 					return true;
 				if (p === "/home/user/repos/repo-a") return true;
 				if (p === "/home/user/repos/repo-b") return true;
-				if (p === "/home/user/repos/repo-a/cyrus-teardown.sh") return true;
-				if (p === "/home/user/repos/repo-b/cyrus-teardown.sh") return true;
+				if (
+					p === "/home/user/.cyrus/worktrees/DEF-123/repo-a/cyrus-teardown.sh"
+				)
+					return true;
+				if (
+					p === "/home/user/.cyrus/worktrees/DEF-123/repo-b/cyrus-teardown.sh"
+				)
+					return true;
 				return false;
 			});
 			mockStatSync.mockImplementation((path: any) => {
@@ -1120,7 +1271,11 @@ describe("GitService", () => {
 			] as any);
 
 			mockExecSync.mockImplementation((cmd: any) => {
-				if (String(cmd).includes("/home/user/repos/repo-a/cyrus-teardown.sh")) {
+				if (
+					String(cmd).includes(
+						"/home/user/.cyrus/worktrees/DEF-123/repo-a/cyrus-teardown.sh",
+					)
+				) {
 					throw new Error("repo-a teardown failed");
 				}
 				return Buffer.from("");
@@ -1135,7 +1290,7 @@ describe("GitService", () => {
 
 			// repo-b's teardown was still attempted
 			expect(mockExecSync).toHaveBeenCalledWith(
-				'bash "/home/user/repos/repo-b/cyrus-teardown.sh"',
+				'bash "/home/user/.cyrus/worktrees/DEF-123/repo-b/cyrus-teardown.sh"',
 				expect.anything(),
 			);
 			// rmSync still ran
@@ -1153,7 +1308,8 @@ describe("GitService", () => {
 				if (p === "/home/user/.cyrus/worktrees/DEF-123") return true;
 				if (p === "/home/user/.cyrus/worktrees/DEF-123/.git") return true;
 				if (p === "/home/user/repos/repo-a") return true;
-				if (p === "/home/user/repos/repo-a/cyrus-teardown.sh") return true;
+				if (p === "/home/user/.cyrus/worktrees/DEF-123/cyrus-teardown.sh")
+					return true;
 				return false;
 			});
 			mockExecSync.mockReturnValue(Buffer.from(""));
@@ -1172,7 +1328,8 @@ describe("GitService", () => {
 				if (p === "/home/user/.cyrus/worktrees/DEF-123") return true;
 				if (p === "/home/user/.cyrus/worktrees/DEF-123/.git") return true;
 				if (p === "/home/user/repos/repo-a") return true;
-				if (p === "/home/user/repos/repo-a/cyrus-teardown.sh") return true;
+				if (p === "/home/user/.cyrus/worktrees/DEF-123/cyrus-teardown.sh")
+					return true;
 				return false;
 			});
 			mockStatSync.mockImplementation((path: any) => {
@@ -1180,7 +1337,7 @@ describe("GitService", () => {
 				if (p === "/home/user/.cyrus/worktrees/DEF-123/.git") {
 					return { isFile: () => true } as any;
 				}
-				if (p === "/home/user/repos/repo-a/cyrus-teardown.sh") {
+				if (p === "/home/user/.cyrus/worktrees/DEF-123/cyrus-teardown.sh") {
 					return { mode: 0o755, isFile: () => false } as any;
 				}
 				return { isFile: () => false } as any;
