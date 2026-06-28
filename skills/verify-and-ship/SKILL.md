@@ -1,6 +1,6 @@
 ---
 name: verify-and-ship
-description: Run all quality checks (tests, lint, typecheck), fix failures, update the changelog, commit, push, and create/update the pull request or merge request.
+description: Runs all quality checks (tests, lint, typecheck), fixes failures, updates the changelog, commits, pushes, and creates or updates the pull/merge request. Use after implementation or debug whenever code changed, before summarize. Not needed for questions or research (use investigate then summarize).
 ---
 
 # Verify and Ship

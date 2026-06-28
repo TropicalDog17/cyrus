@@ -1,6 +1,6 @@
 ---
 name: summarize
-description: Format a final summary message for Linear. Your output is automatically streamed to the Linear agent session — just format it well, do not post it yourself.
+description: Formats a final summary of completed work for Linear. Use as the last step of any workflow to narrate results. Output is automatically streamed to the Linear agent session — format it well; do not post it with any tool.
 ---
 
 # Summarize

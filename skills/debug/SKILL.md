@@ -1,6 +1,6 @@
 ---
 name: debug
-description: Full debugging workflow — reproduce the bug with a failing test, perform root cause analysis, then implement a minimal fix.
+description: Debugs a reported issue — reproduces the bug with a failing test, performs root cause analysis, then implements a minimal fix. Use when an issue reports a bug, error, crash, or regression. Not for new features or refactors (use implementation) or questions (use investigate).
 ---
 
 # Debug

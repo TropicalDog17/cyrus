@@ -4,7 +4,8 @@ This changelog documents internal development changes, refactors, tooling update
 
 ## [Unreleased]
 
-_No internal-only changes._
+### Changed
+- Rewrote the `description` frontmatter of the five default workflow skills (`debug`, `implementation`, `investigate`, `summarize`, `verify-and-ship`) per Anthropic's skill-authoring best practices: third-person voice, explicit "use when" triggers, and negative triggers (when not to use / which skill to use instead) to improve skill selection.
 
 ## [0.2.66] - 2026-06-19
 

@@ -1,6 +1,6 @@
 ---
 name: investigate
-description: Research the codebase to answer questions. Search for relevant files, gather context, and provide clear answers.
+description: Researches the codebase to answer a question — searches for relevant files, gathers context, and provides a clear, direct answer. Use for questions and research requests where no code change is expected. Not for making code changes (use implementation or debug).
 ---
 
 # Investigate

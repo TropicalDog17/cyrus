@@ -1,6 +1,6 @@
 ---
 name: implementation
-description: Implement the requested changes. Write production-ready code, follow existing patterns, and run tests to verify your work.
+description: Implements requested code changes — writes production-ready code that follows existing patterns and runs tests to verify the work. Use when an issue requests a feature, refactor, or other code change, or to address PR review feedback. Not for bug reports (use debug) or questions (use investigate).
 ---
 
 # Implementation
