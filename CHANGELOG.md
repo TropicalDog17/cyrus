@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Skills committed to a repository are now usable again. Previously, a repo skill (`.claude/skills/<name>/`) added after the repository was registered with Cyrus would load in the session but fail when invoked with "Skill `<name>` is not in this session's skills allowlist". The allow-list is now built from the session worktree — the same place the agent loads skill definitions from — instead of a stale snapshot of the base checkout. ([#1336](https://github.com/cyrusagents/cyrus/issues/1336))
+
 ## [0.2.66] - 2026-06-19
 
 ### Security
