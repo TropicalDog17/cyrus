@@ -1765,6 +1765,44 @@ export class AgentSessionManager extends EventEmitter {
 	}
 
 	/**
+	 * Reconcile sessions that were mid-flight when the process died.
+	 *
+	 * Runners live only in memory and are never serialized, so every session
+	 * restored from disk comes back with no `agentRunner`. A session persisted
+	 * as `Active` (working) or `AwaitingInput` (waiting on a question) is
+	 * therefore a zombie: it still claims to be live, `getActiveSessions()`
+	 * counts it, but its runner is gone — a stop signal is a no-op and the
+	 * Linear issue shows a working indicator that never resolves.
+	 *
+	 * Transition those sessions to `Error` (interrupted) so local state matches
+	 * reality. The `!agentRunner` guard makes this safe to call at any time:
+	 * a session that already has a live runner is left untouched, so calling
+	 * this after startup (once runners exist) can never kill a running session.
+	 *
+	 * Returns the ids of the sessions that were reconciled so the caller can
+	 * notify the user (e.g. post an "interrupted, comment to resume" activity).
+	 */
+	markInterruptedSessions(): string[] {
+		const interrupted: string[] = [];
+		for (const [sessionId, session] of this.sessions.entries()) {
+			const isNonTerminal =
+				session.status === AgentSessionStatus.Active ||
+				session.status === AgentSessionStatus.AwaitingInput;
+			if (isNonTerminal && !session.agentRunner) {
+				session.status = AgentSessionStatus.Error;
+				session.updatedAt = Date.now();
+				interrupted.push(sessionId);
+			}
+		}
+		if (interrupted.length > 0) {
+			this.logger.info(
+				`Reconciled ${interrupted.length} interrupted session(s) with no runner to Error`,
+			);
+		}
+		return interrupted;
+	}
+
+	/**
 	 * Post a thought about the model being used
 	 */
 	private async postModelNotificationThought(

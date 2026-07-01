@@ -628,6 +628,11 @@ export class EdgeWorker extends EventEmitter {
 		// Load persisted state for each repository
 		await this.loadPersistedState();
 
+		// Reconcile sessions that were mid-flight when we last shut down. Their
+		// in-memory runners are gone, so they'd otherwise linger as zombies that
+		// show a working indicator in Linear forever and ignore stop signals.
+		await this.reconcileInterruptedSessions();
+
 		// Pre-warm the 30 most recent Claude sessions in the background
 		// so their first query after restart has near-zero cold-start latency.
 		// Disabled by default; opt in with CYRUS_ENABLE_WARM_SESSIONS=1.
@@ -6737,6 +6742,46 @@ ${input.userComment}
 		} catch (error) {
 			this.logger.error(`Failed to load persisted EdgeWorker state:`, error);
 		}
+	}
+
+	/**
+	 * After restoring persisted state, transition any session that was still
+	 * "working" or "awaiting input" when we shut down to a terminal error
+	 * state (its runner did not survive the restart), tell the user, and
+	 * persist the correction so it can't resurrect on the next boot.
+	 */
+	private async reconcileInterruptedSessions(): Promise<void> {
+		const interrupted = this.agentSessionManager.markInterruptedSessions();
+		if (interrupted.length === 0) {
+			return;
+		}
+
+		// Best-effort user notice. A restart is not a session error per se — the
+		// transcript is preserved and a follow-up comment resumes it — so phrase
+		// it as recoverable. Failures here (network, missing sink) must never
+		// block startup.
+		await Promise.all(
+			interrupted.map(async (sessionId) => {
+				try {
+					await this.agentSessionManager.createErrorActivity(
+						sessionId,
+						"This session was interrupted when the agent restarted and did not finish. Comment on this issue to resume where it left off.",
+					);
+				} catch (error) {
+					this.logger.warn(
+						`Failed to post interruption notice for session ${sessionId}:`,
+						error,
+					);
+				}
+			}),
+		);
+
+		// Persist the reconciled (Error) statuses so a crash before the next
+		// natural save doesn't bring the zombies back.
+		await this.savePersistedState();
+		this.logger.info(
+			`Reconciled ${interrupted.length} interrupted session(s) after restart`,
+		);
 	}
 
 	/**
