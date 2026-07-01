@@ -5294,7 +5294,20 @@ ${taskSection}`;
 	 * should contribute to the skill whitelist for a session.
 	 *
 	 * - Multi-repo sessions: every sub-worktree in `workspace.repoPaths`.
-	 * - Single-repo / GitHub-mention sessions: the active repository's path.
+	 * - Single-repo / GitHub-mention sessions: the session worktree, which is
+	 *   the same path the SDK uses as cwd to load skill definitions.
+	 *
+	 * The single-repo path MUST be the worktree (`session.workspace.path`), not
+	 * `repository.repositoryPath`. Cyrus never advances the base clone's working
+	 * tree (it only `git fetch`es and cuts each worktree from `origin/<base>`),
+	 * so the base clone is a frozen snapshot from whenever the repo was
+	 * registered. Globbing its `.claude/skills/` produces a stale allow-list,
+	 * while the SDK loads skill definitions from the fresh worktree — any skill
+	 * committed after registration loads but is rejected as "not in this
+	 * session's skills allowlist". Keying off the worktree keeps the allow-list
+	 * source and the definition source identical. See cyrusagents/cyrus#1336.
+	 * (v0.2.66 / #1332 fixed the same base-clone-vs-worktree bug for
+	 * cyrus-setup.sh/teardown hooks; skills were missed.)
 	 */
 	private resolveSkillRepoPaths(
 		repository: RepositoryConfig,
@@ -5308,6 +5321,10 @@ ${taskSection}`;
 			if (paths.length > 0) {
 				return [...new Set(paths)];
 			}
+		}
+		const worktreePath = session?.workspace?.path;
+		if (typeof worktreePath === "string" && worktreePath.length > 0) {
+			return [worktreePath];
 		}
 		return [repository.repositoryPath];
 	}
