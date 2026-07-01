@@ -13,6 +13,7 @@ import type {
 } from "cyrus-claude-runner";
 import {
 	buildBaseSessionEnv,
+	buildHomeDirectoryDisallowedTools,
 	ClaudeRunner,
 	HttpSessionStore,
 	normalizeMcpHttpTransport,
@@ -6766,6 +6767,13 @@ ${input.userComment}
 
 		const { startup } = await import("@anthropic-ai/claude-agent-sdk");
 
+		// Resolve the skill plugins once — they are global (same for every
+		// session), so there is no need to re-resolve per candidate. Without
+		// these, warm-resumed sessions get the Skill tool but an empty skill set,
+		// leaving them strictly weaker than a cold session (which resolves skills
+		// in buildAgentRunnerConfig()).
+		const warmPlugins = await this.skillsPluginResolver.resolve();
+
 		await Promise.all(
 			candidates.map(async (session) => {
 				try {
@@ -6831,7 +6839,49 @@ ${input.userComment}
 					// Without these, startup() inherits the user's defaultMode ("default"),
 					// which causes macOS permission prompts for file writes.
 					const allowedTools = this.buildAllowedTools(repo);
-					const disallowedTools = this.buildDisallowedTools(repo);
+
+					// Reconstruct the home-directory Read denials that ClaudeRunner.start()
+					// computes at query time. Warm sessions run warmSession.query()
+					// directly and never see those query-time options, so without
+					// re-deriving them here a resumed session could read ~/.ssh, ~/.aws,
+					// etc. Mirror the live allowedDirectories composition so the
+					// attachments/repo/git dirs stay readable.
+					const workspaceFolderName = basename(session.workspace.path);
+					const attachmentsDir = join(
+						this.cyrusHome,
+						workspaceFolderName,
+						"attachments",
+					);
+					const allowedDirectories = [
+						...new Set([
+							attachmentsDir,
+							repo.repositoryPath,
+							session.workspace.path,
+							...this.gitService.getGitMetadataDirectoriesForWorkspace(
+								session.workspace,
+							),
+						]),
+					];
+					const disallowedTools = [
+						...new Set([
+							...this.buildDisallowedTools(repo),
+							...buildHomeDirectoryDisallowedTools(
+								session.workspace.path,
+								allowedDirectories,
+							),
+						]),
+					];
+
+					// Skills for this session's repo/worktree — mirrors the live
+					// resolveSkillsConfig() path so warm sessions have the same skill
+					// set (and skill allow-list) as cold ones.
+					const skills = await this.skillsPluginResolver.discoverSkillNames(
+						warmPlugins,
+						{
+							repositoryId: repo.id,
+							repoPaths: [session.workspace.path],
+						},
+					);
 
 					const warm = await startup({
 						options: {
@@ -6841,6 +6891,8 @@ ${input.userComment}
 							...(Object.keys(mcpServers).length > 0 && { mcpServers }),
 							...(allowedTools.length > 0 && { allowedTools }),
 							...(disallowedTools.length > 0 && { disallowedTools }),
+							...(warmPlugins.length > 0 && { plugins: warmPlugins }),
+							...(skills !== undefined && { skills }),
 							settingSources: ["user", "project", "local"],
 							// CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is intentionally not set here;
 							// see CYPACK-1108 and ClaudeRunner.start() for context.
