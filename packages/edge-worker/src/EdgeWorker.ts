@@ -5230,7 +5230,11 @@ ${taskSection}`;
 	 * Handle Claude session error
 	 * Silently ignores AbortError (user-initiated stop), logs other errors
 	 */
-	private async handleClaudeError(error: Error): Promise<void> {
+	private async handleClaudeError(
+		error: Error,
+		sessionId?: string,
+		repositoryId?: string,
+	): Promise<void> {
 		// AbortError is expected when user stops Claude process, don't log it
 		// Check by name since the SDK's AbortError class may not match our imported definition
 		const isAbortError =
@@ -5244,7 +5248,36 @@ ${taskSection}`;
 		if (isAbortError || isSigterm) {
 			return;
 		}
-		this.logger.error("Unhandled claude error:", error);
+		this.logger.error("Unhandled claude error:", {
+			error,
+			sessionId,
+			repositoryId,
+		});
+
+		// A genuine runner crash (subprocess died, stream errored, non-143 exit)
+		// never produces a `result` message, so `completeSession` never runs.
+		// Without surfacing it here the Linear issue stays "In Progress" with a
+		// dead runner and the user sees nothing. When we know which session
+		// crashed, tell the user and transition it to a terminal error state.
+		if (!sessionId) {
+			return;
+		}
+		try {
+			await this.agentSessionManager.failSession(
+				sessionId,
+				`The agent session ended unexpectedly and could not continue.\n\n\`${error.message}\`\n\nComment on this issue to start a new session.`,
+			);
+		} catch (failError) {
+			this.logger.error("Failed to surface runner crash to Linear:", failError);
+		}
+
+		// Reclaim the pre-warmed slot so a crashed session doesn't leak a warm
+		// instance or hand a stale one to a later resume.
+		this.warmInstances.delete(sessionId);
+
+		// Persist the Error transition so a restart doesn't resurrect a zombie
+		// Active session with no runner.
+		await this.savePersistedState();
 	}
 
 	/**
@@ -6514,7 +6547,8 @@ ${input.userComment}
 			onMessage: (message: SDKMessage) => {
 				this.handleClaudeMessage(sessionId, message, repository.id);
 			},
-			onError: (error: Error) => this.handleClaudeError(error),
+			onError: (error: Error) =>
+				this.handleClaudeError(error, sessionId, repository.id),
 			createAskUserQuestionCallback: (sid, wid) =>
 				this.createAskUserQuestionCallback(sid, wid)!,
 			requireLinearWorkspaceId,
