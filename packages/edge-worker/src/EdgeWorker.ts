@@ -13,6 +13,7 @@ import type {
 } from "cyrus-claude-runner";
 import {
 	buildBaseSessionEnv,
+	buildHomeDirectoryDisallowedTools,
 	ClaudeRunner,
 	HttpSessionStore,
 	normalizeMcpHttpTransport,
@@ -626,6 +627,11 @@ export class EdgeWorker extends EventEmitter {
 
 		// Load persisted state for each repository
 		await this.loadPersistedState();
+
+		// Reconcile sessions that were mid-flight when we last shut down. Their
+		// in-memory runners are gone, so they'd otherwise linger as zombies that
+		// show a working indicator in Linear forever and ignore stop signals.
+		await this.reconcileInterruptedSessions();
 
 		// Pre-warm the 30 most recent Claude sessions in the background
 		// so their first query after restart has near-zero cold-start latency.
@@ -5229,7 +5235,11 @@ ${taskSection}`;
 	 * Handle Claude session error
 	 * Silently ignores AbortError (user-initiated stop), logs other errors
 	 */
-	private async handleClaudeError(error: Error): Promise<void> {
+	private async handleClaudeError(
+		error: Error,
+		sessionId?: string,
+		repositoryId?: string,
+	): Promise<void> {
 		// AbortError is expected when user stops Claude process, don't log it
 		// Check by name since the SDK's AbortError class may not match our imported definition
 		const isAbortError =
@@ -5243,7 +5253,36 @@ ${taskSection}`;
 		if (isAbortError || isSigterm) {
 			return;
 		}
-		this.logger.error("Unhandled claude error:", error);
+		this.logger.error("Unhandled claude error:", {
+			error,
+			sessionId,
+			repositoryId,
+		});
+
+		// A genuine runner crash (subprocess died, stream errored, non-143 exit)
+		// never produces a `result` message, so `completeSession` never runs.
+		// Without surfacing it here the Linear issue stays "In Progress" with a
+		// dead runner and the user sees nothing. When we know which session
+		// crashed, tell the user and transition it to a terminal error state.
+		if (!sessionId) {
+			return;
+		}
+		try {
+			await this.agentSessionManager.failSession(
+				sessionId,
+				`The agent session ended unexpectedly and could not continue.\n\n\`${error.message}\`\n\nComment on this issue to start a new session.`,
+			);
+		} catch (failError) {
+			this.logger.error("Failed to surface runner crash to Linear:", failError);
+		}
+
+		// Reclaim the pre-warmed slot so a crashed session doesn't leak a warm
+		// instance or hand a stale one to a later resume.
+		this.warmInstances.delete(sessionId);
+
+		// Persist the Error transition so a restart doesn't resurrect a zombie
+		// Active session with no runner.
+		await this.savePersistedState();
 	}
 
 	/**
@@ -6513,7 +6552,8 @@ ${input.userComment}
 			onMessage: (message: SDKMessage) => {
 				this.handleClaudeMessage(sessionId, message, repository.id);
 			},
-			onError: (error: Error) => this.handleClaudeError(error),
+			onError: (error: Error) =>
+				this.handleClaudeError(error, sessionId, repository.id),
 			createAskUserQuestionCallback: (sid, wid) =>
 				this.createAskUserQuestionCallback(sid, wid)!,
 			requireLinearWorkspaceId,
@@ -6705,6 +6745,46 @@ ${input.userComment}
 	}
 
 	/**
+	 * After restoring persisted state, transition any session that was still
+	 * "working" or "awaiting input" when we shut down to a terminal error
+	 * state (its runner did not survive the restart), tell the user, and
+	 * persist the correction so it can't resurrect on the next boot.
+	 */
+	private async reconcileInterruptedSessions(): Promise<void> {
+		const interrupted = this.agentSessionManager.markInterruptedSessions();
+		if (interrupted.length === 0) {
+			return;
+		}
+
+		// Best-effort user notice. A restart is not a session error per se — the
+		// transcript is preserved and a follow-up comment resumes it — so phrase
+		// it as recoverable. Failures here (network, missing sink) must never
+		// block startup.
+		await Promise.all(
+			interrupted.map(async (sessionId) => {
+				try {
+					await this.agentSessionManager.createErrorActivity(
+						sessionId,
+						"This session was interrupted when the agent restarted and did not finish. Comment on this issue to resume where it left off.",
+					);
+				} catch (error) {
+					this.logger.warn(
+						`Failed to post interruption notice for session ${sessionId}:`,
+						error,
+					);
+				}
+			}),
+		);
+
+		// Persist the reconciled (Error) statuses so a crash before the next
+		// natural save doesn't bring the zombies back.
+		await this.savePersistedState();
+		this.logger.info(
+			`Reconciled ${interrupted.length} interrupted session(s) after restart`,
+		);
+	}
+
+	/**
 	 * Whether the warm-session feature is enabled.
 	 *
 	 * Warm sessions are an opt-in optimization that pre-spawns Claude Code
@@ -6765,6 +6845,13 @@ ${input.userComment}
 		);
 
 		const { startup } = await import("@anthropic-ai/claude-agent-sdk");
+
+		// Resolve the skill plugins once — they are global (same for every
+		// session), so there is no need to re-resolve per candidate. Without
+		// these, warm-resumed sessions get the Skill tool but an empty skill set,
+		// leaving them strictly weaker than a cold session (which resolves skills
+		// in buildAgentRunnerConfig()).
+		const warmPlugins = await this.skillsPluginResolver.resolve();
 
 		await Promise.all(
 			candidates.map(async (session) => {
@@ -6831,7 +6918,49 @@ ${input.userComment}
 					// Without these, startup() inherits the user's defaultMode ("default"),
 					// which causes macOS permission prompts for file writes.
 					const allowedTools = this.buildAllowedTools(repo);
-					const disallowedTools = this.buildDisallowedTools(repo);
+
+					// Reconstruct the home-directory Read denials that ClaudeRunner.start()
+					// computes at query time. Warm sessions run warmSession.query()
+					// directly and never see those query-time options, so without
+					// re-deriving them here a resumed session could read ~/.ssh, ~/.aws,
+					// etc. Mirror the live allowedDirectories composition so the
+					// attachments/repo/git dirs stay readable.
+					const workspaceFolderName = basename(session.workspace.path);
+					const attachmentsDir = join(
+						this.cyrusHome,
+						workspaceFolderName,
+						"attachments",
+					);
+					const allowedDirectories = [
+						...new Set([
+							attachmentsDir,
+							repo.repositoryPath,
+							session.workspace.path,
+							...this.gitService.getGitMetadataDirectoriesForWorkspace(
+								session.workspace,
+							),
+						]),
+					];
+					const disallowedTools = [
+						...new Set([
+							...this.buildDisallowedTools(repo),
+							...buildHomeDirectoryDisallowedTools(
+								session.workspace.path,
+								allowedDirectories,
+							),
+						]),
+					];
+
+					// Skills for this session's repo/worktree — mirrors the live
+					// resolveSkillsConfig() path so warm sessions have the same skill
+					// set (and skill allow-list) as cold ones.
+					const skills = await this.skillsPluginResolver.discoverSkillNames(
+						warmPlugins,
+						{
+							repositoryId: repo.id,
+							repoPaths: [session.workspace.path],
+						},
+					);
 
 					const warm = await startup({
 						options: {
@@ -6841,6 +6970,8 @@ ${input.userComment}
 							...(Object.keys(mcpServers).length > 0 && { mcpServers }),
 							...(allowedTools.length > 0 && { allowedTools }),
 							...(disallowedTools.length > 0 && { disallowedTools }),
+							...(warmPlugins.length > 0 && { plugins: warmPlugins }),
+							...(skills !== undefined && { skills }),
 							settingSources: ["user", "project", "local"],
 							// CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is intentionally not set here;
 							// see CYPACK-1108 and ClaudeRunner.start() for context.

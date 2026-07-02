@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -86,6 +86,13 @@ export class PersistenceManager {
 	private persistencePath: string;
 	private logger: ILogger;
 
+	// Single-flight write coordination. Concurrent callers coalesce onto the
+	// latest state so overlapping fire-and-forget saves can never interleave
+	// writes to the same file (which previously risked a corrupt/partial file).
+	private pendingState: SerializableEdgeWorkerState | undefined;
+	private writeChain: Promise<void> = Promise.resolve();
+	private writing = false;
+
 	constructor(persistencePath?: string, logger?: ILogger) {
 		this.persistencePath =
 			persistencePath || join(homedir(), ".cyrus", "state");
@@ -107,22 +114,84 @@ export class PersistenceManager {
 	}
 
 	/**
-	 * Save EdgeWorker state to disk (single file for all repositories)
+	 * Save EdgeWorker state to disk (single file for all repositories).
+	 *
+	 * Writes are serialized through a single-flight queue and coalesced to the
+	 * most recently requested state, so overlapping callers (including the many
+	 * fire-and-forget savePersistedState() call sites) can never interleave and
+	 * corrupt the file. Each write is atomic: the payload is written to a temp
+	 * file, fsync'd, the previous good file is rotated to `.bak`, then the temp
+	 * file is atomically renamed into place. A crash therefore leaves either the
+	 * previous complete file or the new complete file — never a truncated one.
 	 */
 	async saveEdgeWorkerState(state: SerializableEdgeWorkerState): Promise<void> {
+		this.pendingState = state;
+		if (!this.writing) {
+			this.writing = true;
+			this.writeChain = this.drainWrites();
+		}
+		return this.writeChain;
+	}
+
+	/**
+	 * Drain all pending state writes, one at a time, coalescing to the latest.
+	 */
+	private async drainWrites(): Promise<void> {
 		try {
-			await this.ensurePersistenceDirectory();
-			const stateFile = this.getEdgeWorkerStateFilePath();
-			const stateData = {
-				version: PERSISTENCE_VERSION,
-				savedAt: new Date().toISOString(),
-				state,
-			};
-			await writeFile(stateFile, JSON.stringify(stateData, null, 2), "utf8");
+			while (this.pendingState !== undefined) {
+				const state = this.pendingState;
+				this.pendingState = undefined;
+				await this.writeStateAtomic(state);
+			}
 		} catch (error) {
 			this.logger.error("Failed to save EdgeWorker state:", error);
 			throw error;
+		} finally {
+			this.writing = false;
 		}
+	}
+
+	/**
+	 * Atomically write a single state snapshot to disk (temp + fsync + rename),
+	 * rotating the previous good file to `.bak` for crash recovery.
+	 */
+	private async writeStateAtomic(
+		state: SerializableEdgeWorkerState,
+	): Promise<void> {
+		await this.ensurePersistenceDirectory();
+		const stateFile = this.getEdgeWorkerStateFilePath();
+		const tmpFile = `${stateFile}.tmp`;
+		const bakFile = `${stateFile}.bak`;
+		const payload = JSON.stringify(
+			{
+				version: PERSISTENCE_VERSION,
+				savedAt: new Date().toISOString(),
+				state,
+			},
+			null,
+			2,
+		);
+
+		// Write + fsync to a temp file so the bytes are durable before we swap.
+		const handle = await open(tmpFile, "w");
+		try {
+			await handle.writeFile(payload, "utf8");
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
+
+		// Rotate the current good file to `.bak` (atomic), then swap in the new
+		// one (atomic). If a crash lands between these two renames, loadState()
+		// falls back to `.bak`, so no complete snapshot is ever lost.
+		if (existsSync(stateFile)) {
+			try {
+				await rename(stateFile, bakFile);
+			} catch (error) {
+				this.logger.warn("Failed to rotate state backup:", error);
+			}
+		}
+		await rename(tmpFile, stateFile);
 	}
 
 	/**
@@ -132,11 +201,28 @@ export class PersistenceManager {
 	async loadEdgeWorkerState(): Promise<SerializableEdgeWorkerState | null> {
 		try {
 			const stateFile = this.getEdgeWorkerStateFilePath();
-			if (!existsSync(stateFile)) {
-				return null;
+			const bakFile = `${stateFile}.bak`;
+
+			// Try the primary file first; on missing/corrupt fall back to `.bak`.
+			// This covers both a truncated primary and the narrow window between
+			// the two renames in writeStateAtomic() where only `.bak` exists.
+			let stateData = this.tryReadStateFile(stateFile);
+			if (stateData === undefined) {
+				const recovered = this.tryReadStateFile(bakFile);
+				if (recovered !== undefined) {
+					this.logger.warn(
+						"Primary state file unreadable; recovered from .bak backup",
+					);
+					stateData = recovered;
+				}
 			}
 
-			const stateData = JSON.parse(await readFile(stateFile, "utf8"));
+			// undefined => primary absent AND no usable backup. If the primary
+			// file is genuinely absent this is a fresh install (quiet null); if
+			// it existed but was corrupt, tryReadStateFile already logged an error.
+			if (stateData === undefined) {
+				return null;
+			}
 
 			// Validate state structure exists
 			if (!stateData.state) {
@@ -324,6 +410,39 @@ export class PersistenceManager {
 	}
 
 	/**
+	 * Read and JSON-parse a state file.
+	 *
+	 * Returns the parsed object, or `undefined` if the file is absent, empty, or
+	 * corrupt. A present-but-unparseable file is logged at error level (so a real
+	 * corruption event is visible), while an absent or empty file is treated as
+	 * "no state" without noise — distinguishing corruption from a fresh/cleared
+	 * install, which the previous implementation could not do.
+	 */
+	private tryReadStateFile(
+		path: string,
+	): { version?: string; state?: any } | undefined {
+		if (!existsSync(path)) {
+			return undefined;
+		}
+		let raw: string;
+		try {
+			raw = readFileSync(path, "utf8");
+		} catch (error) {
+			this.logger.error(`Failed to read state file ${path}:`, error);
+			return undefined;
+		}
+		if (raw.trim() === "") {
+			return undefined; // intentionally cleared / empty file
+		}
+		try {
+			return JSON.parse(raw);
+		} catch (error) {
+			this.logger.error(`State file ${path} is corrupt (invalid JSON):`, error);
+			return undefined;
+		}
+	}
+
+	/**
 	 * Check if EdgeWorker state file exists
 	 */
 	hasStateFile(): boolean {
@@ -331,16 +450,22 @@ export class PersistenceManager {
 	}
 
 	/**
-	 * Delete EdgeWorker state file
+	 * Delete EdgeWorker state file (and its temp/backup siblings).
+	 *
+	 * The siblings must go too: otherwise loadEdgeWorkerState() would recover the
+	 * just-deleted state from `.bak`, resurrecting sessions the caller meant to
+	 * clear.
 	 */
 	async deleteStateFile(): Promise<void> {
-		try {
-			const stateFile = this.getEdgeWorkerStateFilePath();
-			if (existsSync(stateFile)) {
-				await writeFile(stateFile, "", "utf8"); // Clear file instead of deleting
+		const stateFile = this.getEdgeWorkerStateFilePath();
+		for (const file of [stateFile, `${stateFile}.tmp`, `${stateFile}.bak`]) {
+			try {
+				if (existsSync(file)) {
+					await unlink(file);
+				}
+			} catch (error) {
+				this.logger.error(`Failed to delete state file ${file}:`, error);
 			}
-		} catch (error) {
-			this.logger.error("Failed to delete EdgeWorker state file:", error);
 		}
 	}
 

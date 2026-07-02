@@ -174,13 +174,19 @@ export class AskUserQuestionHandler {
 			);
 		}
 
-		// Create the options for Linear's select signal
-		// Include an "Other" option to allow free-form input
+		// Create the options for Linear's select signal, one per offered choice.
+		//
+		// We intentionally do NOT append a literal "Other" option. Linear's
+		// select signal returns the chosen option's `value` verbatim, so an
+		// "Other" button could only ever deliver the useless string "Other" —
+		// there is no way to attach the user's typed text to a select option.
+		// Free-form answers are instead handled by the user simply replying with
+		// a comment: any prompted webhook while a question is pending is routed to
+		// handleUserResponse() and its body becomes the answer. We surface that
+		// affordance in the elicitation body below.
 		const options = question.options.map((opt) => ({
 			value: opt.label,
 		}));
-		// Add "Other" option for free-form input
-		options.push({ value: "Other" });
 
 		// Build the elicitation body
 		// Include the question text and option descriptions for context
@@ -188,7 +194,7 @@ export class AskUserQuestionHandler {
 			.map((opt) => `• **${opt.label}**: ${opt.description}`)
 			.join("\n");
 
-		const elicitationBody = `${question.question}\n\n${optionsText}`;
+		const elicitationBody = `${question.question}\n\n${optionsText}\n\n_Select an option above, or reply with your own answer._`;
 
 		// Post elicitation to Linear
 		try {

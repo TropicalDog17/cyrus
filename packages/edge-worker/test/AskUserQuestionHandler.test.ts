@@ -181,7 +181,9 @@ describe("AskUserQuestionHandler", () => {
 			// Give it a moment to post the activity
 			await new Promise((resolve) => setTimeout(resolve, 10));
 
-			// Verify the elicitation was posted
+			// Verify the elicitation was posted. Options mirror the offered
+			// choices exactly — no synthetic "Other" option, which could only
+			// deliver the literal string "Other" (see handler for rationale).
 			expect(mockCreateAgentActivity).toHaveBeenCalledWith({
 				agentSessionId: "session-123",
 				content: {
@@ -190,17 +192,57 @@ describe("AskUserQuestionHandler", () => {
 				},
 				signal: "select",
 				signalMetadata: {
-					options: [
-						{ value: "PostgreSQL" },
-						{ value: "MongoDB" },
-						{ value: "Other" }, // Should include Other option
-					],
+					options: [{ value: "PostgreSQL" }, { value: "MongoDB" }],
 				},
 			});
+
+			// The body should tell the user they can reply with a free-form answer.
+			const postedBody = (mockCreateAgentActivity.mock.calls[0][0] as any)
+				.content.body as string;
+			expect(postedBody).toContain("reply with your own answer");
+			expect(postedBody).not.toContain("Other");
 
 			// Clean up by simulating response
 			handler.handleUserResponse("session-123", "PostgreSQL");
 			await resultPromise;
+		});
+
+		it("delivers a free-form (non-option) reply verbatim as the answer", async () => {
+			const input: AskUserQuestionInput = {
+				questions: [
+					{
+						question: "Which database should we use?",
+						header: "Database",
+						options: [
+							{ label: "PostgreSQL", description: "Open source relational DB" },
+							{ label: "MongoDB", description: "Document database" },
+						],
+						multiSelect: false,
+					},
+				],
+			};
+			const abortController = new AbortController();
+
+			const resultPromise = handler.handleAskUserQuestion(
+				input,
+				"session-free",
+				"org-123",
+				abortController.signal,
+			);
+			await new Promise((resolve) => setTimeout(resolve, 10));
+
+			// User ignores the buttons and types their own answer.
+			handler.handleUserResponse(
+				"session-free",
+				"Use CockroachDB — we need multi-region",
+			);
+
+			const result = await resultPromise;
+			expect(result.answered).toBe(true);
+			expect(result.answers).toEqual({
+				"Which database should we use?":
+					"Use CockroachDB — we need multi-region",
+			});
 		});
 
 		it("should include option descriptions in elicitation body", async () => {

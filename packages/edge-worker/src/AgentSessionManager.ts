@@ -1627,6 +1627,44 @@ export class AgentSessionManager extends EventEmitter {
 	}
 
 	/**
+	 * Mark a session as failed after an unrecoverable runner crash.
+	 *
+	 * The normal terminal path (`completeSession`) only runs when the SDK
+	 * emits a `result` message. When the subprocess dies without one — a
+	 * crash, a non-143 exit, a stream that errors — no result ever arrives,
+	 * so without this the session stays `Active` with no runner and the
+	 * Linear issue sits "In Progress" forever with no user-visible signal.
+	 *
+	 * Posts an `error` activity to the issue tracker so the user knows the
+	 * session died and can retry, then transitions the session to `Error`.
+	 * Idempotent: a no-op when the session is unknown or already terminal,
+	 * so it's safe to call from a crash handler that may race `completeSession`.
+	 */
+	async failSession(sessionId: string, body: string): Promise<void> {
+		const session = this.sessions.get(sessionId);
+		if (!session) return;
+
+		// Don't clobber a session that already reached a terminal state (e.g.
+		// a result message landed just before the error event fired).
+		if (
+			session.status === AgentSessionStatus.Complete ||
+			session.status === AgentSessionStatus.Error
+		) {
+			return;
+		}
+
+		const log = this.sessionLog(sessionId);
+		this.activeTasksBySession.delete(sessionId);
+		await this.updateSessionStatus(sessionId, AgentSessionStatus.Error);
+		try {
+			await this.createErrorActivity(sessionId, body);
+		} catch (error) {
+			log.error("Failed to post crash error activity", error);
+		}
+		log.info("Session marked failed after runner crash");
+	}
+
+	/**
 	 * Remove a session and all associated tracking state.
 	 * Use for immediate cleanup when a session is permanently done
 	 * (e.g., issue moved to terminal state).
@@ -1724,6 +1762,44 @@ export class AgentSessionManager extends EventEmitter {
 		this.logger.debug(
 			`Restored ${this.sessions.size} sessions, ${Object.keys(serializedEntries).length} entry collections`,
 		);
+	}
+
+	/**
+	 * Reconcile sessions that were mid-flight when the process died.
+	 *
+	 * Runners live only in memory and are never serialized, so every session
+	 * restored from disk comes back with no `agentRunner`. A session persisted
+	 * as `Active` (working) or `AwaitingInput` (waiting on a question) is
+	 * therefore a zombie: it still claims to be live, `getActiveSessions()`
+	 * counts it, but its runner is gone — a stop signal is a no-op and the
+	 * Linear issue shows a working indicator that never resolves.
+	 *
+	 * Transition those sessions to `Error` (interrupted) so local state matches
+	 * reality. The `!agentRunner` guard makes this safe to call at any time:
+	 * a session that already has a live runner is left untouched, so calling
+	 * this after startup (once runners exist) can never kill a running session.
+	 *
+	 * Returns the ids of the sessions that were reconciled so the caller can
+	 * notify the user (e.g. post an "interrupted, comment to resume" activity).
+	 */
+	markInterruptedSessions(): string[] {
+		const interrupted: string[] = [];
+		for (const [sessionId, session] of this.sessions.entries()) {
+			const isNonTerminal =
+				session.status === AgentSessionStatus.Active ||
+				session.status === AgentSessionStatus.AwaitingInput;
+			if (isNonTerminal && !session.agentRunner) {
+				session.status = AgentSessionStatus.Error;
+				session.updatedAt = Date.now();
+				interrupted.push(sessionId);
+			}
+		}
+		if (interrupted.length > 0) {
+			this.logger.info(
+				`Reconciled ${interrupted.length} interrupted session(s) with no runner to Error`,
+			);
+		}
+		return interrupted;
 	}
 
 	/**

@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- Cyrus no longer loses its memory of in-progress issues if it is restarted or killed at the wrong moment. Session state is now saved atomically and can never be left half-written; if the state file is ever damaged, Cyrus automatically recovers from a backup instead of silently starting fresh and abandoning every active issue.
+- When a working session crashes unexpectedly (its underlying process dies or the connection breaks mid-task), Cyrus now tells you on the issue that the session ended and how to retry, instead of silently leaving the issue stuck "In Progress" with no explanation.
+- After Cyrus restarts, issues that were still being worked on when it stopped no longer appear to hang forever with a spinning "working" indicator. Cyrus now marks each interrupted session on the issue and invites you to comment to resume it from where it left off.
+- Resumed sessions are no longer weaker than fresh ones. When Cyrus continues a recent issue from a pre-warmed session, it now has the same skills available as a brand-new session, and the same protection against reading files outside the working directory (such as SSH keys or cloud credentials) — both of which were previously missing on resumed sessions.
+- When Cyrus asks you a question, replying with your own free-form answer now works reliably, and the misleading "Other" choice has been removed. Previously the "Other" option could only ever send back the literal word "Other" instead of what you meant; now the prompt tells you that you can either pick an option or just reply with your own answer.
 - Forwarded and shared Slack messages are now included when you @mention Cyrus. Previously, forwarding a message (for example a Sentry alert) into a channel and @mentioning Cyrus passed along only your typed comment — the forwarded message's contents were dropped, so a forward with no comment gave Cyrus nothing to work with. The forwarded content is now part of the prompt. ([#1326](https://github.com/cyrusagents/cyrus/pull/1326))
 
 ### Changed

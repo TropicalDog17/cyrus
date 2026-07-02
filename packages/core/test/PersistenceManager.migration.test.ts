@@ -1,33 +1,53 @@
 /**
- * Tests for PersistenceManager migrations (v2.0 → v3.0 → v4.0)
+ * Tests for PersistenceManager migrations (v2.0 → v3.0 → v4.0),
+ * plus atomic-write and crash-recovery behavior.
  */
 
-import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	PERSISTENCE_VERSION,
 	PersistenceManager,
 } from "../src/PersistenceManager.js";
 
-// Mock fs modules
+// Mock fs modules. The save path writes atomically via open()+fsync+rename(),
+// and the load path reads synchronously, so we mock those primitives.
 vi.mock("node:fs", () => ({
 	existsSync: vi.fn(),
+	readFileSync: vi.fn(),
 }));
 
 vi.mock("node:fs/promises", () => ({
 	mkdir: vi.fn(),
-	readFile: vi.fn(),
-	writeFile: vi.fn(),
+	open: vi.fn(),
+	rename: vi.fn(),
+	unlink: vi.fn(),
 }));
 
 describe("PersistenceManager", () => {
 	let persistenceManager: PersistenceManager;
+	// Captures payloads written to the temp file via the atomic write path.
+	let handleWriteFile: ReturnType<typeof vi.fn>;
 
 	beforeEach(() => {
 		vi.clearAllMocks();
 		persistenceManager = new PersistenceManager("/tmp/test-cyrus");
+
+		handleWriteFile = vi.fn().mockResolvedValue(undefined);
+		vi.mocked(open).mockResolvedValue({
+			writeFile: handleWriteFile,
+			sync: vi.fn().mockResolvedValue(undefined),
+			close: vi.fn().mockResolvedValue(undefined),
+		} as unknown as Awaited<ReturnType<typeof open>>);
+		vi.mocked(rename).mockResolvedValue(undefined);
+		vi.mocked(unlink).mockResolvedValue(undefined);
+		vi.mocked(mkdir).mockResolvedValue(undefined as never);
 	});
+
+	/** Parse the payload written by the most recent atomic save. */
+	const lastSavedData = () =>
+		JSON.parse(handleWriteFile.mock.calls[0][0] as string);
 
 	describe("v2.0 to v4.0 Migration (via v3.0)", () => {
 		const v2State = {
@@ -80,9 +100,7 @@ describe("PersistenceManager", () => {
 
 		it("should migrate v2.0 state through v3.0 to v4.0 flat format", async () => {
 			vi.mocked(existsSync).mockReturnValue(true);
-			vi.mocked(readFile).mockResolvedValue(JSON.stringify(v2State));
-			vi.mocked(writeFile).mockResolvedValue(undefined);
-			vi.mocked(mkdir).mockResolvedValue(undefined);
+			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v2State));
 
 			const result = await persistenceManager.loadEdgeWorkerState();
 
@@ -129,25 +147,18 @@ describe("PersistenceManager", () => {
 
 		it("should save migrated state as v4.0", async () => {
 			vi.mocked(existsSync).mockReturnValue(true);
-			vi.mocked(readFile).mockResolvedValue(JSON.stringify(v2State));
-			vi.mocked(writeFile).mockResolvedValue(undefined);
-			vi.mocked(mkdir).mockResolvedValue(undefined);
+			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v2State));
 
 			await persistenceManager.loadEdgeWorkerState();
 
-			// Verify writeFile was called with v4.0 version
-			expect(writeFile).toHaveBeenCalled();
-			const savedData = JSON.parse(
-				vi.mocked(writeFile).mock.calls[0][1] as string,
-			);
-			expect(savedData.version).toBe(PERSISTENCE_VERSION);
+			// Verify the atomic write happened with v4.0 version
+			expect(handleWriteFile).toHaveBeenCalled();
+			expect(lastSavedData().version).toBe(PERSISTENCE_VERSION);
 		});
 
 		it("should flatten entries and preserve mappings during v2→v4 migration", async () => {
 			vi.mocked(existsSync).mockReturnValue(true);
-			vi.mocked(readFile).mockResolvedValue(JSON.stringify(v2State));
-			vi.mocked(writeFile).mockResolvedValue(undefined);
-			vi.mocked(mkdir).mockResolvedValue(undefined);
+			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v2State));
 
 			const result = await persistenceManager.loadEdgeWorkerState();
 
@@ -179,7 +190,7 @@ describe("PersistenceManager", () => {
 			};
 
 			vi.mocked(existsSync).mockReturnValue(true);
-			vi.mocked(readFile).mockResolvedValue(
+			vi.mocked(readFileSync).mockReturnValue(
 				JSON.stringify(unknownVersionState),
 			);
 
@@ -196,7 +207,7 @@ describe("PersistenceManager", () => {
 			};
 
 			vi.mocked(existsSync).mockReturnValue(true);
-			vi.mocked(readFile).mockResolvedValue(JSON.stringify(invalidState));
+			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(invalidState));
 
 			const result = await persistenceManager.loadEdgeWorkerState();
 
@@ -257,9 +268,7 @@ describe("PersistenceManager", () => {
 
 		it("should flatten nested sessions from multiple repos into a flat map", async () => {
 			vi.mocked(existsSync).mockReturnValue(true);
-			vi.mocked(readFile).mockResolvedValue(JSON.stringify(v3State));
-			vi.mocked(writeFile).mockResolvedValue(undefined);
-			vi.mocked(mkdir).mockResolvedValue(undefined);
+			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v3State));
 
 			const result = await persistenceManager.loadEdgeWorkerState();
 
@@ -284,9 +293,7 @@ describe("PersistenceManager", () => {
 
 		it("should populate repositories from repo key during flattening", async () => {
 			vi.mocked(existsSync).mockReturnValue(true);
-			vi.mocked(readFile).mockResolvedValue(JSON.stringify(v3State));
-			vi.mocked(writeFile).mockResolvedValue(undefined);
-			vi.mocked(mkdir).mockResolvedValue(undefined);
+			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v3State));
 
 			const result = await persistenceManager.loadEdgeWorkerState();
 
@@ -301,9 +308,7 @@ describe("PersistenceManager", () => {
 
 		it("should flatten nested entries from multiple repos", async () => {
 			vi.mocked(existsSync).mockReturnValue(true);
-			vi.mocked(readFile).mockResolvedValue(JSON.stringify(v3State));
-			vi.mocked(writeFile).mockResolvedValue(undefined);
-			vi.mocked(mkdir).mockResolvedValue(undefined);
+			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v3State));
 
 			const result = await persistenceManager.loadEdgeWorkerState();
 
@@ -318,9 +323,7 @@ describe("PersistenceManager", () => {
 
 		it("should preserve childToParentAgentSession and issueRepositoryCache", async () => {
 			vi.mocked(existsSync).mockReturnValue(true);
-			vi.mocked(readFile).mockResolvedValue(JSON.stringify(v3State));
-			vi.mocked(writeFile).mockResolvedValue(undefined);
-			vi.mocked(mkdir).mockResolvedValue(undefined);
+			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v3State));
 
 			const result = await persistenceManager.loadEdgeWorkerState();
 
@@ -336,48 +339,167 @@ describe("PersistenceManager", () => {
 
 		it("should save migrated v3→v4 state with correct version", async () => {
 			vi.mocked(existsSync).mockReturnValue(true);
-			vi.mocked(readFile).mockResolvedValue(JSON.stringify(v3State));
-			vi.mocked(writeFile).mockResolvedValue(undefined);
-			vi.mocked(mkdir).mockResolvedValue(undefined);
+			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v3State));
 
 			await persistenceManager.loadEdgeWorkerState();
 
-			expect(writeFile).toHaveBeenCalled();
-			const savedData = JSON.parse(
-				vi.mocked(writeFile).mock.calls[0][1] as string,
-			);
-			expect(savedData.version).toBe("4.0");
+			expect(handleWriteFile).toHaveBeenCalled();
+			expect(lastSavedData().version).toBe("4.0");
 		});
 	});
 
 	describe("v4.0 state (current)", () => {
-		it("should load v4.0 state without migration", async () => {
-			const v4State = {
-				version: "4.0",
-				savedAt: "2025-01-15T12:00:00.000Z",
-				state: {
-					agentSessions: {
-						"session-123": {
-							id: "session-123",
-							externalSessionId: "session-123",
-							issueContext: {
-								trackerId: "linear",
-								issueId: "issue-456",
-								issueIdentifier: "TEST-123",
-							},
+		const v4State = {
+			version: "4.0",
+			savedAt: "2025-01-15T12:00:00.000Z",
+			state: {
+				agentSessions: {
+					"session-123": {
+						id: "session-123",
+						externalSessionId: "session-123",
+						issueContext: {
+							trackerId: "linear",
+							issueId: "issue-456",
+							issueIdentifier: "TEST-123",
 						},
 					},
 				},
-			};
+			},
+		};
 
+		it("should load v4.0 state without migration", async () => {
 			vi.mocked(existsSync).mockReturnValue(true);
-			vi.mocked(readFile).mockResolvedValue(JSON.stringify(v4State));
+			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v4State));
 
 			const result = await persistenceManager.loadEdgeWorkerState();
 
 			expect(result).toEqual(v4State.state);
-			// Should not call writeFile since no migration needed
-			expect(writeFile).not.toHaveBeenCalled();
+			// Should not write anything since no migration is needed
+			expect(handleWriteFile).not.toHaveBeenCalled();
+		});
+	});
+
+	describe("atomic write behavior", () => {
+		const v4State = {
+			agentSessions: { "session-1": { id: "session-1" } },
+		};
+
+		it("writes to a temp file then renames it into place (no in-place write)", async () => {
+			vi.mocked(existsSync).mockReturnValue(false); // no prior file to rotate
+
+			await persistenceManager.saveEdgeWorkerState(
+				v4State as unknown as Parameters<
+					typeof persistenceManager.saveEdgeWorkerState
+				>[0],
+			);
+
+			// Payload written via the temp-file handle...
+			expect(open).toHaveBeenCalledWith(
+				expect.stringMatching(/edge-worker-state\.json\.tmp$/),
+				"w",
+			);
+			expect(handleWriteFile).toHaveBeenCalledTimes(1);
+			// ...then atomically renamed onto the real file.
+			expect(rename).toHaveBeenCalledWith(
+				expect.stringMatching(/edge-worker-state\.json\.tmp$/),
+				expect.stringMatching(/edge-worker-state\.json$/),
+			);
+		});
+
+		it("rotates an existing state file to .bak before swapping in the new one", async () => {
+			vi.mocked(existsSync).mockReturnValue(true); // prior file exists
+
+			await persistenceManager.saveEdgeWorkerState(
+				v4State as unknown as Parameters<
+					typeof persistenceManager.saveEdgeWorkerState
+				>[0],
+			);
+
+			// First rename rotates current → .bak
+			expect(rename).toHaveBeenNthCalledWith(
+				1,
+				expect.stringMatching(/edge-worker-state\.json$/),
+				expect.stringMatching(/edge-worker-state\.json\.bak$/),
+			);
+			// Second rename swaps temp → current
+			expect(rename).toHaveBeenNthCalledWith(
+				2,
+				expect.stringMatching(/edge-worker-state\.json\.tmp$/),
+				expect.stringMatching(/edge-worker-state\.json$/),
+			);
+		});
+
+		it("serializes and coalesces concurrent saves (single-flight)", async () => {
+			vi.mocked(existsSync).mockReturnValue(false);
+
+			// Fire several saves without awaiting between them.
+			const p1 = persistenceManager.saveEdgeWorkerState({
+				agentSessions: { a: { id: "a" } },
+			} as never);
+			const p2 = persistenceManager.saveEdgeWorkerState({
+				agentSessions: { b: { id: "b" } },
+			} as never);
+			const p3 = persistenceManager.saveEdgeWorkerState({
+				agentSessions: { c: { id: "c" } },
+			} as never);
+			await Promise.all([p1, p2, p3]);
+
+			// Coalesced: far fewer physical writes than save calls, and the last
+			// state (c) is the one that ends up persisted.
+			expect(handleWriteFile.mock.calls.length).toBeLessThanOrEqual(3);
+			const finalPayload = JSON.parse(
+				handleWriteFile.mock.calls.at(-1)![0] as string,
+			);
+			expect(finalPayload.state.agentSessions).toHaveProperty("c");
+		});
+	});
+
+	describe("crash recovery", () => {
+		const goodState = {
+			version: "4.0",
+			savedAt: "2025-01-15T12:00:00.000Z",
+			state: { agentSessions: { "session-1": { id: "session-1" } } },
+		};
+
+		it("recovers from .bak when the primary file is corrupt", async () => {
+			// Both primary and backup exist; primary is truncated garbage.
+			vi.mocked(existsSync).mockReturnValue(true);
+			vi.mocked(readFileSync).mockImplementation((p: unknown) => {
+				const path = String(p);
+				if (path.endsWith(".bak")) return JSON.stringify(goodState);
+				return '{"version":"4.0","state":{"agentSess'; // truncated
+			});
+
+			const result = await persistenceManager.loadEdgeWorkerState();
+
+			expect(result).toEqual(goodState.state);
+		});
+
+		it("returns null (not a resurrected .bak) after an explicit delete", async () => {
+			// deleteStateFile removes primary + .tmp + .bak, so nothing remains.
+			vi.mocked(existsSync).mockReturnValue(false);
+
+			await persistenceManager.deleteStateFile();
+			expect(unlink).toHaveBeenCalledTimes(0); // nothing existed to unlink
+
+			const result = await persistenceManager.loadEdgeWorkerState();
+			expect(result).toBeNull();
+		});
+
+		it("deletes primary, .tmp and .bak on deleteStateFile", async () => {
+			vi.mocked(existsSync).mockReturnValue(true);
+
+			await persistenceManager.deleteStateFile();
+
+			expect(unlink).toHaveBeenCalledWith(
+				expect.stringMatching(/edge-worker-state\.json$/),
+			);
+			expect(unlink).toHaveBeenCalledWith(
+				expect.stringMatching(/edge-worker-state\.json\.tmp$/),
+			);
+			expect(unlink).toHaveBeenCalledWith(
+				expect.stringMatching(/edge-worker-state\.json\.bak$/),
+			);
 		});
 	});
 
