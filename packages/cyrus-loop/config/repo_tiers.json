@@ -1,0 +1,10 @@
+{
+	"_comment": "Pipeline tier per repo, keyed by Cyrus repository id (stable across renames) with name for readability. This is a SIDE-FILE on purpose: it must NOT live in ~/.cyrus/config.json, because Cyrus's config-updater (packages/config-updater) does a wholesale schema-stripped rewrite of that file and would silently drop any unknown 'pipelineTier' key (verified in the research pass). Tiers: chore|small|feature|full. Route may downgrade/upgrade per-issue (e.g. the chore rule); this is the repo's default/ceiling tier and its work-vs-personal class.",
+	"by_id": {
+		"73813d77-8878-4090-88ac-401788f5c8b4": {
+			"name": "Daily_You",
+			"tier": "feature",
+			"class": "personal"
+		}
+	}
+}

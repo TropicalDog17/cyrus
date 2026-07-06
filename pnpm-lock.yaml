@@ -315,6 +315,37 @@ importers:
         specifier: ^4.1.9
         version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@20.19.39)(@vitest/coverage-v8@4.1.9)(@vitest/ui@4.1.9)(vite@8.0.16(@types/node@20.19.39)(esbuild@0.28.1)(tsx@4.21.0)(yaml@2.8.3))
 
+  packages/cyrus-loop:
+    dependencies:
+      '@anthropic-ai/sdk':
+        specifier: '>=0.105.0'
+        version: 0.105.0(zod@4.3.6)
+      js-yaml:
+        specifier: ^4.1.0
+        version: 4.2.0
+      proper-lockfile:
+        specifier: ^4.1.2
+        version: 4.1.2
+      zod:
+        specifier: 4.3.6
+        version: 4.3.6
+    devDependencies:
+      '@types/js-yaml':
+        specifier: ^4.0.9
+        version: 4.0.9
+      '@types/node':
+        specifier: ^20.0.0
+        version: 20.19.39
+      '@types/proper-lockfile':
+        specifier: ^4.1.4
+        version: 4.1.4
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.0
+        version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@20.19.39)(@vitest/coverage-v8@4.1.9)(@vitest/ui@4.1.9)(vite@8.0.16(@types/node@20.19.39)(esbuild@0.28.1)(tsx@4.21.0)(yaml@2.8.3))
+
   packages/edge-worker:
     dependencies:
       '@anthropic-ai/claude-agent-sdk':
@@ -1689,6 +1720,9 @@ packages:
   '@types/html-to-text@9.0.4':
     resolution: {integrity: sha512-pUY3cKH/Nm2yYrEmDlPR1mR7yszjGx4DrwPjQ702C4/D5CwHuZTgZdIdwPkRbcuhs7BAh2L5rg3CL5cbRiGTCQ==}
 
+  '@types/js-yaml@4.0.9':
+    resolution: {integrity: sha512-k4MGaQl5TGo/iipqb2UDG2UwjXziSWkh0uysQelTlJpX1qGlpUZYm8PnO4DxG1qBomtJUdYJ6qR6xdIah10JLg==}
+
   '@types/jsonfile@6.1.4':
     resolution: {integrity: sha512-D5qGUYwjvnNNextdU59/+fI+spnwtTFmyQP0h+PfIOSkNfpU6AOICUOkm4i0OnSk+NyjdPJrxCDro0sJsWlRpQ==}
 
@@ -1704,8 +1738,14 @@ packages:
   '@types/normalize-package-data@2.4.4':
     resolution: {integrity: sha512-37i+OaWTh9qeK4LSHPsyRC7NahnGotNuZvjLSgcPzblpHB3rrCJxAOgI5gCdKm7coonsaX1Of0ILiTcnZjbfxA==}
 
+  '@types/proper-lockfile@4.1.4':
+    resolution: {integrity: sha512-uo2ABllncSqg9F1D4nugVl9v93RmjxF6LJzQLMLDdPaXCUIDPeOJ21Gbqi43xNKzBi/WQ0Q0dICqufzQbMjipQ==}
+
   '@types/request@2.48.13':
     resolution: {integrity: sha512-FGJ6udDNUCjd19pp0Q3iTiDkwhYup7J8hpMW9c4k53NrccQFFWKRho6hvtPPEhnXWKvukfwAlB6DbDz4yhH5Gg==}
+
+  '@types/retry@0.12.5':
+    resolution: {integrity: sha512-3xSjTp3v03X/lSQLkczaN9UIEwJMoMCA1+Nb5HfbJEQWogdeQIyVtTvxPXDQjZ5zws8rFQfVfRdz03ARihPJgw==}
 
   '@types/tough-cookie@4.0.5':
     resolution: {integrity: sha512-/Ad8+nIOV7Rl++6f1BdKxFSMgmoqEoYbHRpPcx3JEfv8VRsQe9Z4mCXeJBzxs7mbHY/XOZZuXlRNfhpVPbs6ZA==}
@@ -5057,6 +5097,8 @@ snapshots:
 
   '@types/html-to-text@9.0.4': {}
 
+  '@types/js-yaml@4.0.9': {}
+
   '@types/jsonfile@6.1.4':
     dependencies:
       '@types/node': 20.19.39
@@ -5073,12 +5115,18 @@ snapshots:
 
   '@types/normalize-package-data@2.4.4': {}
 
+  '@types/proper-lockfile@4.1.4':
+    dependencies:
+      '@types/retry': 0.12.5
+
   '@types/request@2.48.13':
     dependencies:
       '@types/caseless': 0.12.5
       '@types/node': 20.19.39
       '@types/tough-cookie': 4.0.5
       form-data: 2.5.6
+
+  '@types/retry@0.12.5': {}
 
   '@types/tough-cookie@4.0.5': {}
 
