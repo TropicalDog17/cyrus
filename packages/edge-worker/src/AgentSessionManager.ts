@@ -38,10 +38,30 @@ import type {
 } from "./sinks/index.js";
 
 /**
+ * Payload for {@link AgentSessionManagerEvents.sessionComplete}. Raw session facts; EdgeWorker
+ * enriches (repositoryId → repo name) before re-emitting on its own bus for the loop adapter.
+ */
+export interface SessionCompleteEvent {
+	sessionId: string;
+	/** Internal issue id (issueContext.issueId, falling back to the deprecated issueId). */
+	issueId?: string;
+	/** Human issue identifier, e.g. `DEV-123` — what the loop's run_id is keyed on. */
+	issueIdentifier?: string;
+	/** Primary repository id for the session (repositories[0]). */
+	repositoryId?: string;
+	/** The session's worktree path. */
+	worktree: string;
+	/** Resolved terminal status. */
+	status: AgentSessionStatus;
+}
+
+/**
  * Events emitted by AgentSessionManager
  */
-// biome-ignore lint/complexity/noBannedTypes: Empty events type (events removed in CYPACK-996 skill refactor)
-export type AgentSessionManagerEvents = {};
+export type AgentSessionManagerEvents = {
+	/** Fired once when a session reaches a terminal state via the normal (non-user-stop) path. */
+	sessionComplete: (payload: SessionCompleteEvent) => void;
+};
 
 /**
  * Type-safe event emitter interface for AgentSessionManager
@@ -369,6 +389,18 @@ export class AgentSessionManager extends EventEmitter {
 		}
 
 		log.info(`Session completed (subtype: ${resultMessage.subtype})`);
+
+		// Compounding loop (Lane C): announce the terminal session so the loop can post the blind
+		// gate for any PR captured during it. Only fires on the normal path — user-stops returned
+		// above. Emitted after the final result entry so the gate lands after the response.
+		this.emit("sessionComplete", {
+			sessionId,
+			issueId: session.issueContext?.issueId ?? session.issueId,
+			issueIdentifier: session.issueContext?.issueIdentifier,
+			repositoryId: session.repositories[0]?.repositoryId,
+			worktree: session.workspace.path,
+			status,
+		});
 	}
 
 	/**

@@ -6,7 +6,7 @@ import type {
 	RepositoryConfig,
 } from "cyrus-core";
 import type { GitService } from "cyrus-edge-worker";
-import { EdgeWorker } from "cyrus-edge-worker";
+import { attachCyrusLoop, EdgeWorker } from "cyrus-edge-worker";
 import { DEFAULT_SERVER_PORT, parsePort } from "../config/constants.js";
 import type { Workspace } from "../config/types.js";
 import type { ConfigService } from "./ConfigService.js";
@@ -238,6 +238,17 @@ export class WorkerService {
 
 		// Set up event handlers
 		this.setupEventHandlers();
+
+		// Compounding loop (Lane C): wire the Verify → blind-gate → Learn loop to the bus.
+		// Reads ~/.cyrus/loop.json independently; a failure here must never block worker startup.
+		try {
+			// The adapter stays alive via the bus listeners it registers on edgeWorker.
+			attachCyrusLoop({ host: this.edgeWorker });
+		} catch (err) {
+			this.logger.warn(
+				`Failed to attach compounding loop: ${(err as Error).message}`,
+			);
+		}
 
 		// Start the worker
 		await this.edgeWorker.start();

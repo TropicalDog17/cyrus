@@ -325,6 +325,9 @@ importers:
       cyrus-linear-event-transport:
         specifier: workspace:*
         version: link:../linear-event-transport
+      cyrus-loop:
+        specifier: workspace:*
+        version: link:../cyrus-loop
       cyrus-mcp-tools:
         specifier: workspace:*
         version: link:../mcp-tools
