@@ -337,9 +337,6 @@ importers:
       cyrus-mcp-tools:
         specifier: workspace:*
         version: link:../mcp-tools
-      cyrus-simple-agent-runner:
-        specifier: workspace:*
-        version: link:../simple-agent-runner
       cyrus-slack-event-transport:
         specifier: workspace:*
         version: link:../slack-event-transport
@@ -465,28 +462,6 @@ importers:
       '@types/fs-extra':
         specifier: ^11.0.4
         version: 11.0.4
-      '@types/node':
-        specifier: ^20.0.0
-        version: 20.19.39
-      typescript:
-        specifier: ^5.3.3
-        version: 5.9.3
-      vitest:
-        specifier: ^4.1.0
-        version: 4.1.8(@opentelemetry/api@1.9.1)(@types/node@20.19.39)(@vitest/coverage-v8@4.1.8)(@vitest/ui@4.1.8)(vite@8.0.16(@types/node@20.19.39)(esbuild@0.28.1)(tsx@4.21.0)(yaml@2.8.3))
-
-  packages/simple-agent-runner:
-    dependencies:
-      '@anthropic-ai/claude-agent-sdk':
-        specifier: 0.3.185
-        version: 0.3.185(@anthropic-ai/sdk@0.105.0(zod@4.3.6))(@modelcontextprotocol/sdk@1.29.0(zod@4.3.6))(zod@4.3.6)
-      cyrus-claude-runner:
-        specifier: workspace:*
-        version: link:../claude-runner
-      cyrus-core:
-        specifier: workspace:*
-        version: link:../core
-    devDependencies:
       '@types/node':
         specifier: ^20.0.0
         version: 20.19.39

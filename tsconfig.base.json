@@ -28,7 +28,6 @@
 			"cyrus-claude-runner": ["packages/claude-runner"],
 			"cyrus-mcp-tools": ["packages/mcp-tools"],
 			"cyrus-loop": ["packages/cyrus-loop"],
-			"cyrus-simple-agent-runner": ["packages/simple-agent-runner"],
 			"cyrus-config-updater": ["packages/config-updater"],
 			"cyrus-linear-event-transport": ["packages/linear-event-transport"]
 		}
