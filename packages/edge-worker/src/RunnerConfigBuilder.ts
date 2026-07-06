@@ -98,8 +98,7 @@ export interface ChatRunnerConfigInput {
 	plugins?: SdkPluginConfig[];
 	/**
 	 * Allow-list of skill names enabled for the chat session after scope
-	 * filtering. Claude passes this to the SDK directly; Codex stages only
-	 * these skills into its repository discovery layout.
+	 * filtering. Claude passes this to the SDK directly.
 	 */
 	skills?: string[] | "all";
 	logger: ILogger;
@@ -150,8 +149,7 @@ export interface IssueRunnerConfigInput {
 	/**
 	 * Allow-list of skill names enabled for the session (after scope filtering),
 	 * or `"all"` to enable every discovered skill, or `undefined` to defer to
-	 * provider defaults. Claude passes this to the SDK directly; Codex uses it
-	 * to stage the same scoped skills into its native repository discovery layout.
+	 * provider defaults. Claude passes this to the SDK directly.
 	 */
 	skills?: string[] | "all";
 	/** SDK sandbox settings (enabled, network proxy ports) for Claude runner */
@@ -297,8 +295,7 @@ export class RunnerConfigBuilder {
 	/**
 	 * Build a runner config for issue sessions (Linear issues, GitHub PRs).
 	 *
-	 * Issue sessions get full tool sets, runner type selection, model overrides,
-	 * hooks, and runner-specific configuration (Chrome, Cursor, etc.).
+	 * Issue sessions get full tool sets, model overrides, and hooks.
 	 */
 	buildIssueConfig(input: IssueRunnerConfigInput): {
 		config: AgentRunnerConfig;
@@ -321,37 +318,15 @@ export class RunnerConfigBuilder {
 			],
 		};
 
-		// Determine runner type and model override from selectors
+		// Determine the Claude model (and fallback) from selectors. This fork
+		// runs Claude only, so runnerType is always "claude".
 		const runnerSelection = this.runnerSelector.determineRunnerSelection(
 			input.labels || [],
 			input.issueDescription,
 		);
-		let runnerType = runnerSelection.runnerType;
-		let modelOverride = runnerSelection.modelOverride;
-		let fallbackModelOverride = runnerSelection.fallbackModelOverride;
-
-		// If the labels have changed, and we are resuming a session. Use the existing runner for the session.
-		if (input.session.claudeSessionId && runnerType !== "claude") {
-			runnerType = "claude";
-			modelOverride = this.runnerSelector.getDefaultModelForRunner("claude");
-			fallbackModelOverride =
-				this.runnerSelector.getDefaultFallbackModelForRunner("claude");
-		} else if (input.session.geminiSessionId && runnerType !== "gemini") {
-			runnerType = "gemini";
-			modelOverride = this.runnerSelector.getDefaultModelForRunner("gemini");
-			fallbackModelOverride =
-				this.runnerSelector.getDefaultFallbackModelForRunner("gemini");
-		} else if (input.session.codexSessionId && runnerType !== "codex") {
-			runnerType = "codex";
-			modelOverride = this.runnerSelector.getDefaultModelForRunner("codex");
-			fallbackModelOverride =
-				this.runnerSelector.getDefaultFallbackModelForRunner("codex");
-		} else if (input.session.cursorSessionId && runnerType !== "cursor") {
-			runnerType = "cursor";
-			modelOverride = this.runnerSelector.getDefaultModelForRunner("cursor");
-			fallbackModelOverride =
-				this.runnerSelector.getDefaultFallbackModelForRunner("cursor");
-		}
+		const runnerType = runnerSelection.runnerType;
+		const modelOverride = runnerSelection.modelOverride;
+		const fallbackModelOverride = runnerSelection.fallbackModelOverride;
 
 		// Log model override if found
 		if (modelOverride) {
@@ -425,8 +400,7 @@ export class RunnerConfigBuilder {
 			...(this.runnerSupportsManagedSkills(runnerType) &&
 				input.plugins?.length && { plugins: input.plugins }),
 			// Skill scope allow-list. Claude passes this through to the SDK's
-			// `query()` `skills` option; Codex uses it to stage only allowed skill
-			// directories into the session worktree for repository-scope discovery.
+			// `query()` `skills` option.
 			...(this.runnerSupportsManagedSkills(runnerType) &&
 				input.skills !== undefined && { skills: input.skills }),
 			// SDK sandbox settings (Claude runner only):
@@ -446,34 +420,6 @@ export class RunnerConfigBuilder {
 			onMessage: input.onMessage,
 			onError: input.onError,
 		};
-
-		// Cursor runner uses @cursor/sdk. Pass through API key, the same
-		// sandboxSettings shape Claude consumes (the runner translates it to
-		// Cursor's `.cursor/sandbox.json` schema), and the egress CA bundle
-		// path for MITM TLS trust in sandboxed children. SDK ≥1.0.11
-		// auto-discovers the bundled `cursorsandbox` helper from the
-		// platform-specific optionalDependency.
-		if (runnerType === "cursor") {
-			config.cursorApiKey = process.env.CURSOR_API_KEY || undefined;
-			if (input.sandboxSettings) {
-				config.sandboxSettings = input.sandboxSettings;
-			}
-			if (input.egressCaCertPath) {
-				config.egressCaCertPath = input.egressCaCertPath;
-			}
-		}
-
-		// When the egress sandbox is enabled, give Codex the same filesystem
-		// posture Claude gets (see buildSandboxConfig): writes restricted to the
-		// worktree, reads restricted to the worktree + allowed directories (home
-		// is denied by omission). The Codex runner turns this into a per-thread
-		// app-server permission profile (read/write allow-list).
-		if (runnerType === "codex" && input.sandboxSettings) {
-			config.sandboxSettings = {
-				allowWrite: [input.session.workspace.path],
-				allowRead: [input.session.workspace.path, ...input.allowedDirectories],
-			};
-		}
 
 		if (input.resumeSessionId) {
 			config.resumeSessionId = input.resumeSessionId;
@@ -500,7 +446,7 @@ export class RunnerConfigBuilder {
 	}
 
 	private runnerSupportsManagedSkills(runnerType: RunnerType): boolean {
-		return runnerType === "claude" || runnerType === "codex";
+		return runnerType === "claude";
 	}
 
 	/**

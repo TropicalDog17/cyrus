@@ -527,21 +527,9 @@
 		"claudeDefaultFallbackModel": {
 			"type": "string"
 		},
-		"geminiDefaultModel": {
-			"type": "string"
-		},
-		"codexDefaultModel": {
-			"type": "string"
-		},
-		"cursorDefaultModel": {
-			"type": "string"
-		},
-		"cursorDefaultFallbackModel": {
-			"type": "string"
-		},
 		"defaultRunner": {
 			"type": "string",
-			"enum": ["claude", "gemini", "codex", "cursor"]
+			"enum": ["claude"]
 		},
 		"defaultModel": {
 			"type": "string"

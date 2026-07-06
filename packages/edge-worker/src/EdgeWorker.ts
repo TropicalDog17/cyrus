@@ -19,7 +19,6 @@ import {
 	normalizeMcpHttpTransport,
 } from "cyrus-claude-runner";
 import { getCyrusAppUrl } from "cyrus-cloudflare-tunnel-client";
-import { CodexRunner } from "cyrus-codex-runner";
 import { ConfigUpdater } from "cyrus-config-updater";
 import type {
 	AgentActivityCreateInput,
@@ -78,8 +77,6 @@ import {
 	resolvePath,
 	WebhookIpValidator,
 } from "cyrus-core";
-import { CursorRunner } from "cyrus-cursor-runner";
-import { GeminiRunner } from "cyrus-gemini-runner";
 import {
 	extractCommentAuthor,
 	extractCommentBody,
@@ -5390,7 +5387,7 @@ ${taskSection}`;
 	 * Instantiate the appropriate runner for the given type.
 	 */
 	private createRunnerForType(
-		runnerType: "claude" | "gemini" | "codex" | "cursor",
+		runnerType: "claude",
 		config: AgentRunnerConfig,
 	): IAgentRunner {
 		switch (runnerType) {
@@ -5402,12 +5399,6 @@ ${taskSection}`;
 					: config;
 				return new ClaudeRunner(claudeConfig, this.isWarmSessionsEnabled());
 			}
-			case "gemini":
-				return new GeminiRunner(config);
-			case "codex":
-				return new CodexRunner(config);
-			case "cursor":
-				return new CursorRunner(config);
 			default:
 				throw new Error(`Unknown runner type: ${runnerType satisfies never}`);
 		}
@@ -5845,7 +5836,7 @@ ${taskSection}`;
 	 * Resolve a working-directory string to the rich session bundle a
 	 * Cyrus team member needs to triage a failure-mode report: the
 	 * internal session id (for dedup), the runner session id + runner
-	 * type (so triage can pull the Claude/Gemini/Codex/Cursor transcript),
+	 * type (so triage can pull the Claude transcript),
 	 * the Linear AgentSession + source-issue identifiers (so triage can
 	 * jump to the customer thread), and the workspace path (for repro).
 	 *
@@ -5898,21 +5889,8 @@ ${taskSection}`;
 		const session = exact ?? prefix;
 		if (!session) return null;
 
-		const runnerType = session.claudeSessionId
-			? "claude"
-			: session.geminiSessionId
-				? "gemini"
-				: session.codexSessionId
-					? "codex"
-					: session.cursorSessionId
-						? "cursor"
-						: null;
-		const runnerSessionId =
-			session.claudeSessionId ??
-			session.geminiSessionId ??
-			session.codexSessionId ??
-			session.cursorSessionId ??
-			null;
+		const runnerType = session.claudeSessionId ? "claude" : null;
+		const runnerSessionId = session.claudeSessionId ?? null;
 
 		const sessionSource = session.id.startsWith("github-")
 			? "github"
@@ -7213,10 +7191,9 @@ ${input.userComment}
 			}
 
 			// `addStreamMessage` can reject the message if the turn ended in the
-			// race window between "still running" and "turn finished" (e.g. the
-			// Codex app-server backend, which only steers an active turn). Fall
+			// race window between "still running" and "turn finished". Fall
 			// through to the resume path so the comment is never dropped. Claude's
-			// streaming input never throws here, so this is a no-op for Claude.
+			// streaming input never throws here, so this is effectively a no-op.
 			try {
 				existingRunner.addStreamMessage(fullPrompt);
 				return true; // Message added to stream
@@ -7348,17 +7325,9 @@ ${input.userComment}
 		// Fetch issue labels early to determine runner type
 		const labels = await this.fetchIssueLabels(fullIssue);
 
-		// Determine which runner to use based on existing session IDs
+		// Determine whether to resume based on the existing Claude session ID
 		const hasClaudeSession = !isNewSession && Boolean(session.claudeSessionId);
-		const hasGeminiSession = !isNewSession && Boolean(session.geminiSessionId);
-		const hasCodexSession = !isNewSession && Boolean(session.codexSessionId);
-		const hasCursorSession = !isNewSession && Boolean(session.cursorSessionId);
-		const needsNewSession =
-			isNewSession ||
-			(!hasClaudeSession &&
-				!hasGeminiSession &&
-				!hasCodexSession &&
-				!hasCursorSession);
+		const needsNewSession = isNewSession || !hasClaudeSession;
 
 		// Fetch system prompt based on labels
 
@@ -7395,13 +7364,7 @@ ${input.userComment}
 
 		const resumeSessionId = needsNewSession
 			? undefined
-			: session.claudeSessionId
-				? session.claudeSessionId
-				: session.geminiSessionId
-					? session.geminiSessionId
-					: session.codexSessionId
-						? session.codexSessionId
-						: session.cursorSessionId;
+			: session.claudeSessionId;
 
 		console.log(
 			`[resumeAgentSession] needsNewSession=${needsNewSession}, resumeSessionId=${resumeSessionId ?? "none"}`,
