@@ -6,6 +6,8 @@ export * from "./capture.js";
 export * from "./config.js";
 export * from "./context.js";
 export * as cyrusAdapter from "./cyrusAdapter.js";
+// Lane C — event-driven orchestrator + its own config file (~/.cyrus/loop.json)
+export * from "./cyrusLoop.js";
 export * from "./gate.js";
 export * from "./integrate.js";
 // L5 judge / gate / learn
@@ -14,6 +16,7 @@ export * from "./learn.js";
 // L4 evidence ledger
 export * from "./ledger.js";
 export * from "./linearConventions.js";
+export * from "./loopConfig.js";
 // L6 metrics / integrate / capture (+ cyrus adapter)
 export * from "./metrics.js";
 // L1 foundation
