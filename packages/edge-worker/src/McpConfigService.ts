@@ -35,12 +35,9 @@ export interface McpConfigServiceDeps {
  * Single source of truth for MCP server configuration assembly.
  *
  * Handles:
- * - Building inline MCP server configs (Linear, cyrus-tools, Slack)
+ * - Building inline MCP server configs (Linear, cyrus-tools)
  * - Merging file-based MCP config paths from repositories
  * - Cyrus-tools MCP context lifecycle management
- *
- * Both EdgeWorker (issue sessions) and ChatSessionHandler (chat sessions)
- * consume this service instead of duplicating MCP config logic.
  */
 export class McpConfigService {
 	private deps: McpConfigServiceDeps;

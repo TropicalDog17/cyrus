@@ -1,5 +1,4 @@
 import { execSync } from "node:child_process";
-import { join } from "node:path";
 import type {
 	HookCallbackMatcher,
 	HookEvent,
@@ -39,16 +38,6 @@ export interface IMcpConfigProvider {
 }
 
 /**
- * Subset of ToolPermissionResolver consumed by RunnerConfigBuilder.
- */
-export interface IChatToolResolver {
-	buildChatAllowedTools(
-		mcpConfigKeys?: string[],
-		userMcpTools?: string[],
-	): string[];
-}
-
-/**
  * Subset of RunnerSelectionService consumed by RunnerConfigBuilder.
  */
 export interface IRunnerSelector {
@@ -62,48 +51,6 @@ export interface IRunnerSelector {
 	};
 	getDefaultModelForRunner(runnerType: RunnerType): string;
 	getDefaultFallbackModelForRunner(runnerType: RunnerType): string;
-}
-
-/**
- * Input for building a chat session runner config.
- */
-export interface ChatRunnerConfigInput {
-	workspacePath: string;
-	workspaceName: string | undefined;
-	systemPrompt: string;
-	sessionId: string;
-	resumeSessionId?: string;
-	cyrusHome: string;
-	/** Chat platform name (e.g. "slack") — used to namespace the shared auto-memory dir */
-	platformName: string;
-	/** Linear workspace ID for building fresh MCP config at session start */
-	linearWorkspaceId?: string;
-	/** Repository whose MCP runtime servers (Linear MCP, Cyrus tools, etc.) get
-	 * spun up for this chat session — chat sessions are repo-agnostic at the
-	 * session level, so this just picks one repo to seed those native servers. */
-	repository?: RepositoryConfig;
-	/** Repository paths the chat session can read */
-	repositoryPaths?: string[];
-	/**
-	 * Filesystem paths to custom-integration `.mcp.json` files to load for
-	 * this chat session (sourced from `EdgeWorkerConfig.slackMcpConfigs` for
-	 * Slack). Chat sessions are repo-agnostic, so `repository.mcpConfigPath`
-	 * is not consulted here — only this list determines which custom MCP
-	 * files the session loads. When empty/omitted, no custom `.mcp.json`
-	 * files are loaded (native servers built via `mcpConfigProvider` still
-	 * run as usual).
-	 */
-	platformMcpConfigOverrides?: readonly string[];
-	/** Plugins to load for the chat session (provides managed skills). */
-	plugins?: SdkPluginConfig[];
-	/**
-	 * Allow-list of skill names enabled for the chat session after scope
-	 * filtering. Claude passes this to the SDK directly.
-	 */
-	skills?: string[] | "all";
-	logger: ILogger;
-	onMessage: (message: SDKMessage) => void | Promise<void>;
-	onError: (error: Error) => void;
 }
 
 /**
@@ -184,112 +131,21 @@ export function resolveIssueMcpConfigPath(
 }
 
 /**
- * Shared runner config assembly for both issue and chat sessions.
+ * Runner config assembly for issue sessions.
  *
- * Eliminates duplication between EdgeWorker.buildAgentRunnerConfig() and
- * ChatSessionHandler.buildRunnerConfig() by providing focused factory methods
- * that produce AgentRunnerConfig objects using injected services.
+ * Produces AgentRunnerConfig objects for EdgeWorker.buildAgentRunnerConfig()
+ * using injected services.
  */
 export class RunnerConfigBuilder {
-	private chatToolResolver: IChatToolResolver;
 	private mcpConfigProvider: IMcpConfigProvider;
 	private runnerSelector: IRunnerSelector;
 
 	constructor(
-		chatToolResolver: IChatToolResolver,
 		mcpConfigProvider: IMcpConfigProvider,
 		runnerSelector: IRunnerSelector,
 	) {
-		this.chatToolResolver = chatToolResolver;
 		this.mcpConfigProvider = mcpConfigProvider;
 		this.runnerSelector = runnerSelector;
-	}
-
-	/**
-	 * Build a runner config for chat sessions (Slack, GitHub chat, etc.).
-	 *
-	 * Chat sessions get read-only tools + MCP tool prefixes, and a simplified
-	 * config without hooks or model selection.
-	 */
-	buildChatConfig(input: ChatRunnerConfigInput): AgentRunnerConfig {
-		// MCP config paths for chat sessions come exclusively from the
-		// platform override list (e.g. `slackMcpConfigs`). Chat sessions
-		// are repo-agnostic at the session level — we do NOT fall back to
-		// "first repo wins" `repository.mcpConfigPath` (the prior V1
-		// default), because that arbitrarily privileged whichever repo
-		// loaded first. When the platform list is empty, the chat
-		// session simply loads no per-repo `.mcp.json` files.
-		const mcpConfigPath =
-			input.platformMcpConfigOverrides &&
-			input.platformMcpConfigOverrides.length > 0
-				? input.platformMcpConfigOverrides.length === 1
-					? input.platformMcpConfigOverrides[0]
-					: [...input.platformMcpConfigOverrides]
-				: undefined;
-
-		// Build fresh MCP config at session start (reads current token from config)
-		// This follows the same pattern as buildIssueConfig — never use a pre-baked config
-		const mcpConfig =
-			input.linearWorkspaceId && input.repository
-				? this.mcpConfigProvider.buildMcpConfig(
-						input.repository.id,
-						input.linearWorkspaceId,
-						input.sessionId,
-					)
-				: undefined;
-
-		// Extract MCP tool entries from the repository's allowedTools config
-		const userMcpTools = (input.repository?.allowedTools ?? []).filter((tool) =>
-			tool.startsWith("mcp__"),
-		);
-
-		const mcpConfigKeys = mcpConfig ? Object.keys(mcpConfig) : undefined;
-		const allowedTools = this.chatToolResolver.buildChatAllowedTools(
-			mcpConfigKeys,
-			userMcpTools,
-		);
-
-		const repositoryPaths = Array.from(
-			new Set((input.repositoryPaths ?? []).filter(Boolean)),
-		);
-
-		input.logger.debug("Chat session allowed tools:", allowedTools);
-
-		// Shared auto-memory across all chat threads on this platform. Lives
-		// under cyrusHome (not the per-thread workspace) so memory built up in
-		// one Slack thread is available to every other Slack thread.
-		const autoMemoryDirectory = join(
-			input.cyrusHome,
-			`${input.platformName}-memory`,
-		);
-
-		return {
-			workingDirectory: input.workspacePath,
-			allowedTools,
-			disallowedTools: [] as string[],
-			allowedDirectories: [
-				input.workspacePath,
-				autoMemoryDirectory,
-				...repositoryPaths,
-			],
-			workspaceName: input.workspaceName,
-			cyrusHome: input.cyrusHome,
-			autoMemoryDirectory,
-			appendSystemPrompt: appendCloudRuntimeAddendum(
-				appendBrowserUseAddendum(appendFailureModeAddendum(input.systemPrompt)),
-			),
-			...(mcpConfig ? { mcpConfig } : {}),
-			...(mcpConfigPath ? { mcpConfigPath } : {}),
-			...(input.resumeSessionId
-				? { resumeSessionId: input.resumeSessionId }
-				: {}),
-			...(input.plugins?.length ? { plugins: input.plugins } : {}),
-			...(input.skills !== undefined ? { skills: input.skills } : {}),
-			logger: input.logger,
-			maxTurns: 200,
-			onMessage: input.onMessage,
-			onError: input.onError,
-		};
 	}
 
 	/**

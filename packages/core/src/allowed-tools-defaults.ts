@@ -9,13 +9,13 @@
  *
  * Resolution is **additive only** — there is no implicit appending of
  * workspace MCP tools at runtime. Anything Cyrus needs (including
- * `mcp__linear`, `mcp__cyrus-tools`, `mcp__cyrus-docs`, `mcp__slack`, and
- * read access to repository paths) is listed here explicitly. If you remove
- * a tool from this list, Cyrus loses access to it. If you add a tool here,
- * existing teams whose column equals the previous verbatim default will be
- * migrated forward; teams who have customized their list are left alone.
+ * `mcp__linear`, `mcp__cyrus-tools`, `mcp__cyrus-docs`, and read access to
+ * repository paths) is listed here explicitly. If you remove a tool from this
+ * list, Cyrus loses access to it. If you add a tool here, existing teams whose
+ * column equals the previous verbatim default will be migrated forward; teams
+ * who have customized their list are left alone.
  *
- * The three lists are intentionally maintained independently — sharing tools
+ * The lists are intentionally maintained independently — sharing tools
  * between platforms is fine and expected, but the lists do not derive from
  * each other.
  */
@@ -81,26 +81,23 @@ export const LINEAR_DEFAULT_ALLOWED_TOOLS = [
 	// Workflow orchestration
 	"Workflow",
 
-	// Workspace MCP servers — explicit, no implicit appending. Linear
-	// sessions include `mcp__slack` so Cyrus can post status updates and
-	// follow-up messages to Slack while working on an issue.
+	// Workspace MCP servers — explicit, no implicit appending.
 	"mcp__linear",
 	"mcp__cyrus-tools",
 	"mcp__cyrus-docs",
-	"mcp__slack",
 ] as const;
 
 /**
- * Default allowed tools for Slack `@mention` chat sessions.
+ * Curated read-only allowed-tool list.
  *
- * Slack sessions are transient — no PRs opened, no worktree checkouts.
- * The default list grants read-only access to repository sources (so Cyrus
- * can answer "look at the code in repo X" questions) plus the standard
- * planning/task tools, but no Edit/Write/general Bash. The single Bash
- * pattern allowed is `git -C * pull` so a chat session can refresh a
- * repo before grepping it.
+ * This is the tool set resolved by the `readOnly` tool preset (used by
+ * label-based prompt restrictions). It grants read-only access to repository
+ * sources (so Cyrus can answer "look at the code in repo X" questions) plus
+ * the standard planning/task tools, but no Edit/Write/general Bash. The single
+ * Bash pattern allowed is `git -C * pull` so a session can refresh a repo
+ * before grepping it.
  */
-export const SLACK_DEFAULT_ALLOWED_TOOLS = [
+export const READONLY_DEFAULT_ALLOWED_TOOLS = [
 	// Read access to configured repository paths
 	"Read",
 	"Bash(git -C * pull)",
@@ -130,11 +127,10 @@ export const SLACK_DEFAULT_ALLOWED_TOOLS = [
 	"Skill",
 	"ToolSearch",
 
-	// Workspace MCP servers Slack chat sessions need
+	// Workspace MCP servers the read-only preset needs
 	"mcp__linear",
 	"mcp__cyrus-tools",
 	"mcp__cyrus-docs",
-	"mcp__slack",
 ] as const;
 
 /**
@@ -212,7 +208,7 @@ export const GITHUB_DEFAULT_ALLOWED_TOOLS = [
  * Platform identifier used by callers that want to resolve a default list
  * dynamically. Keeps platform-string typos out of the call sites.
  */
-export type AllowedToolsPlatform = "linear" | "slack" | "github";
+export type AllowedToolsPlatform = "linear" | "github";
 
 /**
  * Resolve the default allowed-tool list for a platform.
@@ -223,8 +219,6 @@ export function getDefaultAllowedTools(
 	switch (platform) {
 		case "linear":
 			return LINEAR_DEFAULT_ALLOWED_TOOLS;
-		case "slack":
-			return SLACK_DEFAULT_ALLOWED_TOOLS;
 		case "github":
 			return GITHUB_DEFAULT_ALLOWED_TOOLS;
 	}

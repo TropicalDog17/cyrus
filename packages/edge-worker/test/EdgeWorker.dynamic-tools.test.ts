@@ -1,6 +1,6 @@
 import {
 	LINEAR_DEFAULT_ALLOWED_TOOLS,
-	SLACK_DEFAULT_ALLOWED_TOOLS,
+	READONLY_DEFAULT_ALLOWED_TOOLS,
 } from "cyrus-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TEST_CYRUS_HOME } from "./test-dirs.js";
@@ -249,9 +249,9 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 			// preset/list includes them.
 
 			// Test debugger prompt with readOnly preset (resolves to the
-			// Slack platform default — the curated read-only set).
+			// curated read-only set).
 			const debuggerTools = buildAllowedTools(repository, "debugger");
-			expect(debuggerTools).toEqual([...SLACK_DEFAULT_ALLOWED_TOOLS]);
+			expect(debuggerTools).toEqual([...READONLY_DEFAULT_ALLOWED_TOOLS]);
 
 			// Test builder prompt with custom array (returned verbatim).
 			const builderTools = buildAllowedTools(repository, "builder");
@@ -362,8 +362,8 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 				const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 				const tools = buildAllowedTools(repository);
 
-				// Linear path returns the repo list verbatim. mcp__slack lives in
-				// SLACK_DEFAULT_ALLOWED_TOOLS only and is never appended here.
+				// Linear path returns the repo list verbatim. mcp__slack is not a
+				// known tool in this fork and is never appended here.
 				expect(tools).toEqual(["Read", "Write"]);
 				expect(tools).not.toContain("mcp__slack");
 			} finally {

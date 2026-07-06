@@ -114,17 +114,11 @@ import {
 	type FailureModesHttpClient,
 	type ResolvedSession,
 } from "cyrus-mcp-tools";
-import {
-	SlackEventTransport,
-	type SlackWebhookEvent,
-} from "cyrus-slack-event-transport";
 import { Sessions, streamableHttp } from "fastify-mcp";
 import { ActivityPoster } from "./ActivityPoster.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
 import { AttachmentService } from "./AttachmentService.js";
-import { LiveChatRepositoryProvider } from "./ChatRepositoryProvider.js";
-import { ChatSessionHandler } from "./ChatSessionHandler.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
@@ -153,7 +147,6 @@ import {
 	type SkillSessionContext,
 	SkillsPluginResolver,
 } from "./SkillsPluginResolver.js";
-import { SlackChatAdapter } from "./SlackChatAdapter.js";
 import type { IActivitySink } from "./sinks/IActivitySink.js";
 import { LinearActivitySink } from "./sinks/LinearActivitySink.js";
 import { ToolPermissionResolver } from "./ToolPermissionResolver.js";
@@ -193,9 +186,6 @@ export class EdgeWorker extends EventEmitter {
 	private linearEventTransport: LinearEventTransport | null = null; // Single event transport for webhook delivery
 	private gitHubEventTransport: GitHubEventTransport | null = null; // GitHub event transport for forwarded GitHub webhooks
 	private gitHubAppTokenProvider: GitHubAppTokenProvider | null = null; // Self-hosted GitHub App token minting
-	private slackEventTransport: SlackEventTransport | null = null;
-	private chatSessionHandler: ChatSessionHandler<SlackWebhookEvent> | null =
-		null;
 	private gitHubCommentService: GitHubCommentService; // Service for posting comments back to GitHub PRs
 	private cliRPCServer: CLIRPCServer | null = null; // CLI RPC server for CLI platform mode
 	private configUpdater: ConfigUpdater | null = null; // Single config updater for configuration updates
@@ -288,7 +278,6 @@ export class EdgeWorker extends EventEmitter {
 			paths ? paths.map(resolvePath) : undefined;
 		return {
 			...config,
-			slackMcpConfigs: resolveList(config.slackMcpConfigs),
 			linearMcpConfigs: resolveList(config.linearMcpConfigs),
 			githubMcpConfigs: resolveList(config.githubMcpConfigs),
 		};
@@ -540,7 +529,6 @@ export class EdgeWorker extends EventEmitter {
 				this.createCyrusToolsOptions(parentSessionId),
 		});
 		this.runnerConfigBuilder = new RunnerConfigBuilder(
-			this.toolPermissionResolver,
 			this.mcpConfigService,
 			this.runnerSelectionService,
 		);
@@ -790,11 +778,10 @@ export class EdgeWorker extends EventEmitter {
 			);
 		}
 
-		// 2. Register GitHub and Slack event transports unconditionally
-		// These don't require repositories and must be available during onboarding
+		// 2. Register the GitHub event transport unconditionally
+		// It doesn't require repositories and must be available during onboarding
 		// for webhook URL verification to succeed.
 		this.registerGitHubEventTransport();
-		this.registerSlackEventTransport();
 
 		// 3. Create and register ConfigUpdater (both platforms)
 		this.configUpdater = new ConfigUpdater(
@@ -943,148 +930,6 @@ export class EdgeWorker extends EventEmitter {
 			`GitHub event transport registered (${verificationMode} mode)`,
 		);
 		this.logger.info("Webhook endpoint: POST /github-webhook");
-	}
-
-	/**
-	 * Whether Cyrus should follow plain replies in a Slack thread it was
-	 * @mentioned in. Enabled by default; controlled by the per-team
-	 * `slackThreadFollowing` config toggle (Behaviours page) and force-disabled
-	 * by the `CYRUS_SLACK_THREAD_FOLLOWING_DISABLED` env kill-switch, which takes
-	 * precedence over the toggle. When disabled, only @mentions are processed.
-	 */
-	private isSlackThreadFollowingEnabled(): boolean {
-		const envValue = (process.env.CYRUS_SLACK_THREAD_FOLLOWING_DISABLED ?? "")
-			.toLowerCase()
-			.trim();
-		if (envValue === "true" || envValue === "1" || envValue === "yes") {
-			return false;
-		}
-		// Config toggle defaults to enabled when unset.
-		return this.config.slackThreadFollowing !== false;
-	}
-
-	/**
-	 * Register the Slack event transport for receiving forwarded Slack webhooks from CYHOST.
-	 * This creates a /slack-webhook endpoint that handles @mention events from Slack.
-	 */
-	private registerSlackEventTransport(): void {
-		// Live provider reads from the repository map on demand — no snapshot needed
-		const chatRepositoryProvider = new LiveChatRepositoryProvider(
-			this.repositories,
-			() => this.config.linearWorkspaces || {},
-		);
-
-		const routingContext =
-			this.promptBuilder.generateRoutingContextForAllWorkspaces();
-		// Only managed teams (cloud or self-hosted, paired with cyrus-hosted)
-		// have a Behaviours page where automatic Slack thread listening can be
-		// turned off — CYRUS_API_KEY is proof of that pairing, so the
-		// stop-listening prompt guidance is gated on it. Community members
-		// don't have the key (or the page).
-		const cyrusAppBaseUrl = process.env.CYRUS_API_KEY
-			? getCyrusAppUrl()
-			: undefined;
-		const slackAdapter = new SlackChatAdapter(
-			chatRepositoryProvider,
-			this.logger,
-			{ repositoryRoutingContext: routingContext, cyrusAppBaseUrl },
-		);
-
-		if (
-			!chatRepositoryProvider.getDefaultLinearWorkspaceId() ||
-			!chatRepositoryProvider.getDefaultRepository()
-		) {
-			this.logger.warn(
-				"No repositories or workspaces configured — Slack sessions will not have access to MCP tools",
-			);
-		}
-
-		this.chatSessionHandler = new ChatSessionHandler(
-			slackAdapter,
-			{
-				cyrusHome: this.cyrusHome,
-				chatRepositoryProvider,
-				runnerConfigBuilder: this.runnerConfigBuilder,
-				createRunner: (config) => {
-					const runnerType = this.runnerSelectionService.getDefaultRunner();
-					return this.createRunnerForType(runnerType, {
-						...config,
-						model: this.getDefaultModelForRunner(runnerType),
-						fallbackModel: this.getDefaultFallbackModelForRunner(runnerType),
-					});
-				},
-				// Live read so hot-reloaded config (`setConfig`) picks up new
-				// per-platform MCP paths without rebuilding the handler.
-				getPlatformMcpConfigOverrides: () => this.config.slackMcpConfigs,
-				resolveSkillsConfig: async ({ repository, repositoryPaths }) => {
-					const plugins = await this.skillsPluginResolver.resolve();
-					const skills = await this.skillsPluginResolver.discoverSkillNames(
-						plugins,
-						{
-							repositoryId: repository?.id,
-							repoPaths: repositoryPaths,
-						},
-					);
-					return { plugins, skills };
-				},
-				onWebhookStart: () => {
-					this.activeWebhookCount++;
-				},
-				onWebhookEnd: () => {
-					this.activeWebhookCount--;
-				},
-				onStateChange: () => this.savePersistedState(),
-				onClaudeError: (error) => this.handleClaudeError(error),
-			},
-			this.logger,
-		);
-
-		// Use direct Slack signature verification only when BOTH:
-		// 1. SLACK_SIGNING_SECRET is set (we have the secret to verify)
-		// 2. CYRUS_HOST_EXTERNAL is true (self-hosted: Slack sends directly to us)
-		// On cloud droplets, CYHOST forwards webhooks with Bearer token auth
-		// (it verifies the Slack signature itself and doesn't forward the headers).
-		const isExternalHost =
-			process.env.CYRUS_HOST_EXTERNAL?.toLowerCase().trim() === "true";
-		const hasSlackSigningSecret =
-			process.env.SLACK_SIGNING_SECRET != null &&
-			process.env.SLACK_SIGNING_SECRET !== "";
-		const useDirectSlackWebhooks = isExternalHost && hasSlackSigningSecret;
-
-		const slackVerificationMode = useDirectSlackWebhooks ? "direct" : "proxy";
-		const slackSecret = useDirectSlackWebhooks
-			? process.env.SLACK_SIGNING_SECRET!
-			: process.env.CYRUS_API_KEY || "";
-
-		this.slackEventTransport = new SlackEventTransport({
-			fastifyServer: this.sharedApplicationServer.getFastifyInstance(),
-			verificationMode: slackVerificationMode,
-			secret: slackSecret,
-			// Live read so the per-team toggle (hot-reloaded via config) and the
-			// env kill-switch both take effect without rebuilding the transport.
-			isThreadFollowingEnabled: () => this.isSlackThreadFollowingEnabled(),
-		});
-
-		this.slackEventTransport.on("event", (event: SlackWebhookEvent) => {
-			this.chatSessionHandler!.handleEvent(event).catch((error) => {
-				this.logger.error(
-					"Failed to handle Slack webhook",
-					error instanceof Error ? error : new Error(String(error)),
-				);
-			});
-		});
-		this.slackEventTransport.on("message", (message: InternalMessage) => {
-			this.handleMessage(message);
-		});
-		this.slackEventTransport.on("error", (error: Error) => {
-			this.handleError(error);
-		});
-
-		this.slackEventTransport.register();
-
-		this.logger.info(
-			`Slack event transport registered (${slackVerificationMode} mode)`,
-		);
 	}
 
 	/**
@@ -1416,8 +1261,7 @@ export class EdgeWorker extends EventEmitter {
 
 			// Build allowed tools using the GitHub platform resolver, which honors
 			// `githubAllowedTools` on the workspace config and falls back to
-			// `GITHUB_DEFAULT_ALLOWED_TOOLS` (which intentionally omits
-			// `mcp__slack` — no subtractive filtering needed).
+			// `GITHUB_DEFAULT_ALLOWED_TOOLS`.
 			const allowedTools =
 				this.toolPermissionResolver.buildGithubAllowedTools(repository);
 			const disallowedTools = this.buildDisallowedTools(repository);
@@ -1904,24 +1748,7 @@ ${taskSection}`;
 			}
 		}
 
-		// Busy if any chat platform runner is actively running
-		if (this.chatSessionHandler?.isAnyRunnerBusy()) {
-			return "busy";
-		}
-
 		return "idle";
-	}
-
-	/**
-	 * Test-only: dispatch a synthetic Slack webhook event through the chat
-	 * session handler. Used by the F1 test harness to exercise the Slack →
-	 * ClaudeRunner code path end-to-end without a real Slack signature.
-	 */
-	async dispatchChatTestEvent(event: SlackWebhookEvent): Promise<void> {
-		if (!this.chatSessionHandler) {
-			throw new Error("chatSessionHandler not initialized");
-		}
-		await this.chatSessionHandler.handleEvent(event);
 	}
 
 	/**
@@ -1930,52 +1757,6 @@ ${taskSection}`;
 	 */
 	getSharedApplicationServer(): SharedApplicationServer {
 		return this.sharedApplicationServer;
-	}
-
-	/**
-	 * Test-only: list active chat threads (threadKey → sessionId).
-	 */
-	listChatThreads(): Array<{ threadKey: string; sessionId: string }> {
-		if (!this.chatSessionHandler) return [];
-		return this.chatSessionHandler.listThreads();
-	}
-
-	/**
-	 * Test-only: fetch the last assistant text reply for a chat thread.
-	 * Returns null when the thread or runner is unknown, or no assistant
-	 * message has been produced yet.
-	 */
-	getChatThreadLastReply(threadKey: string): {
-		text: string;
-		isRunning: boolean;
-		messageCount: number;
-	} | null {
-		if (!this.chatSessionHandler) return null;
-		const runner = this.chatSessionHandler.getRunnerForThread(threadKey);
-		if (!runner) return null;
-		const messages = runner.getMessages();
-		const lastAssistant = [...messages]
-			.reverse()
-			.find((m) => m.type === "assistant");
-		let text = "";
-		if (
-			lastAssistant &&
-			lastAssistant.type === "assistant" &&
-			"message" in lastAssistant
-		) {
-			const msg = lastAssistant as {
-				message: { content: Array<{ type: string; text?: string }> };
-			};
-			const block = msg.message.content?.find(
-				(b) => b.type === "text" && b.text,
-			);
-			if (block?.text) text = block.text;
-		}
-		return {
-			text,
-			isRunning: runner.isRunning(),
-			messageCount: messages.length,
-		};
 	}
 
 	/**
@@ -1995,13 +1776,10 @@ ${taskSection}`;
 			);
 		}
 
-		// get all agent runners (including chat platform sessions)
+		// get all agent runners
 		const agentRunners: IAgentRunner[] = [
 			...this.agentSessionManager.getAllAgentRunners(),
 		];
-		if (this.chatSessionHandler) {
-			agentRunners.push(...this.chatSessionHandler.getAllRunners());
-		}
 
 		// Kill all agent processes with null checking
 		for (const runner of agentRunners) {
@@ -2627,7 +2405,7 @@ ${taskSection}`;
 	// ============================================================================
 	// These handlers process unified InternalMessage types from the message bus.
 	// They provide a platform-agnostic interface for handling events from
-	// Linear, GitHub, Slack, and other platforms.
+	// Linear, GitHub, and other platforms.
 	// ============================================================================
 
 	/**
@@ -4759,24 +4537,6 @@ ${taskSection}`;
 	}
 
 	/**
-	 * Resolve default model for a given runner from config with sensible built-in defaults.
-	 * Supports legacy config keys for backwards compatibility.
-	 */
-	private getDefaultModelForRunner(runnerType: RunnerType): string {
-		return this.runnerSelectionService.getDefaultModelForRunner(runnerType);
-	}
-
-	/**
-	 * Resolve default fallback model for a given runner from config with sensible built-in defaults.
-	 * Supports legacy Claude fallback key for backwards compatibility.
-	 */
-	private getDefaultFallbackModelForRunner(runnerType: RunnerType): string {
-		return this.runnerSelectionService.getDefaultFallbackModelForRunner(
-			runnerType,
-		);
-	}
-
-	/**
 	 * Instantiate the appropriate runner for the given type.
 	 */
 	private createRunnerForType(
@@ -5239,19 +4999,15 @@ ${taskSection}`;
 	 */
 	/**
 	 * Aggregator over every place active sessions live in this process.
-	 * Today: the primary AgentSessionManager (issue sessions) and the
-	 * ChatSessionHandler's private one (Slack / GitHub-PR-chat / future
-	 * chat platforms). New session origins should be added here so
-	 * downstream consumers (currently just resolveSessionFromCwd) keep
-	 * working without modification — single open extension point (OCP),
-	 * single responsibility (SRP: this method's only job is "where do
-	 * sessions live?", separate from "how do we match one by cwd?").
+	 * Today: the primary AgentSessionManager (issue sessions). New session
+	 * origins should be added here so downstream consumers (currently just
+	 * resolveSessionFromCwd) keep working without modification — single open
+	 * extension point (OCP), single responsibility (SRP: this method's only
+	 * job is "where do sessions live?", separate from "how do we match one by
+	 * cwd?").
 	 */
 	private getAllKnownSessions(): CyrusAgentSession[] {
-		return [
-			...this.agentSessionManager.getAllSessions(),
-			...(this.chatSessionHandler?.getAllChatSessions() ?? []),
-		];
+		return [...this.agentSessionManager.getAllSessions()];
 	}
 
 	private resolveSessionFromCwd(cwd: string): ResolvedSession | null {
@@ -5287,9 +5043,7 @@ ${taskSection}`;
 
 		const sessionSource = session.id.startsWith("github-")
 			? "github"
-			: session.id.startsWith("slack-")
-				? "slack"
-				: (session.issueContext?.trackerId ?? "linear");
+			: (session.issueContext?.trackerId ?? "linear");
 
 		// For Linear-source sessions, `session.id` is already the Linear
 		// AgentSession id (they're literally the same UUID — the v3 rename

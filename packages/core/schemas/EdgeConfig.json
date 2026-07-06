@@ -555,19 +555,7 @@
 				"type": "string"
 			}
 		},
-		"slackAllowedTools": {
-			"type": "array",
-			"items": {
-				"type": "string"
-			}
-		},
 		"githubAllowedTools": {
-			"type": "array",
-			"items": {
-				"type": "string"
-			}
-		},
-		"slackMcpConfigs": {
 			"type": "array",
 			"items": {
 				"type": "string"
@@ -586,9 +574,6 @@
 			}
 		},
 		"issueUpdateTrigger": {
-			"type": "boolean"
-		},
-		"slackThreadFollowing": {
 			"type": "boolean"
 		},
 		"prReviewTrigger": {
