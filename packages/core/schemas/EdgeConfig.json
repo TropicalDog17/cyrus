@@ -23,9 +23,6 @@
 					"githubUrl": {
 						"type": "string"
 					},
-					"gitlabUrl": {
-						"type": "string"
-					},
 					"linearWorkspaceId": {
 						"type": "string"
 					},
@@ -527,21 +524,9 @@
 		"claudeDefaultFallbackModel": {
 			"type": "string"
 		},
-		"geminiDefaultModel": {
-			"type": "string"
-		},
-		"codexDefaultModel": {
-			"type": "string"
-		},
-		"cursorDefaultModel": {
-			"type": "string"
-		},
-		"cursorDefaultFallbackModel": {
-			"type": "string"
-		},
 		"defaultRunner": {
 			"type": "string",
-			"enum": ["claude", "gemini", "codex", "cursor"]
+			"enum": ["claude"]
 		},
 		"defaultModel": {
 			"type": "string"
@@ -570,19 +555,7 @@
 				"type": "string"
 			}
 		},
-		"slackAllowedTools": {
-			"type": "array",
-			"items": {
-				"type": "string"
-			}
-		},
 		"githubAllowedTools": {
-			"type": "array",
-			"items": {
-				"type": "string"
-			}
-		},
-		"slackMcpConfigs": {
 			"type": "array",
 			"items": {
 				"type": "string"
@@ -601,9 +574,6 @@
 			}
 		},
 		"issueUpdateTrigger": {
-			"type": "boolean"
-		},
-		"slackThreadFollowing": {
 			"type": "boolean"
 		},
 		"prReviewTrigger": {

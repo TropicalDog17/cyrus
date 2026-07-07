@@ -215,15 +215,6 @@ export class ConfigManager extends EventEmitter {
 					parsedConfig.defaultFallbackModel ||
 					this.config.claudeDefaultFallbackModel ||
 					this.config.defaultFallbackModel,
-				geminiDefaultModel:
-					parsedConfig.geminiDefaultModel || this.config.geminiDefaultModel,
-				codexDefaultModel:
-					parsedConfig.codexDefaultModel || this.config.codexDefaultModel,
-				cursorDefaultModel:
-					parsedConfig.cursorDefaultModel || this.config.cursorDefaultModel,
-				cursorDefaultFallbackModel:
-					parsedConfig.cursorDefaultFallbackModel ||
-					this.config.cursorDefaultFallbackModel,
 				defaultRunner: parsedConfig.defaultRunner || this.config.defaultRunner,
 				promptDefaults:
 					parsedConfig.promptDefaults || this.config.promptDefaults,
@@ -233,12 +224,8 @@ export class ConfigManager extends EventEmitter {
 					parsedConfig.defaultFallbackModel || this.config.defaultFallbackModel,
 				linearAllowedTools:
 					parsedConfig.linearAllowedTools || this.config.linearAllowedTools,
-				slackAllowedTools:
-					parsedConfig.slackAllowedTools || this.config.slackAllowedTools,
 				githubAllowedTools:
 					parsedConfig.githubAllowedTools || this.config.githubAllowedTools,
-				slackMcpConfigs:
-					parsedConfig.slackMcpConfigs || this.config.slackMcpConfigs,
 				linearMcpConfigs:
 					parsedConfig.linearMcpConfigs || this.config.linearMcpConfigs,
 				githubMcpConfigs:
@@ -250,10 +237,6 @@ export class ConfigManager extends EventEmitter {
 				// otherwise keep current or default to true
 				issueUpdateTrigger:
 					parsedConfig.issueUpdateTrigger ?? this.config.issueUpdateTrigger,
-				// Slack thread following: use parsed value if explicitly set,
-				// otherwise keep current or default to true
-				slackThreadFollowing:
-					parsedConfig.slackThreadFollowing ?? this.config.slackThreadFollowing,
 				// PR review trigger: use parsed value if explicitly set,
 				// otherwise keep current or default to true
 				prReviewTrigger:
@@ -340,22 +323,15 @@ export class ConfigManager extends EventEmitter {
 			"defaultRunner",
 			"claudeDefaultModel",
 			"claudeDefaultFallbackModel",
-			"geminiDefaultModel",
-			"codexDefaultModel",
-			"cursorDefaultModel",
-			"cursorDefaultFallbackModel",
 			"defaultModel",
 			"defaultFallbackModel",
 			"linearAllowedTools",
-			"slackAllowedTools",
 			"githubAllowedTools",
-			"slackMcpConfigs",
 			"linearMcpConfigs",
 			"githubMcpConfigs",
 			"defaultDisallowedTools",
 			"promptDefaults",
 			"issueUpdateTrigger",
-			"slackThreadFollowing",
 			"prReviewTrigger",
 			"linearWorkspaces",
 			"userAccessControl",

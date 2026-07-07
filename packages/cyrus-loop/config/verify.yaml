@@ -1,0 +1,25 @@
+# Mechanical verify commands per repo (DESIGN.md §Evidence ledger, stage 5).
+# These are the deterministic runners whose outputs become ledger entries E1..En —
+# the ONLY things the judge may cite. Keep them fast and non-interactive.
+# `default` applies to any repo without an explicit entry.
+
+version: 1
+
+default:
+  - { kind: tests, cmd: "make test" }
+  - { kind: lint, cmd: "make lint" }
+  - { kind: build, cmd: "make build" }
+
+repos:
+  Daily_You:
+    - { kind: tests, cmd: "flutter test" }
+    - { kind: lint, cmd: "flutter analyze" }
+    - { kind: build, cmd: "flutter build apk --debug" }
+  agentic-pipeline:
+    - { kind: tests, cmd: "uv run pytest -q" }
+    - { kind: lint, cmd: "uv run ruff check ." }
+  # nami: run from the `backend/` subdir. Full CI runs `pnpm test` (whole vitest
+  # suite over the in-memory SQLite app); a per-change run may scope to the touched
+  # module for speed — the diffscan (E4) still checks the whole change is in-spec.
+  nami:
+    - { kind: tests, cmd: "node_modules/.bin/vitest run tests/number.util.test.ts" }

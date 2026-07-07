@@ -19,7 +19,6 @@ import {
 	normalizeMcpHttpTransport,
 } from "cyrus-claude-runner";
 import { getCyrusAppUrl } from "cyrus-cloudflare-tunnel-client";
-import { CodexRunner } from "cyrus-codex-runner";
 import { ConfigUpdater } from "cyrus-config-updater";
 import type {
 	AgentActivityCreateInput,
@@ -78,8 +77,6 @@ import {
 	resolvePath,
 	WebhookIpValidator,
 } from "cyrus-core";
-import { CursorRunner } from "cyrus-cursor-runner";
-import { GeminiRunner } from "cyrus-gemini-runner";
 import {
 	extractCommentAuthor,
 	extractCommentBody,
@@ -105,25 +102,6 @@ import {
 	isPullRequestReviewPayload,
 	stripMention,
 } from "cyrus-github-event-transport";
-import type { GitLabWebhookEvent } from "cyrus-gitlab-event-transport";
-import {
-	extractDiscussionId,
-	extractSessionKey as extractGitLabSessionKey,
-	extractMRBaseBranchRef,
-	extractMRBranchRef,
-	extractMRIid,
-	extractMRTitle,
-	extractNoteAuthor,
-	extractNoteBody,
-	extractNoteId,
-	extractNoteUrl,
-	extractProjectId,
-	extractProjectPath,
-	GitLabCommentService,
-	GitLabEventTransport,
-	isNoteOnMergeRequest,
-	stripMention as stripGitLabMention,
-} from "cyrus-gitlab-event-transport";
 import {
 	LinearEventTransport,
 	LinearIssueTrackerService,
@@ -136,17 +114,11 @@ import {
 	type FailureModesHttpClient,
 	type ResolvedSession,
 } from "cyrus-mcp-tools";
-import {
-	SlackEventTransport,
-	type SlackWebhookEvent,
-} from "cyrus-slack-event-transport";
 import { Sessions, streamableHttp } from "fastify-mcp";
 import { ActivityPoster } from "./ActivityPoster.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
 import { AttachmentService } from "./AttachmentService.js";
-import { LiveChatRepositoryProvider } from "./ChatRepositoryProvider.js";
-import { ChatSessionHandler } from "./ChatSessionHandler.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
@@ -175,11 +147,14 @@ import {
 	type SkillSessionContext,
 	SkillsPluginResolver,
 } from "./SkillsPluginResolver.js";
-import { SlackChatAdapter } from "./SlackChatAdapter.js";
 import type { IActivitySink } from "./sinks/IActivitySink.js";
 import { LinearActivitySink } from "./sinks/LinearActivitySink.js";
 import { ToolPermissionResolver } from "./ToolPermissionResolver.js";
-import type { AgentSessionData, EdgeWorkerEvents } from "./types.js";
+import type {
+	AgentSessionData,
+	EdgeWorkerEvents,
+	LoopVerdictInput,
+} from "./types.js";
 import { UserAccessControl } from "./UserAccessControl.js";
 
 export declare interface EdgeWorker {
@@ -212,15 +187,14 @@ export class EdgeWorker extends EventEmitter {
 	private lastStopTimeBySession: Map<string, number> = new Map(); // Maps session ID to timestamp of last stop signal (for double-stop detection)
 	private warmInstances: Map<string, WarmQuery> = new Map(); // Pre-warmed Claude sessions keyed by agentSessionId
 	private issueTrackers: Map<string, IIssueTrackerService> = new Map(); // one issue tracker per Linear workspace (keyed by linearWorkspaceId)
+	/** Set by the compounding-loop adapter (Lane C) to divert diff-gate verdict prompts. */
+	private loopVerdictInterceptor?: (
+		input: LoopVerdictInput,
+	) => boolean | Promise<boolean>;
 	private linearEventTransport: LinearEventTransport | null = null; // Single event transport for webhook delivery
 	private gitHubEventTransport: GitHubEventTransport | null = null; // GitHub event transport for forwarded GitHub webhooks
 	private gitHubAppTokenProvider: GitHubAppTokenProvider | null = null; // Self-hosted GitHub App token minting
-	private gitLabEventTransport: GitLabEventTransport | null = null; // GitLab event transport for forwarded GitLab webhooks
-	private slackEventTransport: SlackEventTransport | null = null;
-	private chatSessionHandler: ChatSessionHandler<SlackWebhookEvent> | null =
-		null;
 	private gitHubCommentService: GitHubCommentService; // Service for posting comments back to GitHub PRs
-	private gitLabCommentService: GitLabCommentService; // Service for posting comments back to GitLab MRs
 	private cliRPCServer: CLIRPCServer | null = null; // CLI RPC server for CLI platform mode
 	private configUpdater: ConfigUpdater | null = null; // Single config updater for configuration updates
 	private persistenceManager: PersistenceManager;
@@ -312,7 +286,6 @@ export class EdgeWorker extends EventEmitter {
 			paths ? paths.map(resolvePath) : undefined;
 		return {
 			...config,
-			slackMcpConfigs: resolveList(config.slackMcpConfigs),
 			linearMcpConfigs: resolveList(config.linearMcpConfigs),
 			githubMcpConfigs: resolveList(config.githubMcpConfigs),
 		};
@@ -362,24 +335,6 @@ export class EdgeWorker extends EventEmitter {
 
 		// Initialize GitHub comment service for posting replies to GitHub PRs
 		this.gitHubCommentService = new GitHubCommentService();
-
-		// Initialize GitLab comment service for posting replies to GitLab MRs.
-		// For Self-Managed GitLab the API base URL must be derived from the
-		// configured repos' gitlabUrl host; otherwise the service falls back to
-		// gitlab.com and 404s on every reply. Picks the first configured
-		// GitLab repo's host (single GitLab host per Cyrus instance).
-		const firstGitlabRepo = config.repositories.find((r) => r.gitlabUrl);
-		let gitlabApiBaseUrl: string | undefined;
-		if (firstGitlabRepo?.gitlabUrl) {
-			try {
-				gitlabApiBaseUrl = new URL(firstGitlabRepo.gitlabUrl).origin;
-			} catch {
-				// malformed gitlabUrl — leave undefined and fall through to default
-			}
-		}
-		this.gitLabCommentService = new GitLabCommentService(
-			gitlabApiBaseUrl ? { apiBaseUrl: gitlabApiBaseUrl } : undefined,
-		);
 
 		// Initialize global session registry (centralized session storage)
 		this.globalSessionRegistry = new GlobalSessionRegistry();
@@ -490,6 +445,23 @@ export class EdgeWorker extends EventEmitter {
 			},
 		);
 
+		// Compounding loop (Lane C): re-emit terminal sessions on the EdgeWorker bus, enriched with
+		// the repo name the loop keys on. The callback reads this.repositories at emit time (after
+		// the population loop below has run), so ordering here is fine.
+		this.agentSessionManager.on("sessionComplete", (p) => {
+			const repo = p.repositoryId
+				? this.repositories.get(p.repositoryId)
+				: undefined;
+			this.emit("sessionComplete", {
+				issueId: p.issueId ?? "",
+				issueIdentifier: p.issueIdentifier,
+				repositoryId: p.repositoryId ?? "",
+				repositoryName: repo?.name ?? "",
+				worktree: p.worktree,
+				status: String(p.status),
+			});
+		});
+
 		// Initialize repositories with path resolution
 		for (const repo of config.repositories) {
 			if (repo.isActive !== false) {
@@ -582,7 +554,6 @@ export class EdgeWorker extends EventEmitter {
 				this.createCyrusToolsOptions(parentSessionId),
 		});
 		this.runnerConfigBuilder = new RunnerConfigBuilder(
-			this.toolPermissionResolver,
 			this.mcpConfigService,
 			this.runnerSelectionService,
 		);
@@ -832,12 +803,10 @@ export class EdgeWorker extends EventEmitter {
 			);
 		}
 
-		// 2. Register GitHub and Slack event transports unconditionally
-		// These don't require repositories and must be available during onboarding
+		// 2. Register the GitHub event transport unconditionally
+		// It doesn't require repositories and must be available during onboarding
 		// for webhook URL verification to succeed.
 		this.registerGitHubEventTransport();
-		this.registerGitLabEventTransport();
-		this.registerSlackEventTransport();
 
 		// 3. Create and register ConfigUpdater (both platforms)
 		this.configUpdater = new ConfigUpdater(
@@ -986,199 +955,6 @@ export class EdgeWorker extends EventEmitter {
 			`GitHub event transport registered (${verificationMode} mode)`,
 		);
 		this.logger.info("Webhook endpoint: POST /github-webhook");
-	}
-
-	/**
-	 * Register the GitLab event transport for receiving forwarded GitLab webhooks.
-	 * This creates a /gitlab-webhook endpoint that handles note events on merge requests.
-	 */
-	private registerGitLabEventTransport(): void {
-		const isExternalHost =
-			process.env.CYRUS_HOST_EXTERNAL?.toLowerCase().trim() === "true";
-		const hasGitlabWebhookSecret =
-			process.env.GITLAB_WEBHOOK_SECRET != null &&
-			process.env.GITLAB_WEBHOOK_SECRET !== "";
-		const useSignatureVerification = isExternalHost && hasGitlabWebhookSecret;
-		const verificationMode = useSignatureVerification ? "signature" : "proxy";
-		const secret = useSignatureVerification
-			? process.env.GITLAB_WEBHOOK_SECRET!
-			: process.env.CYRUS_API_KEY || "";
-
-		this.gitLabEventTransport = new GitLabEventTransport({
-			fastifyServer: this.sharedApplicationServer.getFastifyInstance(),
-			verificationMode,
-			secret,
-		});
-
-		// Listen for legacy GitLab webhook events
-		this.gitLabEventTransport.on("event", (event: GitLabWebhookEvent) => {
-			this.handleGitLabWebhook(event).catch((error) => {
-				this.logger.error(
-					"Failed to handle GitLab webhook",
-					error instanceof Error ? error : new Error(String(error)),
-				);
-			});
-		});
-
-		// Listen for unified internal messages (new message bus)
-		this.gitLabEventTransport.on("message", (message: InternalMessage) => {
-			this.handleMessage(message);
-		});
-
-		// Listen for errors
-		this.gitLabEventTransport.on("error", (error: Error) => {
-			this.handleError(error);
-		});
-
-		// Register the /gitlab-webhook endpoint
-		this.gitLabEventTransport.register();
-
-		this.logger.info(
-			`GitLab event transport registered (${verificationMode} mode)`,
-		);
-		this.logger.info("Webhook endpoint: POST /gitlab-webhook");
-	}
-
-	/**
-	 * Whether Cyrus should follow plain replies in a Slack thread it was
-	 * @mentioned in. Enabled by default; controlled by the per-team
-	 * `slackThreadFollowing` config toggle (Behaviours page) and force-disabled
-	 * by the `CYRUS_SLACK_THREAD_FOLLOWING_DISABLED` env kill-switch, which takes
-	 * precedence over the toggle. When disabled, only @mentions are processed.
-	 */
-	private isSlackThreadFollowingEnabled(): boolean {
-		const envValue = (process.env.CYRUS_SLACK_THREAD_FOLLOWING_DISABLED ?? "")
-			.toLowerCase()
-			.trim();
-		if (envValue === "true" || envValue === "1" || envValue === "yes") {
-			return false;
-		}
-		// Config toggle defaults to enabled when unset.
-		return this.config.slackThreadFollowing !== false;
-	}
-
-	/**
-	 * Register the Slack event transport for receiving forwarded Slack webhooks from CYHOST.
-	 * This creates a /slack-webhook endpoint that handles @mention events from Slack.
-	 */
-	private registerSlackEventTransport(): void {
-		// Live provider reads from the repository map on demand — no snapshot needed
-		const chatRepositoryProvider = new LiveChatRepositoryProvider(
-			this.repositories,
-			() => this.config.linearWorkspaces || {},
-		);
-
-		const routingContext =
-			this.promptBuilder.generateRoutingContextForAllWorkspaces();
-		// Only managed teams (cloud or self-hosted, paired with cyrus-hosted)
-		// have a Behaviours page where automatic Slack thread listening can be
-		// turned off — CYRUS_API_KEY is proof of that pairing, so the
-		// stop-listening prompt guidance is gated on it. Community members
-		// don't have the key (or the page).
-		const cyrusAppBaseUrl = process.env.CYRUS_API_KEY
-			? getCyrusAppUrl()
-			: undefined;
-		const slackAdapter = new SlackChatAdapter(
-			chatRepositoryProvider,
-			this.logger,
-			{ repositoryRoutingContext: routingContext, cyrusAppBaseUrl },
-		);
-
-		if (
-			!chatRepositoryProvider.getDefaultLinearWorkspaceId() ||
-			!chatRepositoryProvider.getDefaultRepository()
-		) {
-			this.logger.warn(
-				"No repositories or workspaces configured — Slack sessions will not have access to MCP tools",
-			);
-		}
-
-		this.chatSessionHandler = new ChatSessionHandler(
-			slackAdapter,
-			{
-				cyrusHome: this.cyrusHome,
-				chatRepositoryProvider,
-				runnerConfigBuilder: this.runnerConfigBuilder,
-				createRunner: (config) => {
-					const runnerType = this.runnerSelectionService.getDefaultRunner();
-					return this.createRunnerForType(runnerType, {
-						...config,
-						model: this.getDefaultModelForRunner(runnerType),
-						fallbackModel: this.getDefaultFallbackModelForRunner(runnerType),
-					});
-				},
-				// Live read so hot-reloaded config (`setConfig`) picks up new
-				// per-platform MCP paths without rebuilding the handler.
-				getPlatformMcpConfigOverrides: () => this.config.slackMcpConfigs,
-				resolveSkillsConfig: async ({ repository, repositoryPaths }) => {
-					const plugins = await this.skillsPluginResolver.resolve();
-					const skills = await this.skillsPluginResolver.discoverSkillNames(
-						plugins,
-						{
-							repositoryId: repository?.id,
-							repoPaths: repositoryPaths,
-						},
-					);
-					return { plugins, skills };
-				},
-				onWebhookStart: () => {
-					this.activeWebhookCount++;
-				},
-				onWebhookEnd: () => {
-					this.activeWebhookCount--;
-				},
-				onStateChange: () => this.savePersistedState(),
-				onClaudeError: (error) => this.handleClaudeError(error),
-			},
-			this.logger,
-		);
-
-		// Use direct Slack signature verification only when BOTH:
-		// 1. SLACK_SIGNING_SECRET is set (we have the secret to verify)
-		// 2. CYRUS_HOST_EXTERNAL is true (self-hosted: Slack sends directly to us)
-		// On cloud droplets, CYHOST forwards webhooks with Bearer token auth
-		// (it verifies the Slack signature itself and doesn't forward the headers).
-		const isExternalHost =
-			process.env.CYRUS_HOST_EXTERNAL?.toLowerCase().trim() === "true";
-		const hasSlackSigningSecret =
-			process.env.SLACK_SIGNING_SECRET != null &&
-			process.env.SLACK_SIGNING_SECRET !== "";
-		const useDirectSlackWebhooks = isExternalHost && hasSlackSigningSecret;
-
-		const slackVerificationMode = useDirectSlackWebhooks ? "direct" : "proxy";
-		const slackSecret = useDirectSlackWebhooks
-			? process.env.SLACK_SIGNING_SECRET!
-			: process.env.CYRUS_API_KEY || "";
-
-		this.slackEventTransport = new SlackEventTransport({
-			fastifyServer: this.sharedApplicationServer.getFastifyInstance(),
-			verificationMode: slackVerificationMode,
-			secret: slackSecret,
-			// Live read so the per-team toggle (hot-reloaded via config) and the
-			// env kill-switch both take effect without rebuilding the transport.
-			isThreadFollowingEnabled: () => this.isSlackThreadFollowingEnabled(),
-		});
-
-		this.slackEventTransport.on("event", (event: SlackWebhookEvent) => {
-			this.chatSessionHandler!.handleEvent(event).catch((error) => {
-				this.logger.error(
-					"Failed to handle Slack webhook",
-					error instanceof Error ? error : new Error(String(error)),
-				);
-			});
-		});
-		this.slackEventTransport.on("message", (message: InternalMessage) => {
-			this.handleMessage(message);
-		});
-		this.slackEventTransport.on("error", (error: Error) => {
-			this.handleError(error);
-		});
-
-		this.slackEventTransport.register();
-
-		this.logger.info(
-			`Slack event transport registered (${slackVerificationMode} mode)`,
-		);
 	}
 
 	/**
@@ -1510,8 +1286,7 @@ export class EdgeWorker extends EventEmitter {
 
 			// Build allowed tools using the GitHub platform resolver, which honors
 			// `githubAllowedTools` on the workspace config and falls back to
-			// `GITHUB_DEFAULT_ALLOWED_TOOLS` (which intentionally omits
-			// `mcp__slack` — no subtractive filtering needed).
+			// `GITHUB_DEFAULT_ALLOWED_TOOLS`.
 			const allowedTools =
 				this.toolPermissionResolver.buildGithubAllowedTools(repository);
 			const disallowedTools = this.buildDisallowedTools(repository);
@@ -1981,522 +1756,6 @@ ${taskSection}`;
 	}
 
 	/**
-	 * Handle an incoming GitLab webhook event (note on a merge request).
-	 * Mirrors the GitHub webhook handler but uses GitLab-specific utilities.
-	 */
-	private async handleGitLabWebhook(event: GitLabWebhookEvent): Promise<void> {
-		this.activeWebhookCount++;
-
-		try {
-			// Only handle notes on merge requests
-			if (!isNoteOnMergeRequest(event)) {
-				this.logger.debug(
-					"Ignoring GitLab event: not a note on a merge request",
-				);
-				return;
-			}
-
-			const projectPath = extractProjectPath(event);
-			const mrIid = extractMRIid(event);
-			const noteBody = extractNoteBody(event);
-			const noteAuthor = extractNoteAuthor(event);
-			const mrTitle = extractMRTitle(event);
-			const sessionKey = extractGitLabSessionKey(event);
-
-			// Skip comments from the bot itself to prevent infinite loops
-			const botUsername = process.env.GITLAB_BOT_USERNAME;
-			if (botUsername && noteAuthor === botUsername) {
-				this.logger.debug(
-					`Ignoring note from bot user @${botUsername} on ${projectPath}!${mrIid}`,
-				);
-				return;
-			}
-
-			// Only trigger on notes that mention the bot (when configured)
-			if (botUsername && !noteBody.includes(`@${botUsername}`)) {
-				this.logger.debug(
-					`Ignoring note without @${botUsername} mention on ${projectPath}!${mrIid}`,
-				);
-				return;
-			}
-
-			this.logger.info(
-				`Processing GitLab webhook: ${projectPath}!${mrIid} by @${noteAuthor}`,
-			);
-
-			// Add "eyes" emoji reaction to acknowledge receipt
-			const reactionToken =
-				event.accessToken || process.env.GITLAB_ACCESS_TOKEN;
-			const noteId = extractNoteId(event);
-			const projectId = extractProjectId(event);
-			if (reactionToken && noteId && projectId && mrIid) {
-				this.gitLabCommentService
-					.addAwardEmoji({
-						token: reactionToken,
-						projectId,
-						mrIid,
-						noteId,
-						name: "eyes",
-					})
-					.catch((err: unknown) => {
-						this.logger.warn(
-							`Failed to add GitLab emoji reaction: ${err instanceof Error ? err.message : err}`,
-						);
-					});
-			}
-
-			// Find the repository configuration that matches this GitLab project
-			const repository = this.findRepositoryByGitLabUrl(projectPath);
-			if (!repository) {
-				this.logger.warn(
-					`No repository configured for GitLab project: ${projectPath}`,
-				);
-				return;
-			}
-
-			const agentSessionManager = this.agentSessionManager;
-
-			// Branch refs are available directly from the MR payload
-			const branchRef = extractMRBranchRef(event);
-			const baseBranchRef = extractMRBaseBranchRef(event);
-
-			if (!branchRef || !mrIid) {
-				this.logger.error(
-					`Could not determine branch or MR iid for ${projectPath}!${mrIid}`,
-				);
-				return;
-			}
-
-			// Strip the bot mention to get the task instructions
-			const mentionHandle = botUsername ? `@${botUsername}` : "@cyrusagent";
-			const taskInstructions = stripGitLabMention(noteBody, mentionHandle);
-
-			// Check for an existing multi-repo session that includes this repository
-			let workspace: { path: string; isGitWorktree: boolean } | null = null;
-			const multiRepoSession =
-				agentSessionManager.getActiveMultiRepoSessionForRepository(
-					repository.id,
-				);
-
-			if (multiRepoSession) {
-				const subWorktreePath =
-					multiRepoSession.workspace.repoPaths?.[repository.id];
-				if (subWorktreePath) {
-					workspace = {
-						path: subWorktreePath,
-						isGitWorktree: true,
-					};
-					this.logger.info(
-						`Resolved multi-repo sub-worktree for ${repository.name}: ${subWorktreePath}`,
-					);
-				} else {
-					this.logger.warn(
-						`No sub-worktree found for repo ${repository.name} in multi-repo session ${multiRepoSession.id}, falling back to root workspace`,
-					);
-					workspace = {
-						path: multiRepoSession.workspace.path,
-						isGitWorktree: true,
-					};
-				}
-			} else {
-				// Single-repo or no existing session: create workspace
-				workspace = await this.createGitLabWorkspace(
-					repository,
-					branchRef,
-					mrIid,
-				);
-			}
-
-			if (!workspace) {
-				this.logger.error(
-					`Failed to create workspace for ${projectPath}!${mrIid}`,
-				);
-				return;
-			}
-
-			this.logger.info(`GitLab workspace created at: ${workspace.path}`);
-
-			// Check if another active session is already using this branch/workspace
-			const existingSessions =
-				agentSessionManager.getActiveSessionsByBranchName(branchRef);
-			const firstExisting = existingSessions[0];
-			if (firstExisting) {
-				this.logger.warn(
-					`Reusing workspace from active session ${firstExisting.id} — concurrent writes possible`,
-				);
-			}
-
-			// Create a synthetic session for this GitLab MR note
-			const issueMinimal: IssueMinimal = {
-				id: sessionKey,
-				identifier: `${projectPath}!${mrIid}`,
-				title: mrTitle || `MR !${mrIid}`,
-				branchName: branchRef,
-			};
-
-			// Create an internal agent session (no Linear session for GitLab)
-			const gitlabSessionId = `gitlab-${Date.now()}`;
-			agentSessionManager.createCyrusAgentSession(
-				gitlabSessionId,
-				sessionKey,
-				issueMinimal,
-				workspace,
-				"gitlab", // Don't stream activities to Linear for GitLab sources
-				[
-					{
-						repositoryId: repository.id,
-						branchName: branchRef,
-						baseBranchName: baseBranchRef ?? repository.baseBranch,
-					},
-				],
-			);
-
-			// Register session-to-repo mapping and activity sink
-			this.sessionRepositories.set(gitlabSessionId, repository.id);
-			const activitySink = this.getActivitySinkForRepo(repository.id);
-			if (activitySink) {
-				agentSessionManager.setActivitySink(gitlabSessionId, activitySink);
-			}
-
-			const session = agentSessionManager.getSession(gitlabSessionId);
-			if (!session) {
-				this.logger.error(
-					`Failed to create session for GitLab webhook on ${projectPath}!${mrIid}`,
-				);
-				return;
-			}
-
-			// Initialize procedure metadata
-			if (!session.metadata) {
-				session.metadata = {};
-			}
-
-			// Store GitLab-specific metadata for reply posting
-			// Reuse commentId for note ID (serves the same purpose across platforms)
-			session.metadata.commentId = String(noteId);
-
-			// Build the system prompt for this GitLab MR session
-			// TODO: Use buildGitLabChangeRequestSystemPrompt for merge_request approval events
-			const isMergeRequestEvent = event.eventType === "merge_request";
-			const systemPrompt = isMergeRequestEvent
-				? this.buildGitLabChangeRequestSystemPrompt(
-						event,
-						branchRef,
-						taskInstructions,
-					)
-				: this.buildGitLabSystemPrompt(event, branchRef, taskInstructions);
-
-			// Build allowed tools using the GitHub platform resolver — GitLab and
-			// GitHub share the same PR-targeted, single-repo intent, so they use
-			// the same `githubAllowedTools` knob and the same `GITHUB_*` default.
-			const allowedTools =
-				this.toolPermissionResolver.buildGithubAllowedTools(repository);
-			const disallowedTools = this.buildDisallowedTools(repository);
-			const allowedDirectories: string[] = [repository.repositoryPath];
-
-			// Create agent runner using the standard config builder
-			const { config: runnerConfig, runnerType } =
-				await this.buildAgentRunnerConfig(
-					session,
-					repository,
-					gitlabSessionId,
-					systemPrompt,
-					allowedTools,
-					allowedDirectories,
-					disallowedTools,
-					undefined, // resumeSessionId
-					undefined, // labels
-					undefined, // issueDescription
-					200, // maxTurns
-					undefined, // linearWorkspaceId
-					this.buildSkillSessionContext(repository, undefined, session),
-					"gitlab", // sessionPlatform → uses githubMcpConfigs override
-				);
-
-			const runner = this.createRunnerForType(runnerType, runnerConfig);
-
-			// Store the runner in the session manager
-			agentSessionManager.addAgentRunner(gitlabSessionId, runner);
-
-			// Save persisted state
-			await this.savePersistedState();
-
-			this.emit(
-				"session:started",
-				sessionKey,
-				issueMinimal as unknown as Issue,
-				repository.id,
-			);
-
-			this.logger.info(
-				`Starting ${runnerType} runner for GitLab MR ${projectPath}!${mrIid}`,
-			);
-
-			// Start the session and handle completion
-			try {
-				const sessionInfo = await runner.start(taskInstructions);
-				this.logger.info(`GitLab session started: ${sessionInfo.sessionId}`);
-
-				// When session completes, post the reply back to GitLab
-				await this.postGitLabReply(event, runner, repository);
-			} catch (error) {
-				this.logger.error(
-					`GitLab session error for ${projectPath}!${mrIid}`,
-					error instanceof Error ? error : new Error(String(error)),
-				);
-			} finally {
-				await this.savePersistedState();
-			}
-		} catch (error) {
-			this.logger.error(
-				"Failed to process GitLab webhook",
-				error instanceof Error ? error : new Error(String(error)),
-			);
-		} finally {
-			this.activeWebhookCount--;
-		}
-	}
-
-	/**
-	 * Find a repository configuration that matches a GitLab project URL.
-	 * Matches against the gitlabUrl field in repository config.
-	 */
-	private findRepositoryByGitLabUrl(
-		projectPath: string,
-	): RepositoryConfig | null {
-		for (const repo of this.repositories.values()) {
-			if (!repo.gitlabUrl) continue;
-			if (
-				repo.gitlabUrl.includes(projectPath) ||
-				repo.gitlabUrl.endsWith(`/${projectPath}`)
-			) {
-				return repo;
-			}
-		}
-		return null;
-	}
-
-	/**
-	 * Create a git worktree for a GitLab MR branch.
-	 * If the worktree already exists for this branch, reuse it.
-	 */
-	private async createGitLabWorkspace(
-		repository: RepositoryConfig,
-		branchRef: string,
-		mrIid: number,
-	): Promise<{ path: string; isGitWorktree: boolean } | null> {
-		try {
-			// Create a synthetic issue-like object for the git service
-			const syntheticIssue = {
-				id: `gitlab-mr-${mrIid}`,
-				identifier: `MR-${mrIid}`,
-				title: `MR !${mrIid}`,
-				description: null,
-				url: "",
-				branchName: branchRef,
-				assigneeId: null,
-				stateId: null,
-				teamId: null,
-				labelIds: [],
-				priority: 0,
-				createdAt: new Date(),
-				updatedAt: new Date(),
-				archivedAt: null,
-				state: Promise.resolve(undefined),
-				assignee: Promise.resolve(undefined),
-				team: Promise.resolve(undefined),
-				parent: Promise.resolve(undefined),
-				project: Promise.resolve(undefined),
-				labels: () => Promise.resolve({ nodes: [] }),
-				comments: () => Promise.resolve({ nodes: [] }),
-				attachments: () => Promise.resolve({ nodes: [] }),
-				children: () => Promise.resolve({ nodes: [] }),
-				inverseRelations: () => Promise.resolve({ nodes: [] }),
-				update: () =>
-					Promise.resolve({
-						success: true,
-						issue: undefined,
-						lastSyncId: 0,
-					}),
-			} as unknown as Issue;
-
-			return await this.gitService.createGitWorktree(syntheticIssue, [
-				repository,
-			]);
-		} catch (error) {
-			this.logger.error(
-				`Failed to create GitLab workspace for MR !${mrIid}`,
-				error instanceof Error ? error : new Error(String(error)),
-			);
-			return null;
-		}
-	}
-
-	/**
-	 * Build a system prompt for a GitLab MR note session.
-	 */
-	private buildGitLabSystemPrompt(
-		event: GitLabWebhookEvent,
-		branchRef: string,
-		taskInstructions: string,
-	): string {
-		const projectPath = extractProjectPath(event);
-		const mrIid = extractMRIid(event);
-		const mrTitle = extractMRTitle(event);
-		const noteAuthor = extractNoteAuthor(event);
-		const noteUrl = extractNoteUrl(event);
-
-		return `You are working on a GitLab Merge Request.
-
-## Context
-- **Project**: ${projectPath}
-- **MR**: !${mrIid} - ${mrTitle || "Untitled"}
-- **Branch**: ${branchRef}
-- **Requested by**: @${noteAuthor}
-- **Note URL**: ${noteUrl}
-
-## Task
-${taskInstructions}
-
-## Instructions
-- You are already checked out on the MR branch \`${branchRef}\`
-- Make changes directly to the code on this branch
-- After making changes, commit and push them to the branch
-- Use \`glab\` CLI commands for GitLab-specific operations
-- Be concise in your responses as they will be posted back to the GitLab MR`;
-	}
-
-	/**
-	 * Build a system prompt for a GitLab MR change request session.
-	 */
-	private buildGitLabChangeRequestSystemPrompt(
-		event: GitLabWebhookEvent,
-		branchRef: string,
-		reviewBody: string,
-	): string {
-		const projectPath = extractProjectPath(event);
-		const mrIid = extractMRIid(event);
-		const mrTitle = extractMRTitle(event);
-		const noteAuthor = extractNoteAuthor(event);
-		const noteUrl = extractNoteUrl(event);
-
-		const hasReviewBody = reviewBody.trim().length > 0;
-
-		const taskSection = hasReviewBody
-			? `## Reviewer Feedback
-${reviewBody}
-
-## Instructions
-- Read the MR diff and the reviewer's feedback above to understand all requested changes
-- You are already checked out on the MR branch \`${branchRef}\`
-- Address all the reviewer's feedback and make the necessary changes
-- After making changes, commit and push them to the branch
-- Respond with a concise summary of the changes you made`
-			: `## Instructions
-- The reviewer has requested changes but did not leave a summary comment
-- Use \`glab mr view ${mrIid}\` and \`glab mr diff ${mrIid}\` to review the MR context
-- You are already checked out on the MR branch \`${branchRef}\`
-- Address all the reviewer's feedback and make the necessary changes
-- After making changes, commit and push them to the branch
-- Respond with a concise summary of the changes you made`;
-
-		return `You are working on a GitLab Merge Request that has received a change request review.
-
-## Context
-- **Project**: ${projectPath}
-- **MR**: !${mrIid} - ${mrTitle || "Untitled"}
-- **Branch**: ${branchRef}
-- **Reviewer**: @${noteAuthor}
-- **Note URL**: ${noteUrl}
-
-${taskSection}`;
-	}
-
-	/**
-	 * Post a reply back to the GitLab MR after the session completes.
-	 */
-	private async postGitLabReply(
-		event: GitLabWebhookEvent,
-		runner: IAgentRunner,
-		_repository: RepositoryConfig,
-	): Promise<void> {
-		try {
-			// Get the last assistant message from the runner as the summary
-			const messages = runner.getMessages();
-			const lastAssistantMessage = [...messages]
-				.reverse()
-				.find((m) => m.type === "assistant");
-
-			let summary = "Task completed. Please review the changes on this branch.";
-			if (
-				lastAssistantMessage &&
-				lastAssistantMessage.type === "assistant" &&
-				"message" in lastAssistantMessage
-			) {
-				const msg = lastAssistantMessage as {
-					message: {
-						content: Array<{ type: string; text?: string }>;
-					};
-				};
-				const textBlock = msg.message.content?.find(
-					(block) => block.type === "text" && block.text,
-				);
-				if (textBlock?.text) {
-					summary = textBlock.text;
-				}
-			}
-
-			const projectId = extractProjectId(event);
-			const mrIid = extractMRIid(event);
-			const discussionId = extractDiscussionId(event);
-
-			if (!mrIid) {
-				this.logger.warn("Cannot post GitLab reply: no MR iid");
-				return;
-			}
-
-			const token = event.accessToken || process.env.GITLAB_ACCESS_TOKEN;
-			if (!token) {
-				this.logger.warn(
-					"Cannot post GitLab reply: no access token or GITLAB_ACCESS_TOKEN configured",
-				);
-				this.logger.debug(
-					`Would have posted reply to ${extractProjectPath(event)}!${mrIid}: ${summary}`,
-				);
-				return;
-			}
-
-			if (discussionId) {
-				// Reply to the specific discussion thread
-				await this.gitLabCommentService.postDiscussionReply({
-					token,
-					projectId,
-					mrIid,
-					discussionId,
-					body: summary,
-				});
-			} else {
-				// Post as a top-level MR note
-				await this.gitLabCommentService.postMRNote({
-					token,
-					projectId,
-					mrIid,
-					body: summary,
-				});
-			}
-
-			this.logger.info(
-				`Posted GitLab reply to ${extractProjectPath(event)}!${mrIid}`,
-			);
-		} catch (error) {
-			this.logger.error(
-				"Failed to post GitLab reply",
-				error instanceof Error ? error : new Error(String(error)),
-			);
-		}
-	}
-
-	/**
 	 * Compute the current status of the Cyrus process
 	 * @returns "idle" if the process can be safely restarted, "busy" if work is in progress
 	 */
@@ -2514,24 +1773,7 @@ ${taskSection}`;
 			}
 		}
 
-		// Busy if any chat platform runner is actively running
-		if (this.chatSessionHandler?.isAnyRunnerBusy()) {
-			return "busy";
-		}
-
 		return "idle";
-	}
-
-	/**
-	 * Test-only: dispatch a synthetic Slack webhook event through the chat
-	 * session handler. Used by the F1 test harness to exercise the Slack →
-	 * ClaudeRunner code path end-to-end without a real Slack signature.
-	 */
-	async dispatchChatTestEvent(event: SlackWebhookEvent): Promise<void> {
-		if (!this.chatSessionHandler) {
-			throw new Error("chatSessionHandler not initialized");
-		}
-		await this.chatSessionHandler.handleEvent(event);
 	}
 
 	/**
@@ -2540,52 +1782,6 @@ ${taskSection}`;
 	 */
 	getSharedApplicationServer(): SharedApplicationServer {
 		return this.sharedApplicationServer;
-	}
-
-	/**
-	 * Test-only: list active chat threads (threadKey → sessionId).
-	 */
-	listChatThreads(): Array<{ threadKey: string; sessionId: string }> {
-		if (!this.chatSessionHandler) return [];
-		return this.chatSessionHandler.listThreads();
-	}
-
-	/**
-	 * Test-only: fetch the last assistant text reply for a chat thread.
-	 * Returns null when the thread or runner is unknown, or no assistant
-	 * message has been produced yet.
-	 */
-	getChatThreadLastReply(threadKey: string): {
-		text: string;
-		isRunning: boolean;
-		messageCount: number;
-	} | null {
-		if (!this.chatSessionHandler) return null;
-		const runner = this.chatSessionHandler.getRunnerForThread(threadKey);
-		if (!runner) return null;
-		const messages = runner.getMessages();
-		const lastAssistant = [...messages]
-			.reverse()
-			.find((m) => m.type === "assistant");
-		let text = "";
-		if (
-			lastAssistant &&
-			lastAssistant.type === "assistant" &&
-			"message" in lastAssistant
-		) {
-			const msg = lastAssistant as {
-				message: { content: Array<{ type: string; text?: string }> };
-			};
-			const block = msg.message.content?.find(
-				(b) => b.type === "text" && b.text,
-			);
-			if (block?.text) text = block.text;
-		}
-		return {
-			text,
-			isRunning: runner.isRunning(),
-			messageCount: messages.length,
-		};
 	}
 
 	/**
@@ -2605,13 +1801,10 @@ ${taskSection}`;
 			);
 		}
 
-		// get all agent runners (including chat platform sessions)
+		// get all agent runners
 		const agentRunners: IAgentRunner[] = [
 			...this.agentSessionManager.getAllAgentRunners(),
 		];
-		if (this.chatSessionHandler) {
-			agentRunners.push(...this.chatSessionHandler.getAllRunners());
-		}
 
 		// Kill all agent processes with null checking
 		for (const runner of agentRunners) {
@@ -3237,7 +2430,7 @@ ${taskSection}`;
 	// ============================================================================
 	// These handlers process unified InternalMessage types from the message bus.
 	// They provide a platform-agnostic interface for handling events from
-	// Linear, GitHub, Slack, and other platforms.
+	// Linear, GitHub, and other platforms.
 	// ============================================================================
 
 	/**
@@ -4029,6 +3222,30 @@ ${taskSection}`;
 		const repo = this.repositories.get(repoId);
 		if (!repo?.linearWorkspaceId) return undefined;
 		return this.activitySinks.get(repo.linearWorkspaceId);
+	}
+
+	/**
+	 * Public accessor: the issue tracker serving a repository's Linear workspace. Used by the
+	 * compounding-loop adapter (Lane C) to post the blind gate. Undefined when the repo has no
+	 * resolvable workspace/tracker.
+	 */
+	getIssueTrackerForRepository(
+		repoId: string,
+	): IIssueTrackerService | undefined {
+		const repo = this.repositories.get(repoId);
+		if (!repo?.linearWorkspaceId) return undefined;
+		return this.issueTrackers.get(repo.linearWorkspaceId);
+	}
+
+	/**
+	 * Register the compounding-loop verdict interceptor (Lane C). EdgeWorker consults it on each
+	 * user prompt before starting a session; when it returns true the prompt was a diff-gate
+	 * verdict consumed by the loop and no Claude session is started.
+	 */
+	setLoopVerdictInterceptor(
+		fn: (input: LoopVerdictInput) => boolean | Promise<boolean>,
+	): void {
+		this.loopVerdictInterceptor = fn;
 	}
 
 	/**
@@ -5091,6 +4308,22 @@ ${taskSection}`;
 			return;
 		}
 
+		// Branch 2.75: Compounding-loop diff-gate verdict (Lane C). A verdict (`/approve`,
+		// `/reject`, `/rework`) on an issue with a pending blind gate is diverted to the loop —
+		// it must NOT spin up a Claude session. The interceptor returns false for anything else.
+		if (this.loopVerdictInterceptor) {
+			try {
+				const handled = await this.loopVerdictInterceptor({
+					issueId: webhook.agentSession?.issue?.id ?? "",
+					text: activityBody,
+					agentSessionId,
+				});
+				if (handled) return;
+			} catch (error) {
+				this.logger.error("Loop verdict interceptor threw:", error);
+			}
+		}
+
 		// Branch 3: Handle normal prompted activity (existing session continuation)
 		// Per CLAUDE.md: "an agentSession MUST exist and a repository MUST already
 		// be associated with the Linear issue. The repository will be retrieved from
@@ -5369,28 +4602,10 @@ ${taskSection}`;
 	}
 
 	/**
-	 * Resolve default model for a given runner from config with sensible built-in defaults.
-	 * Supports legacy config keys for backwards compatibility.
-	 */
-	private getDefaultModelForRunner(runnerType: RunnerType): string {
-		return this.runnerSelectionService.getDefaultModelForRunner(runnerType);
-	}
-
-	/**
-	 * Resolve default fallback model for a given runner from config with sensible built-in defaults.
-	 * Supports legacy Claude fallback key for backwards compatibility.
-	 */
-	private getDefaultFallbackModelForRunner(runnerType: RunnerType): string {
-		return this.runnerSelectionService.getDefaultFallbackModelForRunner(
-			runnerType,
-		);
-	}
-
-	/**
 	 * Instantiate the appropriate runner for the given type.
 	 */
 	private createRunnerForType(
-		runnerType: "claude" | "gemini" | "codex" | "cursor",
+		runnerType: "claude",
 		config: AgentRunnerConfig,
 	): IAgentRunner {
 		switch (runnerType) {
@@ -5402,12 +4617,6 @@ ${taskSection}`;
 					: config;
 				return new ClaudeRunner(claudeConfig, this.isWarmSessionsEnabled());
 			}
-			case "gemini":
-				return new GeminiRunner(config);
-			case "codex":
-				return new CodexRunner(config);
-			case "cursor":
-				return new CursorRunner(config);
 			default:
 				throw new Error(`Unknown runner type: ${runnerType satisfies never}`);
 		}
@@ -5845,7 +5054,7 @@ ${taskSection}`;
 	 * Resolve a working-directory string to the rich session bundle a
 	 * Cyrus team member needs to triage a failure-mode report: the
 	 * internal session id (for dedup), the runner session id + runner
-	 * type (so triage can pull the Claude/Gemini/Codex/Cursor transcript),
+	 * type (so triage can pull the Claude transcript),
 	 * the Linear AgentSession + source-issue identifiers (so triage can
 	 * jump to the customer thread), and the workspace path (for repro).
 	 *
@@ -5855,19 +5064,15 @@ ${taskSection}`;
 	 */
 	/**
 	 * Aggregator over every place active sessions live in this process.
-	 * Today: the primary AgentSessionManager (issue sessions) and the
-	 * ChatSessionHandler's private one (Slack / GitHub-PR-chat / future
-	 * chat platforms). New session origins should be added here so
-	 * downstream consumers (currently just resolveSessionFromCwd) keep
-	 * working without modification — single open extension point (OCP),
-	 * single responsibility (SRP: this method's only job is "where do
-	 * sessions live?", separate from "how do we match one by cwd?").
+	 * Today: the primary AgentSessionManager (issue sessions). New session
+	 * origins should be added here so downstream consumers (currently just
+	 * resolveSessionFromCwd) keep working without modification — single open
+	 * extension point (OCP), single responsibility (SRP: this method's only
+	 * job is "where do sessions live?", separate from "how do we match one by
+	 * cwd?").
 	 */
 	private getAllKnownSessions(): CyrusAgentSession[] {
-		return [
-			...this.agentSessionManager.getAllSessions(),
-			...(this.chatSessionHandler?.getAllChatSessions() ?? []),
-		];
+		return [...this.agentSessionManager.getAllSessions()];
 	}
 
 	private resolveSessionFromCwd(cwd: string): ResolvedSession | null {
@@ -5898,29 +5103,12 @@ ${taskSection}`;
 		const session = exact ?? prefix;
 		if (!session) return null;
 
-		const runnerType = session.claudeSessionId
-			? "claude"
-			: session.geminiSessionId
-				? "gemini"
-				: session.codexSessionId
-					? "codex"
-					: session.cursorSessionId
-						? "cursor"
-						: null;
-		const runnerSessionId =
-			session.claudeSessionId ??
-			session.geminiSessionId ??
-			session.codexSessionId ??
-			session.cursorSessionId ??
-			null;
+		const runnerType = session.claudeSessionId ? "claude" : null;
+		const runnerSessionId = session.claudeSessionId ?? null;
 
 		const sessionSource = session.id.startsWith("github-")
 			? "github"
-			: session.id.startsWith("gitlab-")
-				? "gitlab"
-				: session.id.startsWith("slack-")
-					? "slack"
-					: (session.issueContext?.trackerId ?? "linear");
+			: (session.issueContext?.trackerId ?? "linear");
 
 		// For Linear-source sessions, `session.id` is already the Linear
 		// AgentSession id (they're literally the same UUID — the v3 rename
@@ -6336,19 +5524,13 @@ ${input.userComment}
 	 */
 	private buildAgentContextBlock(): string {
 		const githubBot = process.env.GITHUB_BOT_USERNAME || "";
-		const gitlabBot = process.env.GITLAB_BOT_USERNAME || "";
 
-		if (!githubBot && !gitlabBot) {
+		if (!githubBot) {
 			return "";
 		}
 
 		const lines: string[] = ["\n\n<agent_context>"];
-		if (githubBot) {
-			lines.push(`  <github_bot_username>${githubBot}</github_bot_username>`);
-		}
-		if (gitlabBot) {
-			lines.push(`  <gitlab_bot_username>${gitlabBot}</gitlab_bot_username>`);
-		}
+		lines.push(`  <github_bot_username>${githubBot}</github_bot_username>`);
 		lines.push("</agent_context>");
 
 		return lines.join("\n");
@@ -6498,7 +5680,7 @@ ${input.userComment}
 		 * `EdgeWorkerConfig.<platform>McpConfigs` override list applies.
 		 * Defaults to `"linear"` (the pre-platform-aware behavior).
 		 */
-		sessionPlatform: "linear" | "github" | "gitlab" = "linear",
+		sessionPlatform: "linear" | "github" = "linear",
 	): Promise<{ config: AgentRunnerConfig; runnerType: RunnerType }> {
 		const log = this.logger.withContext({
 			sessionId,
@@ -6531,13 +5713,13 @@ ${input.userComment}
 			labels,
 			issueDescription,
 			maxTurns,
-			// Per-platform MCP config paths — GitHub + GitLab share the
-			// `githubMcpConfigs` knob (single-repo PR contexts both); Linear
-			// gets `linearMcpConfigs`. Not a blanket override: the builder
-			// uses `repository.mcpConfigPath` when this repo has its own
-			// `allowedTools` override (so the repo's permission rules and
-			// MCP server set travel as a unit), and only falls through to
-			// this list when the repo inherits the platform allow-list.
+			// Per-platform MCP config paths — GitHub gets the `githubMcpConfigs`
+			// knob (single-repo PR contexts); Linear gets `linearMcpConfigs`.
+			// Not a blanket override: the builder uses `repository.mcpConfigPath`
+			// when this repo has its own `allowedTools` override (so the repo's
+			// permission rules and MCP server set travel as a unit), and only
+			// falls through to this list when the repo inherits the platform
+			// allow-list.
 			platformMcpConfigOverrides:
 				sessionPlatform === "linear"
 					? this.config.linearMcpConfigs
@@ -6557,6 +5739,9 @@ ${input.userComment}
 			createAskUserQuestionCallback: (sid, wid) =>
 				this.createAskUserQuestionCallback(sid, wid)!,
 			requireLinearWorkspaceId,
+			// Compounding loop (Lane C): re-emit PR-open events (enriched with session
+			// context by the builder) on the EdgeWorker bus for the cyrus-loop adapter.
+			onPrOpened: (payload) => this.emit("prOpened", payload),
 		});
 
 		// Attach pre-warmed session if available (only for Claude runner).
@@ -7213,10 +6398,9 @@ ${input.userComment}
 			}
 
 			// `addStreamMessage` can reject the message if the turn ended in the
-			// race window between "still running" and "turn finished" (e.g. the
-			// Codex app-server backend, which only steers an active turn). Fall
+			// race window between "still running" and "turn finished". Fall
 			// through to the resume path so the comment is never dropped. Claude's
-			// streaming input never throws here, so this is a no-op for Claude.
+			// streaming input never throws here, so this is effectively a no-op.
 			try {
 				existingRunner.addStreamMessage(fullPrompt);
 				return true; // Message added to stream
@@ -7348,17 +6532,9 @@ ${input.userComment}
 		// Fetch issue labels early to determine runner type
 		const labels = await this.fetchIssueLabels(fullIssue);
 
-		// Determine which runner to use based on existing session IDs
+		// Determine whether to resume based on the existing Claude session ID
 		const hasClaudeSession = !isNewSession && Boolean(session.claudeSessionId);
-		const hasGeminiSession = !isNewSession && Boolean(session.geminiSessionId);
-		const hasCodexSession = !isNewSession && Boolean(session.codexSessionId);
-		const hasCursorSession = !isNewSession && Boolean(session.cursorSessionId);
-		const needsNewSession =
-			isNewSession ||
-			(!hasClaudeSession &&
-				!hasGeminiSession &&
-				!hasCodexSession &&
-				!hasCursorSession);
+		const needsNewSession = isNewSession || !hasClaudeSession;
 
 		// Fetch system prompt based on labels
 
@@ -7395,13 +6571,7 @@ ${input.userComment}
 
 		const resumeSessionId = needsNewSession
 			? undefined
-			: session.claudeSessionId
-				? session.claudeSessionId
-				: session.geminiSessionId
-					? session.geminiSessionId
-					: session.codexSessionId
-						? session.codexSessionId
-						: session.cursorSessionId;
+			: session.claudeSessionId;
 
 		console.log(
 			`[resumeAgentSession] needsNewSession=${needsNewSession}, resumeSessionId=${resumeSessionId ?? "none"}`,

@@ -41,8 +41,6 @@ describe("JSON Schema export", () => {
 				"linearWorkspaces",
 				"claudeDefaultModel",
 				"claudeDefaultFallbackModel",
-				"geminiDefaultModel",
-				"codexDefaultModel",
 				"defaultRunner",
 				"defaultModel",
 				"defaultFallbackModel",
@@ -50,9 +48,7 @@ describe("JSON Schema export", () => {
 				"linearAllowedTools",
 				"defaultAllowedTools",
 				"defaultDisallowedTools",
-				"slackAllowedTools",
 				"githubAllowedTools",
-				"slackMcpConfigs",
 				"linearMcpConfigs",
 				"githubMcpConfigs",
 				"issueUpdateTrigger",
@@ -70,12 +66,7 @@ describe("JSON Schema export", () => {
 		});
 
 		it("represents defaultRunner as enum", () => {
-			expect(schema.properties.defaultRunner.enum).toEqual([
-				"claude",
-				"gemini",
-				"codex",
-				"cursor",
-			]);
+			expect(schema.properties.defaultRunner.enum).toEqual(["claude"]);
 		});
 
 		it("represents userAccessControl as object with expected sub-fields", () => {

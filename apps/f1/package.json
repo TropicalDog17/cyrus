@@ -34,8 +34,7 @@
 		"commander": "^14.0.2",
 		"cyrus-claude-runner": "workspace:*",
 		"cyrus-core": "workspace:*",
-		"cyrus-edge-worker": "workspace:*",
-		"cyrus-slack-event-transport": "workspace:*"
+		"cyrus-edge-worker": "workspace:*"
 	},
 	"devDependencies": {
 		"@types/node": "^20.0.0",

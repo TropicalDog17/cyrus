@@ -1,0 +1,37 @@
+{
+	"name": "cyrus-loop",
+	"version": "0.2.66",
+	"description": "The compounding Verify → blind gate → Learn loop for Cyrus (ported from agentic-pipeline)",
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"files": [
+		"dist",
+		"prompts",
+		"templates",
+		"config"
+	],
+	"scripts": {
+		"build": "tsc",
+		"dev": "tsc --watch",
+		"test": "vitest",
+		"test:run": "vitest run --passWithNoTests",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@anthropic-ai/sdk": "^0.105.0",
+		"js-yaml": "^4.1.0",
+		"proper-lockfile": "^4.1.2",
+		"zod": "^4.3.6"
+	},
+	"devDependencies": {
+		"@types/js-yaml": "^4.0.9",
+		"@types/node": "^20.0.0",
+		"@types/proper-lockfile": "^4.1.4",
+		"typescript": "^5.3.3",
+		"vitest": "^4.1.0"
+	},
+	"publishConfig": {
+		"access": "public"
+	}
+}

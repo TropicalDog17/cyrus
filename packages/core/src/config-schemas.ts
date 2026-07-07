@@ -2,8 +2,10 @@ import { z } from "zod";
 
 /**
  * Supported runner/harness types for agent execution.
+ *
+ * This fork runs Claude only — the gemini/codex/cursor runners were removed.
  */
-export const RunnerTypeSchema = z.enum(["claude", "gemini", "codex", "cursor"]);
+export const RunnerTypeSchema = z.enum(["claude"]);
 export type RunnerType = z.infer<typeof RunnerTypeSchema>;
 
 /**
@@ -278,7 +280,6 @@ export const RepositoryConfigSchema = z.object({
 	repositoryPath: z.string(),
 	baseBranch: z.string(),
 	githubUrl: z.string().optional(),
-	gitlabUrl: z.string().optional(),
 
 	// Linear configuration (optional — repos may operate without Linear, e.g. via Slack or GitHub)
 	linearWorkspaceId: z.string().optional(),
@@ -347,22 +348,10 @@ export const EdgeConfigSchema = z.object({
 	/** Default Claude fallback model if primary Claude model is unavailable */
 	claudeDefaultFallbackModel: z.string().optional(),
 
-	/** Default Gemini model to use across all repositories (e.g., "gemini-2.5-pro") */
-	geminiDefaultModel: z.string().optional(),
-
-	/** Default Codex model to use across all repositories (e.g., "gpt-5.5", "gpt-5.4", "gpt-5.3-codex") */
-	codexDefaultModel: z.string().optional(),
-
-	/** Default Cursor model to use across all repositories (e.g., "composer-2", "gpt-5.4") */
-	cursorDefaultModel: z.string().optional(),
-
-	/** Default Cursor fallback model if primary Cursor model is unavailable */
-	cursorDefaultFallbackModel: z.string().optional(),
-
 	/**
-	 * Default runner/harness to use when no runner is specified via labels or description tags.
-	 * If omitted, auto-detected from available API keys (if exactly one is configured),
-	 * otherwise falls back to "claude".
+	 * Default runner/harness. This fork runs Claude only, so this is always
+	 * "claude" when set. Retained for backwards compatibility with existing
+	 * config files.
 	 */
 	defaultRunner: RunnerTypeSchema.optional(),
 
@@ -384,7 +373,7 @@ export const EdgeConfigSchema = z.object({
 	/**
 	 * Allowed tools for Linear-triggered agent sessions. Renamed from the
 	 * old `defaultAllowedTools` to make the platform scope explicit alongside
-	 * `slackAllowedTools` and `githubAllowedTools`.
+	 * `githubAllowedTools`.
 	 */
 	linearAllowedTools: z.array(z.string()).optional(),
 
@@ -399,36 +388,11 @@ export const EdgeConfigSchema = z.object({
 	defaultDisallowedTools: z.array(z.string()).optional(),
 
 	/**
-	 * Allowed tools for Slack @mention chat sessions. When set, overrides the
-	 * built-in read-only chat tool set used by ToolPermissionResolver. The
-	 * workspace MCP tool prefixes (mcp__linear, mcp__cyrus-tools, etc.) are
-	 * still appended automatically.
-	 */
-	slackAllowedTools: z.array(z.string()).optional(),
-
-	/**
 	 * Allowed tools for GitHub-triggered agent sessions. When set, overrides
 	 * `linearAllowedTools` specifically for sessions originating from GitHub
 	 * (PR comments, automated fix-on-failure flows, etc.).
 	 */
 	githubAllowedTools: z.array(z.string()).optional(),
-
-	/**
-	 * Filesystem paths to custom-integration MCP config JSON files (Claude
-	 * Code `.mcp.json` format) the runtime should load for Slack `@mention`
-	 * chat sessions. Chat sessions are repo-agnostic, so
-	 * `repository.mcpConfigPath` is not consulted here — only this list
-	 * determines which custom `.mcp.json` files load for Slack. When
-	 * omitted/empty, no custom files load (native MCP servers — Linear,
-	 * Cyrus tools, Slack MCP, Cyrus docs — still run as usual).
-	 *
-	 * The per-platform lists let cyrus-hosted route custom MCP server
-	 * availability per surface — e.g. expose `slack-mcp-server` only on
-	 * Slack, or scope a Supabase MCP to GitHub PR sessions but not Linear
-	 * issue work. Each entry is passed as-is to Claude Code's
-	 * `--mcp-config` mechanism.
-	 */
-	slackMcpConfigs: z.array(z.string()).optional(),
 
 	/**
 	 * Filesystem paths to custom-integration MCP config JSON files for
@@ -444,7 +408,7 @@ export const EdgeConfigSchema = z.object({
 
 	/**
 	 * Filesystem paths to custom-integration MCP config JSON files for
-	 * GitHub/GitLab-triggered agent sessions. Same repo-override-coupling
+	 * GitHub-triggered agent sessions. Same repo-override-coupling
 	 * semantics as `linearMcpConfigs`: only consulted when the routed repo
 	 * does not have its own `allowedTools` override; otherwise the repo's
 	 * `mcpConfigPath` is used.
@@ -457,15 +421,6 @@ export const EdgeConfigSchema = z.object({
 	 * Defaults to true if not specified.
 	 */
 	issueUpdateTrigger: z.boolean().optional(),
-
-	/**
-	 * Whether Cyrus follows along with all subsequent replies in a Slack thread
-	 * it has been @mentioned in (treating each reply as a follow-up prompt).
-	 * When false, Cyrus only responds to explicit @mentions. Defaults to true if
-	 * not specified. Can also be force-disabled at runtime via the
-	 * `CYRUS_SLACK_THREAD_FOLLOWING_DISABLED` environment variable.
-	 */
-	slackThreadFollowing: z.boolean().optional(),
 
 	/**
 	 * Whether to trigger agent sessions when a pull request review requests changes.

@@ -38,10 +38,30 @@ import type {
 } from "./sinks/index.js";
 
 /**
+ * Payload for {@link AgentSessionManagerEvents.sessionComplete}. Raw session facts; EdgeWorker
+ * enriches (repositoryId → repo name) before re-emitting on its own bus for the loop adapter.
+ */
+export interface SessionCompleteEvent {
+	sessionId: string;
+	/** Internal issue id (issueContext.issueId, falling back to the deprecated issueId). */
+	issueId?: string;
+	/** Human issue identifier, e.g. `DEV-123` — what the loop's run_id is keyed on. */
+	issueIdentifier?: string;
+	/** Primary repository id for the session (repositories[0]). */
+	repositoryId?: string;
+	/** The session's worktree path. */
+	worktree: string;
+	/** Resolved terminal status. */
+	status: AgentSessionStatus;
+}
+
+/**
  * Events emitted by AgentSessionManager
  */
-// biome-ignore lint/complexity/noBannedTypes: Empty events type (events removed in CYPACK-996 skill refactor)
-export type AgentSessionManagerEvents = {};
+export type AgentSessionManagerEvents = {
+	/** Fired once when a session reaches a terminal state via the normal (non-user-stop) path. */
+	sessionComplete: (payload: SessionCompleteEvent) => void;
+};
 
 /**
  * Type-safe event emitter interface for AgentSessionManager
@@ -146,7 +166,7 @@ export class AgentSessionManager extends EventEmitter {
 	 * @param issueId - Issue/PR identifier
 	 * @param issueMinimal - Minimal issue data
 	 * @param workspace - Workspace configuration
-	 * @param platform - Source platform ("linear", "github", "gitlab", "slack"). Defaults to "linear".
+	 * @param platform - Source platform ("linear", "github", "slack"). Defaults to "linear".
 	 *                   Only "linear" sessions will have activities streamed to Linear.
 	 * @param repositories - Repository contexts for the session (defaults to empty array)
 	 */
@@ -155,7 +175,7 @@ export class AgentSessionManager extends EventEmitter {
 		issueId: string,
 		issueMinimal: IssueMinimal,
 		workspace: Workspace,
-		platform: "linear" | "github" | "gitlab" | "slack" = "linear",
+		platform: "linear" | "github" | "slack" = "linear",
 		repositories: RepositoryContext[] = [],
 	): CyrusAgentSession {
 		const log = this.logger.withContext({
@@ -229,8 +249,8 @@ export class AgentSessionManager extends EventEmitter {
 	}
 
 	/**
-	 * Update Agent Session with session ID from system initialization
-	 * Automatically detects whether it's Claude or Gemini based on the runner
+	 * Update Agent Session with session ID from system initialization.
+	 * This fork runs Claude only.
 	 */
 	updateAgentSessionWithRunnerSessionId(
 		sessionId: string,
@@ -243,27 +263,7 @@ export class AgentSessionManager extends EventEmitter {
 			return;
 		}
 
-		// Determine which runner is being used
-		const runner = linearSession.agentRunner;
-		const runnerType =
-			runner?.constructor.name === "GeminiRunner"
-				? "gemini"
-				: runner?.constructor.name === "CodexRunner"
-					? "codex"
-					: runner?.constructor.name === "CursorRunner"
-						? "cursor"
-						: "claude";
-
-		// Update the appropriate session ID based on runner type
-		if (runnerType === "gemini") {
-			linearSession.geminiSessionId = claudeSystemMessage.session_id;
-		} else if (runnerType === "codex") {
-			linearSession.codexSessionId = claudeSystemMessage.session_id;
-		} else if (runnerType === "cursor") {
-			linearSession.cursorSessionId = claudeSystemMessage.session_id;
-		} else {
-			linearSession.claudeSessionId = claudeSystemMessage.session_id;
-		}
+		linearSession.claudeSessionId = claudeSystemMessage.session_id;
 
 		linearSession.updatedAt = Date.now();
 		linearSession.metadata = {
@@ -279,7 +279,7 @@ export class AgentSessionManager extends EventEmitter {
 	 * Create a session entry from user/assistant message (without syncing to Linear)
 	 */
 	private async createSessionEntry(
-		sessionId: string,
+		_sessionId: string,
 		sdkMessage: SDKUserMessage | SDKAssistantMessage,
 	): Promise<CyrusAgentSessionEntry> {
 		// Extract tool info if this is an assistant message
@@ -298,27 +298,8 @@ export class AgentSessionManager extends EventEmitter {
 		const sdkError =
 			sdkMessage.type === "assistant" ? sdkMessage.error : undefined;
 
-		// Determine which runner is being used
-		const session = this.sessions.get(sessionId);
-		const runner = session?.agentRunner;
-		const runnerType =
-			runner?.constructor.name === "GeminiRunner"
-				? "gemini"
-				: runner?.constructor.name === "CodexRunner"
-					? "codex"
-					: runner?.constructor.name === "CursorRunner"
-						? "cursor"
-						: "claude";
-
 		const sessionEntry: CyrusAgentSessionEntry = {
-			// Set the appropriate session ID based on runner type
-			...(runnerType === "gemini"
-				? { geminiSessionId: sdkMessage.session_id }
-				: runnerType === "codex"
-					? { codexSessionId: sdkMessage.session_id }
-					: runnerType === "cursor"
-						? { cursorSessionId: sdkMessage.session_id }
-						: { claudeSessionId: sdkMessage.session_id }),
+			claudeSessionId: sdkMessage.session_id,
 			type: sdkMessage.type,
 			content: this.extractContent(sdkMessage),
 			metadata: {
@@ -408,6 +389,18 @@ export class AgentSessionManager extends EventEmitter {
 		}
 
 		log.info(`Session completed (subtype: ${resultMessage.subtype})`);
+
+		// Compounding loop (Lane C): announce the terminal session so the loop can post the blind
+		// gate for any PR captured during it. Only fires on the normal path — user-stops returned
+		// above. Emitted after the final result entry so the gate lands after the response.
+		this.emit("sessionComplete", {
+			sessionId,
+			issueId: session.issueContext?.issueId ?? session.issueId,
+			issueIdentifier: session.issueContext?.issueIdentifier,
+			repositoryId: session.repositories[0]?.repositoryId,
+			worktree: session.workspace.path,
+			status,
+		});
 	}
 
 	/**
@@ -679,18 +672,6 @@ export class AgentSessionManager extends EventEmitter {
 		sessionId: string,
 		resultMessage: SDKResultMessage,
 	): Promise<void> {
-		// Determine which runner is being used
-		const session = this.sessions.get(sessionId);
-		const runner = session?.agentRunner;
-		const runnerType =
-			runner?.constructor.name === "GeminiRunner"
-				? "gemini"
-				: runner?.constructor.name === "CodexRunner"
-					? "codex"
-					: runner?.constructor.name === "CursorRunner"
-						? "cursor"
-						: "claude";
-
 		// For error results, content may be in errors[] rather than result.
 		const resultText =
 			"result" in resultMessage && typeof resultMessage.result === "string"
@@ -746,14 +727,7 @@ export class AgentSessionManager extends EventEmitter {
 		}
 
 		const resultEntry: CyrusAgentSessionEntry = {
-			// Set the appropriate session ID based on runner type
-			...(runnerType === "gemini"
-				? { geminiSessionId: resultMessage.session_id }
-				: runnerType === "codex"
-					? { codexSessionId: resultMessage.session_id }
-					: runnerType === "cursor"
-						? { cursorSessionId: resultMessage.session_id }
-						: { claudeSessionId: resultMessage.session_id }),
+			claudeSessionId: resultMessage.session_id,
 			type: "result",
 			content,
 			metadata: {

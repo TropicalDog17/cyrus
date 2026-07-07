@@ -14,6 +14,25 @@ import type { ILogger } from "cyrus-core";
 export const CYRUS_PR_MARKER = "<!-- generated-by-cyrus -->";
 
 /**
+ * The live PR/MR facts observed while ensuring the marker. Returned so the caller can drive the
+ * compounding loop (capture → judge → gate) off a real `prOpened` event instead of polling.
+ */
+export interface PrMarkerResult {
+	/** Provider name (`"github"` | `"gitlab"`). */
+	provider: string;
+	number: number;
+	/** Head branch (`headRefName`) — the loop derives the issue id from this. */
+	headBranch: string;
+	/** Head commit SHA (`headRefOid`). */
+	headSha?: string;
+	/** Base branch (`baseRefName`). */
+	baseBranch?: string;
+	/** ISO-8601 creation timestamp — folds into the run_id. */
+	createdAt?: string;
+	url?: string;
+}
+
+/**
  * Provider-specific knowledge about how to detect PR/MR mutating commands and
  * how to read/write the description on the underlying forge. Adding support
  * for a new forge means adding a new provider — no changes to the hook itself.
@@ -25,10 +44,11 @@ export interface PrMarkerProvider {
 	matches(command: string): boolean;
 	/**
 	 * Idempotently ensures the marker is present at the end of the live PR/MR
-	 * description for the branch checked out at `cwd`. Implementations should
-	 * be a no-op when no PR/MR exists yet, or when the marker is already there.
+	 * description for the branch checked out at `cwd`, and returns the PR facts
+	 * (or `null` when no PR/MR exists yet, or when this provider does not feed
+	 * the loop). Marker-write failures still return the facts — the PR exists.
 	 */
-	ensureMarker(cwd: string, log: ILogger): void;
+	ensureMarker(cwd: string, log: ILogger): PrMarkerResult | null;
 }
 
 /**
@@ -63,50 +83,76 @@ export class GitHubPrMarkerProvider implements PrMarkerProvider {
 		);
 	}
 
-	ensureMarker(cwd: string, log: ILogger): void {
-		let payload: { body?: string; number?: number };
+	ensureMarker(cwd: string, log: ILogger): PrMarkerResult | null {
+		let payload: {
+			body?: string;
+			number?: number;
+			headRefName?: string;
+			headRefOid?: string;
+			baseRefName?: string;
+			createdAt?: string;
+			url?: string;
+		};
 		try {
-			const json = execFileSync("gh", ["pr", "view", "--json", "body,number"], {
-				cwd,
-				encoding: "utf8",
-				stdio: ["ignore", "pipe", "ignore"],
-			});
-			payload = JSON.parse(json) as { body?: string; number?: number };
+			const json = execFileSync(
+				"gh",
+				[
+					"pr",
+					"view",
+					"--json",
+					"body,number,headRefName,headRefOid,baseRefName,createdAt,url",
+				],
+				{
+					cwd,
+					encoding: "utf8",
+					stdio: ["ignore", "pipe", "ignore"],
+				},
+			);
+			payload = JSON.parse(json);
 		} catch {
 			// No PR for this branch yet, gh not authenticated, or not a GitHub
 			// repo. Either way, nothing for us to ensure — bail silently.
-			return;
+			return null;
 		}
 
 		if (typeof payload.number !== "number") {
-			return;
+			return null;
 		}
 		const updated = appendMarker(payload.body);
-		if (updated === (payload.body ?? "")) {
-			return;
-		}
-
-		const result = spawnSync(
-			"gh",
-			["pr", "edit", String(payload.number), "--body-file", "-"],
-			{
-				cwd,
-				input: updated,
-				encoding: "utf8",
-				stdio: ["pipe", "pipe", "pipe"],
-			},
-		);
-		if (result.status !== 0) {
-			log.warn(
-				`[PrMarkerHook] gh pr edit failed for #${payload.number}: ${
-					result.stderr?.trim() || "unknown error"
-				}`,
+		if (updated !== (payload.body ?? "")) {
+			const result = spawnSync(
+				"gh",
+				["pr", "edit", String(payload.number), "--body-file", "-"],
+				{
+					cwd,
+					input: updated,
+					encoding: "utf8",
+					stdio: ["pipe", "pipe", "pipe"],
+				},
 			);
-			return;
+			if (result.status !== 0) {
+				// Marker write failed, but the PR exists — still surface its facts so the loop can
+				// capture. The marker is only needed for later comment-forwarding, not for capture.
+				log.warn(
+					`[PrMarkerHook] gh pr edit failed for #${payload.number}: ${
+						result.stderr?.trim() || "unknown error"
+					}`,
+				);
+			} else {
+				log.info(
+					`[PrMarkerHook] Appended Cyrus marker to GitHub PR #${payload.number}`,
+				);
+			}
 		}
-		log.info(
-			`[PrMarkerHook] Appended Cyrus marker to GitHub PR #${payload.number}`,
-		);
+		return {
+			provider: this.name,
+			number: payload.number,
+			headBranch: payload.headRefName ?? "",
+			headSha: payload.headRefOid,
+			baseBranch: payload.baseRefName,
+			createdAt: payload.createdAt,
+			url: payload.url,
+		};
 	}
 }
 
@@ -120,7 +166,7 @@ export class GitLabMrMarkerProvider implements PrMarkerProvider {
 		return /\bglab\s+mr\s+(create|update|edit)\b/.test(command);
 	}
 
-	ensureMarker(cwd: string, log: ILogger): void {
+	ensureMarker(cwd: string, log: ILogger): PrMarkerResult | null {
 		let payload: { description?: string; iid?: number };
 		try {
 			const json = execFileSync("glab", ["mr", "view", "--output", "json"], {
@@ -130,15 +176,16 @@ export class GitLabMrMarkerProvider implements PrMarkerProvider {
 			});
 			payload = JSON.parse(json) as { description?: string; iid?: number };
 		} catch {
-			return;
+			return null;
 		}
 
 		if (typeof payload.iid !== "number") {
-			return;
+			return null;
 		}
 		const updated = appendMarker(payload.description);
 		if (updated === (payload.description ?? "")) {
-			return;
+			// Marker already present — GitLab does not feed the loop, so nothing more to return.
+			return null;
 		}
 
 		const result = spawnSync(
@@ -156,11 +203,13 @@ export class GitLabMrMarkerProvider implements PrMarkerProvider {
 					result.stderr?.trim() || "unknown error"
 				}`,
 			);
-			return;
+			return null;
 		}
 		log.info(
 			`[PrMarkerHook] Appended Cyrus marker to GitLab MR !${payload.iid}`,
 		);
+		// The compounding loop is GitHub-only in this fork; GitLab MRs are not captured.
+		return null;
 	}
 }
 
@@ -179,6 +228,7 @@ export function buildPrMarkerHook(
 		new GitHubPrMarkerProvider(),
 		new GitLabMrMarkerProvider(),
 	],
+	onPrOpened?: (result: PrMarkerResult & { cwd: string }) => void,
 ): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
 	return {
 		PostToolUse: [
@@ -195,7 +245,21 @@ export function buildPrMarkerHook(
 							return {};
 						}
 						try {
-							provider.ensureMarker(post.cwd, log);
+							const result = provider.ensureMarker(post.cwd, log);
+							// Fire the loop trigger only when a PR actually exists. Capture is
+							// idempotent (shouldCapture dedupes by head SHA), so firing on every
+							// create/edit of the same head is safe.
+							if (result && onPrOpened) {
+								try {
+									onPrOpened({ ...result, cwd: post.cwd });
+								} catch (err) {
+									log.warn(
+										`[PrMarkerHook] onPrOpened callback threw: ${
+											(err as Error).message
+										}`,
+									);
+								}
+							}
 						} catch (err) {
 							log.warn(
 								`[PrMarkerHook] ${provider.name} provider threw: ${

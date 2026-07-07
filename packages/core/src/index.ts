@@ -60,7 +60,7 @@ export {
 	GITHUB_DEFAULT_ALLOWED_TOOLS,
 	getDefaultAllowedTools,
 	LINEAR_DEFAULT_ALLOWED_TOOLS,
-	SLACK_DEFAULT_ALLOWED_TOOLS,
+	READONLY_DEFAULT_ALLOWED_TOOLS,
 } from "./allowed-tools-defaults.js";
 export type {
 	BaseBranchResolution,
@@ -266,14 +266,6 @@ export {
 	LINEAR_WEBHOOK_IPS,
 	WebhookIpValidator,
 } from "./security/index.js";
-// Simple Agent Runner types
-export type {
-	IAgentProgressEvent,
-	ISimpleAgentQueryOptions,
-	ISimpleAgentResult,
-	ISimpleAgentRunner,
-	ISimpleAgentRunnerConfig,
-} from "./simple-agent-runner-types.js";
 // Platform-agnostic webhook type aliases - exported from issue-tracker
 // These are now defined in issue-tracker/types.ts as aliases to Linear SDK webhook types
 // EdgeWorker and other high-level code should use these generic names via issue-tracker exports

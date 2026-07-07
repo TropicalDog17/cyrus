@@ -5,9 +5,8 @@ import type {
 	RepoSetupHookEventHandler,
 	RepositoryConfig,
 } from "cyrus-core";
-import type { GitService, SharedApplicationServer } from "cyrus-edge-worker";
-import { EdgeWorker } from "cyrus-edge-worker";
-import { SlackEventTransport } from "cyrus-slack-event-transport";
+import type { GitService } from "cyrus-edge-worker";
+import { attachCyrusLoop, EdgeWorker } from "cyrus-edge-worker";
 import { DEFAULT_SERVER_PORT, parsePort } from "../config/constants.js";
 import type { Workspace } from "../config/types.js";
 import type { ConfigService } from "./ConfigService.js";
@@ -115,8 +114,6 @@ export class WorkerService {
 			"           /api/update/repository, /api/update/test-mcp, /api/update/configure-mcp",
 		);
 
-		this.registerWebhookTransports(this.setupWaitingServer);
-
 		// Starts Cloudflare tunnel too, if CLOUDFLARE_TOKEN is set.
 		await this.setupWaitingServer.start();
 
@@ -135,29 +132,6 @@ export class WorkerService {
 			this.logger.info(line);
 		}
 		this.logger.divider(70);
-	}
-
-	/**
-	 * Register webhook endpoints that don't require repositories.
-	 * Called from both idle and setup-waiting modes so that external services
-	 * (e.g. Slack URL verification) can reach Cyrus during onboarding.
-	 */
-	private registerWebhookTransports(server: SharedApplicationServer): void {
-		const isExternalHost =
-			process.env.CYRUS_HOST_EXTERNAL?.toLowerCase().trim() === "true";
-		const slackSigningSecret = process.env.SLACK_SIGNING_SECRET;
-		const hasSlackSigningSecret =
-			slackSigningSecret != null && slackSigningSecret !== "";
-
-		if (isExternalHost && hasSlackSigningSecret) {
-			const slackTransport = new SlackEventTransport({
-				fastifyServer: server.getFastifyInstance(),
-				verificationMode: "direct",
-				secret: slackSigningSecret,
-			});
-			slackTransport.register();
-			this.logger.info("✅ Slack webhook registered");
-		}
 	}
 
 	/**
@@ -203,9 +177,7 @@ export class WorkerService {
 				process.env.LINEAR_ALLOWED_TOOLS?.split(",").map((t) => t.trim()) ||
 				edgeConfig.linearAllowedTools ||
 				[],
-			slackAllowedTools: edgeConfig.slackAllowedTools,
 			githubAllowedTools: edgeConfig.githubAllowedTools,
-			slackMcpConfigs: edgeConfig.slackMcpConfigs,
 			linearMcpConfigs: edgeConfig.linearMcpConfigs,
 			githubMcpConfigs: edgeConfig.githubMcpConfigs,
 			defaultDisallowedTools:
@@ -224,17 +196,9 @@ export class WorkerService {
 				process.env.CYRUS_DEFAULT_FALLBACK_MODEL ||
 				edgeConfig.claudeDefaultFallbackModel ||
 				edgeConfig.defaultFallbackModel,
-			geminiDefaultModel:
-				process.env.CYRUS_GEMINI_DEFAULT_MODEL || edgeConfig.geminiDefaultModel,
-			codexDefaultModel:
-				process.env.CYRUS_CODEX_DEFAULT_MODEL || edgeConfig.codexDefaultModel,
 			defaultRunner:
-				(process.env.CYRUS_DEFAULT_RUNNER as
-					| "claude"
-					| "gemini"
-					| "codex"
-					| "cursor"
-					| undefined) || edgeConfig.defaultRunner,
+				(process.env.CYRUS_DEFAULT_RUNNER as "claude" | undefined) ||
+				edgeConfig.defaultRunner,
 			issueUpdateTrigger: edgeConfig.issueUpdateTrigger,
 			prReviewTrigger: edgeConfig.prReviewTrigger,
 			promptDefaults: edgeConfig.promptDefaults,
@@ -274,6 +238,17 @@ export class WorkerService {
 
 		// Set up event handlers
 		this.setupEventHandlers();
+
+		// Compounding loop (Lane C): wire the Verify → blind-gate → Learn loop to the bus.
+		// Reads ~/.cyrus/loop.json independently; a failure here must never block worker startup.
+		try {
+			// The adapter stays alive via the bus listeners it registers on edgeWorker.
+			attachCyrusLoop({ host: this.edgeWorker });
+		} catch (err) {
+			this.logger.warn(
+				`Failed to attach compounding loop: ${(err as Error).message}`,
+			);
+		}
 
 		// Start the worker
 		await this.edgeWorker.start();

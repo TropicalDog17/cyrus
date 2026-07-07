@@ -132,7 +132,7 @@ vi.mock("fs/promises", () => ({
 import { LinearClient } from "@linear/sdk";
 import {
 	LINEAR_DEFAULT_ALLOWED_TOOLS,
-	SLACK_DEFAULT_ALLOWED_TOOLS,
+	READONLY_DEFAULT_ALLOWED_TOOLS,
 } from "cyrus-core";
 import { LinearEventTransport } from "cyrus-linear-event-transport";
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
@@ -284,10 +284,10 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 			const tools = buildAllowedTools([repoA, repoB], "debugger");
 
-			// "readOnly" preset resolves to SLACK_DEFAULT_ALLOWED_TOOLS
+			// "readOnly" preset resolves to READONLY_DEFAULT_ALLOWED_TOOLS
 			// (the curated read-only set). Union with repoB's verbatim list.
 			const expectedUnion = [
-				...new Set([...SLACK_DEFAULT_ALLOWED_TOOLS, "Read", "Bash", "Edit"]),
+				...new Set([...READONLY_DEFAULT_ALLOWED_TOOLS, "Read", "Bash", "Edit"]),
 			];
 			expect(tools).toEqual(expectedUnion);
 		});
@@ -327,7 +327,7 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 			const tools = buildAllowedTools([repoA, repoB]);
 
-			// mcp__slack only lives in SLACK_DEFAULT_ALLOWED_TOOLS, never
+			// mcp__slack is not a known tool in this fork and is never
 			// auto-injected into Linear/GitHub paths.
 			expect(tools).not.toContain("mcp__slack");
 		});

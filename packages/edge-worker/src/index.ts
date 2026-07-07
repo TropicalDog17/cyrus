@@ -16,14 +16,16 @@ export type {
 	AskUserQuestionHandlerDeps,
 } from "./AskUserQuestionHandler.js";
 export { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
-export type { ChatRepositoryProvider } from "./ChatRepositoryProvider.js";
-export { LiveChatRepositoryProvider } from "./ChatRepositoryProvider.js";
 export type {
-	ChatPlatformAdapter,
-	ChatPlatformName,
-	ChatSessionHandlerDeps,
-} from "./ChatSessionHandler.js";
-export { ChatSessionHandler } from "./ChatSessionHandler.js";
+	CyrusLoopAdapterDeps,
+	CyrusLoopHost,
+	ParsedVerdict,
+} from "./CyrusLoopAdapter.js";
+export {
+	attachCyrusLoop,
+	CyrusLoopAdapter,
+	parseVerdictCommand,
+} from "./CyrusLoopAdapter.js";
 export { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 export { EdgeWorker } from "./EdgeWorker.js";
 export { EgressProxy } from "./EgressProxy.js";
@@ -35,8 +37,6 @@ export type { McpConfigServiceDeps } from "./McpConfigService.js";
 export { McpConfigService } from "./McpConfigService.js";
 export { RepositoryRouter } from "./RepositoryRouter.js";
 export type {
-	ChatRunnerConfigInput,
-	IChatToolResolver,
 	IMcpConfigProvider,
 	IRunnerSelector,
 	IssueRunnerConfigInput,
@@ -44,7 +44,6 @@ export type {
 export { RunnerConfigBuilder } from "./RunnerConfigBuilder.js";
 export { SharedApplicationServer } from "./SharedApplicationServer.js";
 export { SkillsPluginResolver } from "./SkillsPluginResolver.js";
-export { SlackChatAdapter } from "./SlackChatAdapter.js";
 export type {
 	ActivityPostOptions,
 	ActivityPostResult,
@@ -54,7 +53,13 @@ export type {
 export { LinearActivitySink } from "./sinks/index.js";
 export type { PromptType } from "./ToolPermissionResolver.js";
 export { ToolPermissionResolver } from "./ToolPermissionResolver.js";
-export type { EdgeWorkerEvents } from "./types.js";
+export type {
+	EdgeWorkerEvents,
+	LoopVerdictInput,
+	PrOpenedEventPayload,
+	SessionCompleteEventPayload,
+	VerdictReachedEventPayload,
+} from "./types.js";
 // User access control
 export {
 	type AccessCheckResult,
