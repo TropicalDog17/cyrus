@@ -16,7 +16,7 @@ describe("AgentSessionManager - provider-based session id routing", () => {
 	function setup(provider: "claude" | "cursor") {
 		const mockActivitySink: IActivitySink = {
 			id: "test-workspace",
-			postActivity: vi.fn().mockResolvedValue({ activityId: "activity-1" }),
+			post: vi.fn().mockResolvedValue({ activityId: "activity-1" }),
 			createAgentSession: vi.fn().mockResolvedValue("ext-session-1"),
 		};
 		manager = new AgentSessionManager();

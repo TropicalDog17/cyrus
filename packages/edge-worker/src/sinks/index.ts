@@ -5,7 +5,7 @@
  */
 
 export type {
-	ActivityPostOptions,
+	Activity,
 	ActivityPostResult,
 	ActivitySignal,
 	IActivitySink,

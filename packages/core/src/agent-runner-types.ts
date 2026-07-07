@@ -140,40 +140,6 @@ export type OnAskUserQuestion = (
 ) => Promise<AskUserQuestionResult>;
 
 /**
- * Message Formatter Interface
- *
- * Forward declaration - implemented by each runner (e.g., ClaudeMessageFormatter, GeminiMessageFormatter)
- *
- * Formatter output is UI-facing activity content, not model input. These strings
- * are consumed by the edge worker session pipeline (AgentSessionManager) and then
- * posted to the issue tracker via `createAgentActivity` for timeline rendering
- * (for example in Linear agent activity entries).
- */
-export interface IMessageFormatter {
-	/**
-	 * Format TodoWrite tool parameter as a nice checklist
-	 * @deprecated TodoWrite has been replaced by Task tools (TaskCreate, TaskUpdate, etc.)
-	 */
-	formatTodoWriteParameter(jsonContent: string): string;
-	/**
-	 * Format Task tool parameter (TaskCreate, TaskUpdate, TaskList, TaskGet)
-	 */
-	formatTaskParameter(toolName: string, toolInput: any): string;
-	formatToolParameter(toolName: string, toolInput: any): string;
-	formatToolActionName(
-		toolName: string,
-		toolInput: any,
-		isError: boolean,
-	): string;
-	formatToolResult(
-		toolName: string,
-		toolInput: any,
-		result: string,
-		isError: boolean,
-	): string;
-}
-
-/**
  * Agent Runner Interface
  *
  * This interface provides a provider-agnostic abstraction for AI agent runners.
@@ -409,24 +375,6 @@ export interface IAgentRunner {
 	 * ```
 	 */
 	getMessages(): AgentMessage[];
-
-	/**
-	 * Get the message formatter for this runner
-	 *
-	 * Returns a formatter that can convert tool messages into human-readable
-	 * format suitable for display in Linear or other issue trackers.
-	 * Each runner provides its own formatter that understands its specific message format.
-	 *
-	 * @returns The message formatter instance for this runner
-	 *
-	 * @example
-	 * ```typescript
-	 * const formatter = runner.getFormatter();
-	 * const formatted = formatter.formatToolParameter("Read", { file_path: "/test.ts" });
-	 * console.log(formatted); // "/test.ts"
-	 * ```
-	 */
-	getFormatter(): IMessageFormatter;
 }
 
 /**

@@ -13,11 +13,11 @@ describe("AgentSessionManager - Model Notification", () => {
 	beforeEach(() => {
 		mockActivitySink = {
 			id: "test-workspace",
-			postActivity: vi.fn().mockResolvedValue({ activityId: "activity-123" }),
+			post: vi.fn().mockResolvedValue({ activityId: "activity-123" }),
 			createAgentSession: vi.fn().mockResolvedValue("session-123"),
 		};
 
-		postActivitySpy = vi.spyOn(mockActivitySink, "postActivity");
+		postActivitySpy = vi.spyOn(mockActivitySink, "post");
 
 		manager = new AgentSessionManager();
 

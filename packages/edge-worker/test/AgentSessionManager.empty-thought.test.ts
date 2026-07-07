@@ -1,4 +1,3 @@
-import { ClaudeMessageFormatter } from "cyrus-claude-runner";
 import type { AgentAssistantMessage } from "cyrus-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager";
@@ -30,10 +29,10 @@ describe("AgentSessionManager - empty assistant thought suppression", () => {
 	beforeEach(() => {
 		mockActivitySink = {
 			id: "test-workspace",
-			postActivity: vi.fn().mockResolvedValue({ activityId: "activity-1" }),
+			post: vi.fn().mockResolvedValue({ activityId: "activity-1" }),
 			createAgentSession: vi.fn().mockResolvedValue("ext-session-1"),
 		};
-		postActivitySpy = mockActivitySink.postActivity as ReturnType<typeof vi.fn>;
+		postActivitySpy = mockActivitySink.post as ReturnType<typeof vi.fn>;
 
 		manager = new AgentSessionManager();
 		manager.createCyrusAgentSession(
@@ -50,11 +49,9 @@ describe("AgentSessionManager - empty assistant thought suppression", () => {
 		);
 		manager.setActivitySink(sessionId, mockActivitySink);
 
-		// Register a minimal IAgentRunner stub so tool-use messages can be
-		// formatted (formatter is required by the action path).
-		const formatter = new ClaudeMessageFormatter();
+		// Register a minimal IAgentRunner stub — the mapper renders tool
+		// activities; the runner only supplies its provider tag.
 		const runnerStub = {
-			getFormatter: () => formatter,
 			provider: "claude",
 		} as unknown as Parameters<typeof manager.addAgentRunner>[1];
 		manager.addAgentRunner(sessionId, runnerStub);

@@ -16,6 +16,14 @@ export type {
 	AskUserQuestionHandlerDeps,
 } from "./AskUserQuestionHandler.js";
 export { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
+export type { MapContext } from "./activity/index.js";
+export {
+	ActivityMapper,
+	formatLabelRoleThought,
+	formatRepoSetupHookActivity,
+	formatRoutingThought,
+	normalizeTool,
+} from "./activity/index.js";
 export { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 export { EdgeWorker } from "./EdgeWorker.js";
 export { EgressProxy } from "./EgressProxy.js";
@@ -35,12 +43,12 @@ export { RunnerConfigBuilder } from "./RunnerConfigBuilder.js";
 export { SharedApplicationServer } from "./SharedApplicationServer.js";
 export { SkillsPluginResolver } from "./SkillsPluginResolver.js";
 export type {
-	ActivityPostOptions,
+	Activity,
 	ActivityPostResult,
 	ActivitySignal,
 	IActivitySink,
 } from "./sinks/index.js";
-export { LinearActivitySink } from "./sinks/index.js";
+export { LinearActivitySink, NoopActivitySink } from "./sinks/index.js";
 export type { PromptType } from "./ToolPermissionResolver.js";
 export { ToolPermissionResolver } from "./ToolPermissionResolver.js";
 export type { EdgeWorkerEvents } from "./types.js";

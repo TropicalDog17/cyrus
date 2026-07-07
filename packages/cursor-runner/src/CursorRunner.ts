@@ -42,9 +42,7 @@ import type {
 	AgentUsage,
 	AgentUserMessage,
 	IAgentRunner,
-	IMessageFormatter,
 } from "cyrus-core";
-import { CursorMessageFormatter } from "./formatter.js";
 import {
 	buildCyrusPermissionsConfig,
 	type CyrusPermissionsConfig,
@@ -350,7 +348,6 @@ export class CursorRunner extends EventEmitter implements IAgentRunner {
 	private config: CursorRunnerConfig;
 	private sessionInfo: CursorSessionInfo | null = null;
 	private messages: AgentMessage[] = [];
-	private formatter: IMessageFormatter;
 	private agent: SDKAgent | null = null;
 	private currentRun: Run | null = null;
 	private pendingResultMessage: AgentResultMessage | null = null;
@@ -376,7 +373,6 @@ export class CursorRunner extends EventEmitter implements IAgentRunner {
 	constructor(config: CursorRunnerConfig) {
 		super();
 		this.config = config;
-		this.formatter = new CursorMessageFormatter();
 
 		if (config.onMessage) this.on("message", config.onMessage);
 		if (config.onError) this.on("error", config.onError);
@@ -559,10 +555,6 @@ export class CursorRunner extends EventEmitter implements IAgentRunner {
 
 	getMessages(): AgentMessage[] {
 		return [...this.messages];
-	}
-
-	getFormatter(): IMessageFormatter {
-		return this.formatter;
 	}
 
 	// ---------- SDK event handling ----------

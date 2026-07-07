@@ -58,7 +58,6 @@ export type {
 	HookCallbackMatcher,
 	HookEvent,
 	IAgentRunner,
-	IMessageFormatter,
 	McpServerConfig,
 	OnAskUserQuestion,
 	SDKAssistantMessage,

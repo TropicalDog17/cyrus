@@ -1,30 +1,12 @@
-import type { AgentActivityContent } from "cyrus-core";
+import type {
+	Activity,
+	ActivityPostResult,
+	ActivitySignal,
+} from "../activity/Activity.js";
 
-/**
- * String literal type for activity signals.
- * Maps to platform-specific signal enums (e.g., Linear's AgentActivitySignal).
- */
-export type ActivitySignal = "auth" | "select" | "stop" | "continue";
-
-/**
- * Options for posting an activity.
- */
-export interface ActivityPostOptions {
-	/** Whether the activity is ephemeral (disappears when replaced by next activity) */
-	ephemeral?: boolean;
-	/** Signal modifier for how the activity should be interpreted */
-	signal?: ActivitySignal;
-	/** Additional metadata for the signal */
-	signalMetadata?: Record<string, unknown>;
-}
-
-/**
- * Result of posting an activity.
- */
-export interface ActivityPostResult {
-	/** The ID of the created activity, if available */
-	activityId?: string;
-}
+// Re-export the neutral activity signal/result types from their canonical home
+// (the activity module) so existing importers of `./sinks` keep working.
+export type { Activity, ActivityPostResult, ActivitySignal };
 
 /**
  * Interface for activity sinks that receive and process agent session activities.
@@ -32,6 +14,10 @@ export interface ActivityPostResult {
  * IActivitySink decouples activity posting from IIssueTrackerService, enabling
  * multiple activity sinks (Linear workspaces, GitHub, etc.) to receive session
  * activities based on session context.
+ *
+ * This is the single funnel every activity-post path collapses onto: the
+ * ephemeral/signal/signalMetadata modifiers ride inline on the neutral
+ * {@link Activity} rather than a separate options bag.
  *
  * Implementations should:
  * - Provide a unique identifier (workspace ID, org ID, etc.)
@@ -41,7 +27,7 @@ export interface ActivityPostResult {
 export interface IActivitySink {
 	/**
 	 * Unique identifier for this sink (e.g., Linear workspace ID, GitHub org ID).
-	 * Used by GlobalSessionRegistry to route activities to the correct sink.
+	 * Used to route activities to the correct sink.
 	 */
 	readonly id: string;
 
@@ -49,15 +35,11 @@ export interface IActivitySink {
 	 * Post an activity to an existing agent session.
 	 *
 	 * @param sessionId - The agent session ID to post to
-	 * @param activity - The activity content (thought, action, response, error, etc.)
-	 * @param options - Optional settings for ephemeral, signal, signalMetadata
+	 * @param activity - The neutral activity (thought/action/response/error/
+	 *   elicitation) with any ephemeral/signal modifiers carried inline
 	 * @returns Promise that resolves with the result of the activity post
 	 */
-	postActivity(
-		sessionId: string,
-		activity: AgentActivityContent,
-		options?: ActivityPostOptions,
-	): Promise<ActivityPostResult>;
+	post(sessionId: string, activity: Activity): Promise<ActivityPostResult>;
 
 	/**
 	 * Create a new agent session on an issue.

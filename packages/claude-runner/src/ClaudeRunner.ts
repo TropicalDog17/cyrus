@@ -35,7 +35,6 @@ import {
 } from "cyrus-core";
 import dotenv from "dotenv";
 import { toAgentMessage } from "./claude-message-projection.js";
-import { ClaudeMessageFormatter, type IMessageFormatter } from "./formatter.js";
 import { buildHomeDirectoryDisallowedTools } from "./home-directory-restrictions.js";
 import {
 	checkLinuxSandboxRequirements,
@@ -277,7 +276,6 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 	private streamingPrompt: StreamingPrompt | null = null;
 	private activeQuery: Query | null = null;
 	private cyrusHome: string;
-	private formatter: IMessageFormatter;
 	private pendingResultMessage: AgentMessage | null = null;
 	private canUseToolCallback: CanUseTool | undefined;
 	private repositoryEnv: Record<string, string> = {};
@@ -291,7 +289,6 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 		this.keepSessionWarm = keepSessionWarm;
 		this.logger = config.logger ?? createLogger({ component: "ClaudeRunner" });
 		this.cyrusHome = config.cyrusHome;
-		this.formatter = new ClaudeMessageFormatter();
 
 		// Create canUseTool callback if onAskUserQuestion is provided
 		if (config.onAskUserQuestion) {
@@ -1144,13 +1141,6 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 	 */
 	getMessages(): AgentMessage[] {
 		return [...this.messages];
-	}
-
-	/**
-	 * Get the message formatter for this runner
-	 */
-	getFormatter(): IMessageFormatter {
-		return this.formatter;
 	}
 
 	/**

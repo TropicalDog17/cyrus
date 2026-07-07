@@ -23,11 +23,11 @@ describe("AgentSessionManager - GitHub Session", () => {
 	beforeEach(() => {
 		mockActivitySink = {
 			id: "test-workspace",
-			postActivity: vi.fn().mockResolvedValue({ activityId: "activity-123" }),
+			post: vi.fn().mockResolvedValue({ activityId: "activity-123" }),
 			createAgentSession: vi.fn().mockResolvedValue("session-123"),
 		};
 
-		postActivitySpy = mockActivitySink.postActivity as ReturnType<typeof vi.fn>;
+		postActivitySpy = mockActivitySink.post as ReturnType<typeof vi.fn>;
 
 		manager = new AgentSessionManager();
 	});

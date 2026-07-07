@@ -121,6 +121,12 @@ import { ActivityPoster } from "./ActivityPoster.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
 import { AttachmentService } from "./AttachmentService.js";
+import type { Activity } from "./activity/index.js";
+import {
+	formatLabelRoleThought,
+	formatRepoSetupHookActivity,
+	formatRoutingThought,
+} from "./activity/index.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
@@ -152,6 +158,7 @@ import {
 } from "./SkillsPluginResolver.js";
 import type { IActivitySink } from "./sinks/IActivitySink.js";
 import { LinearActivitySink } from "./sinks/LinearActivitySink.js";
+import { NoopActivitySink } from "./sinks/NoopActivitySink.js";
 import { ToolPermissionResolver } from "./ToolPermissionResolver.js";
 import type { AgentSessionData, EdgeWorkerEvents } from "./types.js";
 import { UserAccessControl } from "./UserAccessControl.js";
@@ -3005,7 +3012,7 @@ ${taskSection}`;
 			);
 
 			// Post activity about waking up
-			await this.activityPoster.postThoughtActivity(
+			await this.postThought(
 				parked.agentSession.id,
 				parked.linearWorkspaceId,
 				`All blocking dependencies are now resolved — starting work.`,
@@ -3053,7 +3060,7 @@ ${taskSection}`;
 			const blockerList = blockResult.blockingIdentifiers
 				.map((id) => `**${id}**`)
 				.join(", ");
-			await this.activityPoster.postThoughtActivity(
+			await this.postThought(
 				parked.agentSession.id,
 				parked.linearWorkspaceId,
 				`Still blocked by ${blockerList}. Will start automatically when resolved.`,
@@ -3070,7 +3077,7 @@ ${taskSection}`;
 			`Re-prompt cleared blockers for ${parked.agentSession.issue?.identifier} — waking session`,
 		);
 
-		await this.activityPoster.postThoughtActivity(
+		await this.postThought(
 			parked.agentSession.id,
 			parked.linearWorkspaceId,
 			`Blocking dependencies are now resolved — starting work.`,
@@ -3133,6 +3140,56 @@ ${taskSection}`;
 	}
 
 	/**
+	 * Resolve the activity sink for a workspace, falling back to a no-op sink so
+	 * every activity-post call site can funnel through the single
+	 * {@link IActivitySink.post} path.
+	 */
+	private getSinkForWorkspace(workspaceId: string): IActivitySink {
+		return (
+			this.activitySinks.get(workspaceId) ?? new NoopActivitySink(workspaceId)
+		);
+	}
+
+	/**
+	 * Post an activity through the workspace's sink, swallowing/logging failures
+	 * (mirrors the former ActivityPoster wrappers so a tracker error never
+	 * aborts the surrounding webhook flow). Returns the activity id or null.
+	 */
+	private async postActivityViaSink(
+		workspaceId: string,
+		sessionId: string,
+		activity: Activity,
+		label: string,
+	): Promise<string | null> {
+		try {
+			const result = await this.getSinkForWorkspace(workspaceId).post(
+				sessionId,
+				activity,
+			);
+			return result.activityId ?? null;
+		} catch (error) {
+			this.logger.error(`Error creating ${label}:`, error);
+			return null;
+		}
+	}
+
+	/**
+	 * Post a plain thought through the workspace's activity sink.
+	 */
+	private async postThought(
+		sessionId: string,
+		workspaceId: string,
+		body: string,
+	): Promise<void> {
+		await this.postActivityViaSink(
+			workspaceId,
+			sessionId,
+			{ type: "thought", body },
+			"thought",
+		);
+	}
+
+	/**
 	 * Get the Linear API token for a workspace from workspace-level config.
 	 */
 	private getLinearTokenForWorkspace(linearWorkspaceId: string): string | null {
@@ -3189,21 +3246,25 @@ ${taskSection}`;
 		const workspace = this.config.handlers?.createWorkspace
 			? await this.config.handlers.createWorkspace(fullIssue, repositories, {
 					baseBranchOverrides,
-					onRepoSetupHookEvent: (activity) =>
-						this.activityPoster.postRepoSetupHookActivity(
-							sessionId,
+					onRepoSetupHookEvent: async (event) => {
+						await this.postActivityViaSink(
 							linearWorkspaceId,
-							activity,
-						),
+							sessionId,
+							formatRepoSetupHookActivity(event),
+							"repository setup hook",
+						);
+					},
 				})
 			: await this.gitService.createGitWorktree(fullIssue, repositories, {
 					baseBranchOverrides,
-					onRepoSetupHookEvent: (activity) =>
-						this.activityPoster.postRepoSetupHookActivity(
-							sessionId,
+					onRepoSetupHookEvent: async (event) => {
+						await this.postActivityViaSink(
 							linearWorkspaceId,
-							activity,
-						),
+							sessionId,
+							formatRepoSetupHookActivity(event),
+							"repository setup hook",
+						);
+					},
 				});
 
 		this.logger.debug(`Workspace created at: ${workspace.path}`);
@@ -3462,7 +3523,7 @@ ${taskSection}`;
 			const blockerList = blockResult.blockingIdentifiers
 				.map((id) => `**${id}**`)
 				.join(", ");
-			await this.activityPoster.postThoughtActivity(
+			await this.postThought(
 				agentSession.id,
 				linearWorkspaceId,
 				`Blocked by ${blockerList} — will start automatically when ${blockResult.blockingIdentifiers.length === 1 ? "it is" : "they are"} resolved.`,
@@ -5103,29 +5164,17 @@ ${taskSection}`;
 				? `Received feedback from orchestrator (${parentIssueId}):\n\n---\n\n${message}\n\n---`
 				: `Received feedback from orchestrator:\n\n---\n\n${message}\n\n---`;
 
-			try {
-				const result = await issueTracker.createAgentActivity({
+			const activityId = await this.postActivityDirect(
+				issueTracker,
+				{
 					agentSessionId: childSessionId,
-					content: {
-						type: "thought",
-						body: feedbackThought,
-					},
-				});
-
-				if (result.success) {
-					console.log(
-						`[EdgeWorker] Posted feedback receipt thought for child session ${childSessionId}`,
-					);
-				} else {
-					console.error(
-						`[EdgeWorker] Failed to post feedback receipt thought:`,
-						result,
-					);
-				}
-			} catch (error) {
-				console.error(
-					`[EdgeWorker] Error posting feedback receipt thought:`,
-					error,
+					content: { type: "thought", body: feedbackThought },
+				},
+				"feedback receipt thought",
+			);
+			if (activityId) {
+				console.log(
+					`[EdgeWorker] Posted feedback receipt thought for child session ${childSessionId}`,
 				);
 			}
 		}
@@ -6170,7 +6219,28 @@ ${input.userComment}
 		input: AgentActivityCreateInput,
 		label: string,
 	): Promise<string | null> {
-		return this.activityPoster.postActivityDirect(issueTracker, input, label);
+		// Route through the single sink post path. These call sites already have
+		// an issue tracker resolved, so wrap it in an ad-hoc LinearActivitySink.
+		const { agentSessionId, content, ephemeral, signalMetadata } =
+			input as AgentActivityCreateInput & {
+				ephemeral?: boolean;
+				signalMetadata?: Record<string, unknown>;
+			};
+		const activity = {
+			...(content as unknown as Activity),
+			...(ephemeral !== undefined && { ephemeral }),
+			...(signalMetadata && { signalMetadata }),
+		} as Activity;
+		try {
+			const result = await new LinearActivitySink(issueTracker, "adhoc").post(
+				agentSessionId,
+				activity,
+			);
+			return result.activityId ?? null;
+		} catch (error) {
+			this.logger.error(`Error creating ${label}:`, error);
+			return null;
+		}
 	}
 
 	/**
@@ -6180,9 +6250,10 @@ ${input.userComment}
 		sessionId: string,
 		linearWorkspaceId: string,
 	): Promise<void> {
-		return this.activityPoster.postInstantAcknowledgment(
+		await this.postThought(
 			sessionId,
 			linearWorkspaceId,
+			"I've received your request and I'm starting to work on it. Let me analyze the issue and prepare my approach.",
 		);
 	}
 
@@ -6193,9 +6264,10 @@ ${input.userComment}
 		sessionId: string,
 		linearWorkspaceId: string,
 	): Promise<void> {
-		return this.activityPoster.postParentResumeAcknowledgment(
+		await this.postThought(
 			sessionId,
 			linearWorkspaceId,
+			"Resuming from child session",
 		);
 	}
 
@@ -6208,11 +6280,11 @@ ${input.userComment}
 		repoLines: string[],
 		routingMethod?: string,
 	): Promise<void> {
-		return this.activityPoster.postRoutingActivity(
-			sessionId,
+		await this.postActivityViaSink(
 			linearWorkspaceId,
-			repoLines,
-			routingMethod,
+			sessionId,
+			formatRoutingThought(repoLines, routingMethod),
+			"routing",
 		);
 	}
 
@@ -6312,11 +6384,17 @@ ${input.userComment}
 		linearWorkspaceId: string,
 		repositoryId: string,
 	): Promise<void> {
-		return this.activityPoster.postSystemPromptSelectionThought(
-			sessionId,
-			labels,
+		const repository = Array.from(this.repositories.values()).find(
+			(r) => r.id === repositoryId,
+		);
+		if (!repository) return;
+		const activity = formatLabelRoleThought(labels, repository);
+		if (!activity) return;
+		await this.postActivityViaSink(
 			linearWorkspaceId,
-			repositoryId,
+			sessionId,
+			activity,
+			"system prompt selection",
 		);
 	}
 
@@ -6513,10 +6591,12 @@ ${input.userComment}
 		linearWorkspaceId: string,
 		isStreaming: boolean,
 	): Promise<void> {
-		return this.activityPoster.postInstantPromptedAcknowledgment(
+		await this.postThought(
 			sessionId,
 			linearWorkspaceId,
-			isStreaming,
+			isStreaming
+				? "I've queued up your message as guidance"
+				: "Getting started on that...",
 		);
 	}
 

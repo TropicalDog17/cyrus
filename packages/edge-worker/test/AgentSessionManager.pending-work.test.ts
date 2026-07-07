@@ -1,4 +1,3 @@
-import { ClaudeMessageFormatter } from "cyrus-claude-runner";
 import type { AgentPendingWork } from "cyrus-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager";
@@ -105,10 +104,10 @@ describe("AgentSessionManager pending-work activities", () => {
 	function setup(pendingWork: AgentPendingWork | null) {
 		const mockActivitySink: IActivitySink = {
 			id: "test-workspace",
-			postActivity: vi.fn().mockResolvedValue({ activityId: "activity-1" }),
+			post: vi.fn().mockResolvedValue({ activityId: "activity-1" }),
 			createAgentSession: vi.fn().mockResolvedValue("ext-session-1"),
 		};
-		postActivitySpy = mockActivitySink.postActivity as ReturnType<typeof vi.fn>;
+		postActivitySpy = mockActivitySink.post as ReturnType<typeof vi.fn>;
 
 		manager = new AgentSessionManager();
 		manager.createCyrusAgentSession(
@@ -125,9 +124,7 @@ describe("AgentSessionManager pending-work activities", () => {
 		);
 		manager.setActivitySink(sessionId, mockActivitySink);
 
-		const formatter = new ClaudeMessageFormatter();
 		const runnerStub = {
-			getFormatter: () => formatter,
 			...(pendingWork && { getPendingWork: () => pendingWork }),
 			provider: "claude",
 		} as unknown as Parameters<typeof manager.addAgentRunner>[1];

@@ -14,11 +14,11 @@ describe("AgentSessionManager stop-session behavior", () => {
 	beforeEach(() => {
 		mockActivitySink = {
 			id: "test-workspace",
-			postActivity: vi.fn().mockResolvedValue({ activityId: "activity-1" }),
+			post: vi.fn().mockResolvedValue({ activityId: "activity-1" }),
 			createAgentSession: vi.fn().mockResolvedValue("session-1"),
 		};
 
-		postActivitySpy = vi.spyOn(mockActivitySink, "postActivity");
+		postActivitySpy = vi.spyOn(mockActivitySink, "post");
 
 		manager = new AgentSessionManager();
 

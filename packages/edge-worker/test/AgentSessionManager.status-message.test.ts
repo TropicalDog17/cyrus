@@ -13,11 +13,11 @@ describe("AgentSessionManager - Status Messages", () => {
 	beforeEach(() => {
 		mockActivitySink = {
 			id: "test-workspace",
-			postActivity: vi.fn().mockResolvedValue({ activityId: "activity-123" }),
+			post: vi.fn().mockResolvedValue({ activityId: "activity-123" }),
 			createAgentSession: vi.fn().mockResolvedValue("session-123"),
 		};
 
-		postActivitySpy = vi.spyOn(mockActivitySink, "postActivity");
+		postActivitySpy = vi.spyOn(mockActivitySink, "post");
 
 		manager = new AgentSessionManager();
 
@@ -49,14 +49,11 @@ describe("AgentSessionManager - Status Messages", () => {
 
 		// Verify that postActivity was called with ephemeral thought
 		// postActivity(sessionId, content, options)
-		expect(postActivitySpy).toHaveBeenCalledWith(
-			sessionId,
-			{
-				type: "thought",
-				body: "Compacting conversation history…",
-			},
-			{ ephemeral: true },
-		);
+		expect(postActivitySpy).toHaveBeenCalledWith(sessionId, {
+			type: "thought",
+			body: "Compacting conversation history…",
+			ephemeral: true,
+		});
 	});
 
 	it("should post non-ephemeral activity when status is cleared (null)", async () => {
@@ -74,14 +71,11 @@ describe("AgentSessionManager - Status Messages", () => {
 		await manager.handleClaudeMessage(sessionId, statusClearMessage);
 
 		// Verify that postActivity was called with non-ephemeral thought
-		expect(postActivitySpy).toHaveBeenCalledWith(
-			sessionId,
-			{
-				type: "thought",
-				body: "Conversation history compacted",
-			},
-			{ ephemeral: false },
-		);
+		expect(postActivitySpy).toHaveBeenCalledWith(sessionId, {
+			type: "thought",
+			body: "Conversation history compacted",
+			ephemeral: false,
+		});
 	});
 
 	it("should handle compacting status followed by clear status", async () => {
@@ -90,14 +84,11 @@ describe("AgentSessionManager - Status Messages", () => {
 		await manager.handleClaudeMessage(sessionId, compactingMessage);
 
 		// Verify ephemeral activity was created
-		expect(postActivitySpy).toHaveBeenCalledWith(
-			sessionId,
-			{
-				type: "thought",
-				body: "Compacting conversation history…",
-			},
-			{ ephemeral: true },
-		);
+		expect(postActivitySpy).toHaveBeenCalledWith(sessionId, {
+			type: "thought",
+			body: "Compacting conversation history…",
+			ephemeral: true,
+		});
 
 		// Clear the mock calls
 		postActivitySpy.mockClear();
@@ -107,14 +98,11 @@ describe("AgentSessionManager - Status Messages", () => {
 		await manager.handleClaudeMessage(sessionId, statusClearMessage);
 
 		// Verify non-ephemeral activity was created
-		expect(postActivitySpy).toHaveBeenCalledWith(
-			sessionId,
-			{
-				type: "thought",
-				body: "Conversation history compacted",
-			},
-			{ ephemeral: false },
-		);
+		expect(postActivitySpy).toHaveBeenCalledWith(sessionId, {
+			type: "thought",
+			body: "Conversation history compacted",
+			ephemeral: false,
+		});
 	});
 
 	it("should handle error when posting compacting status fails", async () => {

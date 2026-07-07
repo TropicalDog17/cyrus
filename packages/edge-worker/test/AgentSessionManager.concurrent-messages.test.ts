@@ -1,4 +1,3 @@
-import { ClaudeMessageFormatter } from "cyrus-claude-runner";
 import type { AgentAssistantMessage, AgentUserMessage } from "cyrus-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager";
@@ -25,10 +24,10 @@ describe("AgentSessionManager - concurrent message handling", () => {
 	beforeEach(() => {
 		mockActivitySink = {
 			id: "test-workspace",
-			postActivity: vi.fn().mockResolvedValue({ activityId: "activity-1" }),
+			post: vi.fn().mockResolvedValue({ activityId: "activity-1" }),
 			createAgentSession: vi.fn().mockResolvedValue("ext-session-1"),
 		};
-		postActivitySpy = mockActivitySink.postActivity as ReturnType<typeof vi.fn>;
+		postActivitySpy = mockActivitySink.post as ReturnType<typeof vi.fn>;
 
 		manager = new AgentSessionManager();
 		// Platform defaults to "linear", which auto-assigns externalSessionId = sessionId
@@ -47,11 +46,9 @@ describe("AgentSessionManager - concurrent message handling", () => {
 		);
 		manager.setActivitySink(sessionId, mockActivitySink);
 
-		// Minimal IAgentRunner stub that only exposes a real formatter (the
-		// concurrency code path only uses this to format tool parameter/result).
-		const formatter = new ClaudeMessageFormatter();
+		// Minimal IAgentRunner stub — the mapper renders tool activities; the
+		// runner is only consulted for its provider tag.
 		const runnerStub = {
-			getFormatter: () => formatter,
 			provider: "claude",
 		} as unknown as Parameters<typeof manager.addAgentRunner>[1];
 		manager.addAgentRunner(sessionId, runnerStub);

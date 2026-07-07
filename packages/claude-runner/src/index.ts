@@ -25,10 +25,6 @@ export {
 	writeTools,
 } from "./config.js";
 export {
-	ClaudeMessageFormatter,
-	type IMessageFormatter,
-} from "./formatter.js";
-export {
 	HttpSessionStore,
 	type HttpSessionStoreOptions,
 } from "./HttpSessionStore.js";
