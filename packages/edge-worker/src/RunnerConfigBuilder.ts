@@ -174,15 +174,30 @@ export class RunnerConfigBuilder {
 			],
 		};
 
-		// Determine the Claude model (and fallback) from selectors. This fork
-		// runs Claude only, so runnerType is always "claude".
+		// Determine runner type and model override from selectors.
 		const runnerSelection = this.runnerSelector.determineRunnerSelection(
 			input.labels || [],
 			input.issueDescription,
 		);
-		const runnerType = runnerSelection.runnerType;
-		const modelOverride = runnerSelection.modelOverride;
-		const fallbackModelOverride = runnerSelection.fallbackModelOverride;
+		let runnerType = runnerSelection.runnerType;
+		let modelOverride = runnerSelection.modelOverride;
+		let fallbackModelOverride = runnerSelection.fallbackModelOverride;
+
+		// When resuming a session, keep the runner that originally created it —
+		// even if the labels/tags now select a different one — so a session never
+		// switches harness mid-flight. The runner-specific session id recorded on
+		// the session tells us which one to stick with.
+		if (input.session.claudeSessionId && runnerType !== "claude") {
+			runnerType = "claude";
+			modelOverride = this.runnerSelector.getDefaultModelForRunner("claude");
+			fallbackModelOverride =
+				this.runnerSelector.getDefaultFallbackModelForRunner("claude");
+		} else if (input.session.cursorSessionId && runnerType !== "cursor") {
+			runnerType = "cursor";
+			modelOverride = this.runnerSelector.getDefaultModelForRunner("cursor");
+			fallbackModelOverride =
+				this.runnerSelector.getDefaultFallbackModelForRunner("cursor");
+		}
 
 		// Log model override if found
 		if (modelOverride) {
@@ -276,6 +291,20 @@ export class RunnerConfigBuilder {
 			onMessage: input.onMessage,
 			onError: input.onError,
 		};
+
+		// Cursor runner uses @cursor/sdk. Pass through the API key, the same
+		// sandboxSettings shape Claude consumes (the runner translates it to
+		// Cursor's `.cursor/sandbox.json` schema), and the egress CA bundle path
+		// for MITM TLS trust in sandboxed children.
+		if (runnerType === "cursor") {
+			config.cursorApiKey = process.env.CURSOR_API_KEY || undefined;
+			if (input.sandboxSettings) {
+				config.sandboxSettings = input.sandboxSettings;
+			}
+			if (input.egressCaCertPath) {
+				config.egressCaCertPath = input.egressCaCertPath;
+			}
+		}
 
 		if (input.resumeSessionId) {
 			config.resumeSessionId = input.resumeSessionId;

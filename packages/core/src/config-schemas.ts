@@ -3,9 +3,9 @@ import { z } from "zod";
 /**
  * Supported runner/harness types for agent execution.
  *
- * This fork runs Claude only — the gemini/codex/cursor runners were removed.
+ * This fork runs Claude and Cursor (the gemini/codex runners were removed).
  */
-export const RunnerTypeSchema = z.enum(["claude"]);
+export const RunnerTypeSchema = z.enum(["claude", "cursor"]);
 export type RunnerType = z.infer<typeof RunnerTypeSchema>;
 
 /**
@@ -348,10 +348,16 @@ export const EdgeConfigSchema = z.object({
 	/** Default Claude fallback model if primary Claude model is unavailable */
 	claudeDefaultFallbackModel: z.string().optional(),
 
+	/** Default Cursor model to use across all repositories (e.g., "composer-2.5", "composer-2") */
+	cursorDefaultModel: z.string().optional(),
+
+	/** Default Cursor fallback model if primary Cursor model is unavailable */
+	cursorDefaultFallbackModel: z.string().optional(),
+
 	/**
-	 * Default runner/harness. This fork runs Claude only, so this is always
-	 * "claude" when set. Retained for backwards compatibility with existing
-	 * config files.
+	 * Default runner/harness to use when no runner is specified via labels or
+	 * description tags. This fork supports "claude" and "cursor". If omitted,
+	 * falls back to "claude".
 	 */
 	defaultRunner: RunnerTypeSchema.optional(),
 

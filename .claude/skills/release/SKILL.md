@@ -43,27 +43,35 @@ pnpm build  # Builds all packages to ensure dependencies are resolved
 **IMPORTANT**: Publish in this exact order to avoid dependency resolution issues:
 
 ```bash
-# 1. Packages with no internal dependencies
+# 1. Packages with no Cyrus workspace dependencies
 cd packages/cloudflare-tunnel-client && pnpm publish --access public --no-git-checks
 cd ../..
 pnpm install  # Update lockfile
 
-cd packages/claude-runner && pnpm publish --access public --no-git-checks
+cd packages/mcp-tools && pnpm publish --access public --no-git-checks
 cd ../..
 pnpm install  # Update lockfile
 
-# 2. Core package (depends on claude-runner)
+# 2. Core (no Cyrus workspace dependencies)
 cd packages/core && pnpm publish --access public --no-git-checks
 cd ../..
 pnpm install  # Update lockfile
 
-# 3. Simple agent runner (depends on claude-runner)
-cd packages/simple-agent-runner && pnpm publish --access public --no-git-checks
+# 3. Runners (depend on core)
+cd packages/claude-runner && pnpm publish --access public --no-git-checks
 cd ../..
 pnpm install  # Update lockfile
 
-# 4. Packages that depend on core
+cd packages/cursor-runner && pnpm publish --access public --no-git-checks
+cd ../..
+pnpm install  # Update lockfile
+
+# 4. Event transports + config updater (depend on core)
 cd packages/linear-event-transport && pnpm publish --access public --no-git-checks
+cd ../..
+pnpm install  # Update lockfile
+
+cd packages/github-event-transport && pnpm publish --access public --no-git-checks
 cd ../..
 pnpm install  # Update lockfile
 
@@ -71,12 +79,7 @@ cd packages/config-updater && pnpm publish --access public --no-git-checks
 cd ../..
 pnpm install  # Update lockfile
 
-# 5. Gemini runner (depends on claude-runner, core, simple-agent-runner)
-cd packages/gemini-runner && pnpm publish --access public --no-git-checks
-cd ../..
-pnpm install  # Update lockfile
-
-# 6. Edge worker (depends on all packages above)
+# 5. Edge worker (depends on all packages above)
 cd packages/edge-worker && pnpm publish --access public --no-git-checks
 cd ../..
 pnpm install  # Update lockfile
@@ -138,7 +141,7 @@ EOF
 
 - Always use `--no-git-checks` flag to publish from feature branches
 - Run `pnpm install` after each publish to update the lockfile
-- The `simple-agent-runner` package MUST be published before `edge-worker`
+- The `cursor-runner` package MUST be published before `edge-worker`
 - Build all packages once at the start, then publish without rebuilding
 - This ensures `workspace:*` references resolve to published versions
 

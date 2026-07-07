@@ -4,8 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Cursor is now supported as an agent executor.** Route an issue to Cursor by adding a `cursor` label, putting `[agent=cursor]` in the issue description, or setting `defaultRunner: "cursor"` (or `CYRUS_DEFAULT_RUNNER=cursor`). Cursor sessions run via the official `@cursor/sdk` and default to the `composer-2.5` model (Composer 2.5, whose default speed tier is Fast); override it with `cursorDefaultModel` in `config.json` or `CYRUS_CURSOR_DEFAULT_MODEL`. Requires a `CURSOR_API_KEY` in the environment.
+
 ### Removed
-- **This fork runs Claude only, on Linear + GitHub.** The Gemini, Codex, and Cursor runners and the GitLab and Slack integrations have been removed. Issues always route to Claude regardless of any `[agent=…]` description selector or runner label, and `defaultRunner` now accepts only `claude`.
+- **This fork runs on Linear + GitHub with Claude and Cursor executors.** The Gemini and Codex runners and the GitLab and Slack integrations have been removed. `defaultRunner` accepts `claude` (default) or `cursor`.
 
 ### Fixed
 - Cyrus no longer loses its memory of in-progress issues if it is restarted or killed at the wrong moment. Session state is now saved atomically and can never be left half-written; if the state file is ever damaged, Cyrus automatically recovers from a backup instead of silently starting fresh and abandoning every active issue.
