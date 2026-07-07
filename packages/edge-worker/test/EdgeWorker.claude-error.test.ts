@@ -103,7 +103,9 @@ describe("EdgeWorker - handleClaudeError (runner-crash surfacing)", () => {
 
 	it("surfaces a genuine crash to Linear and reclaims the warm slot", async () => {
 		const sessionId = "sess-crash";
-		(edgeWorker as any).warmInstances.set(sessionId, { fake: "warm" });
+		// warmInstances moved onto WarmSessionPool; seed its internal slot so we
+		// can assert the crash path reclaims it via warmPool.release().
+		(edgeWorker as any).warmPool.warmInstances.set(sessionId, { fake: "warm" });
 		const savedSpy = vi
 			.spyOn(edgeWorker as any, "savePersistedState")
 			.mockResolvedValue(undefined);
@@ -119,7 +121,9 @@ describe("EdgeWorker - handleClaudeError (runner-crash surfacing)", () => {
 			mockAgentSessionManager.failSession.mock.calls[0];
 		expect(failedSessionId).toBe(sessionId);
 		expect(body).toContain("Claude Code process exited with code 1");
-		expect((edgeWorker as any).warmInstances.has(sessionId)).toBe(false);
+		expect((edgeWorker as any).warmPool.warmInstances.has(sessionId)).toBe(
+			false,
+		);
 		expect(savedSpy).toHaveBeenCalled();
 	});
 

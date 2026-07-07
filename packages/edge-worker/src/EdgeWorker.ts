@@ -1,29 +1,16 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { LinearClient } from "@linear/sdk";
-import type {
-	ClaudeRunnerConfig,
-	McpServerConfig,
-	SessionStore,
-	WarmQuery,
-} from "cyrus-claude-runner";
-import {
-	buildBaseSessionEnv,
-	ClaudeRunner,
-	HttpSessionStore,
-	normalizeMcpHttpTransport,
-} from "cyrus-claude-runner";
+import type { SessionStore } from "cyrus-claude-runner";
+import { HttpSessionStore } from "cyrus-claude-runner";
 import { getCyrusAppUrl } from "cyrus-cloudflare-tunnel-client";
 import { ConfigUpdater } from "cyrus-config-updater";
 import type {
 	AgentActivityCreateInput,
 	AgentEvent,
-	AgentMessage,
 	AgentRunnerConfig,
 	AgentSessionCreatedWebhook,
 	AgentSessionPromptedWebhook,
@@ -71,14 +58,12 @@ import {
 	isStopSignalMessage,
 	isUnassignMessage,
 	isUserPromptMessage,
-	nodeDirLister,
 	normalizeConfigPaths,
 	PersistenceManager,
 	requireLinearWorkspaceId,
 	toClaudeToolPatterns,
 	WebhookIpValidator,
 } from "cyrus-core";
-import { CursorRunner } from "cyrus-cursor-runner";
 import {
 	extractCommentAuthor,
 	extractCommentBody,
@@ -134,6 +119,7 @@ import { GitHubUsernameResolver } from "./GitHubUsernameResolver.js";
 import { GitService } from "./GitService.js";
 import { GlobalSessionRegistry } from "./GlobalSessionRegistry.js";
 import { McpConfigService } from "./McpConfigService.js";
+import { ParkedSessionRegistry } from "./ParkedSessionRegistry.js";
 import { PromptBuilder } from "./PromptBuilder.js";
 import { PromptAssembler } from "./prompt-assembly/PromptAssembler.js";
 import type { PromptAssemblyInput } from "./prompt-assembly/types.js";
@@ -141,12 +127,9 @@ import {
 	RepositoryRouter,
 	type RepositoryRouterDeps,
 } from "./RepositoryRouter.js";
-import {
-	type RunnerConfig,
-	RunnerConfigBuilder,
-	resolveIssueMcpConfigPath,
-} from "./RunnerConfigBuilder.js";
+import { RunnerConfigBuilder } from "./RunnerConfigBuilder.js";
 import { RunnerSelectionService } from "./RunnerSelectionService.js";
+import { SessionOrchestrator } from "./SessionOrchestrator.js";
 import { SharedApplicationServer } from "./SharedApplicationServer.js";
 import {
 	type SkillSessionContext,
@@ -158,6 +141,7 @@ import { NoopActivitySink } from "./sinks/NoopActivitySink.js";
 import { ToolPermissionResolver } from "./ToolPermissionResolver.js";
 import type { AgentSessionData, EdgeWorkerEvents } from "./types.js";
 import { UserAccessControl } from "./UserAccessControl.js";
+import { WarmSessionPool } from "./WarmSessionPool.js";
 
 export declare interface EdgeWorker {
 	on<K extends keyof EdgeWorkerEvents>(
@@ -187,7 +171,9 @@ export class EdgeWorker extends EventEmitter {
 	private activitySinks: Map<string, IActivitySink> = new Map(); // Maps Linear workspace ID to activity sink (one per workspace, mirrors issueTrackers)
 	private sessionRepositories: Map<string, string> = new Map(); // Maps session ID to repository ID
 	private lastStopTimeBySession: Map<string, number> = new Map(); // Maps session ID to timestamp of last stop signal (for double-stop detection)
-	private warmInstances: Map<string, WarmQuery> = new Map(); // Pre-warmed Claude sessions keyed by agentSessionId
+	private warmPool: WarmSessionPool; // Pre-warmed Claude session subprocess pool
+	private parkedRegistry: ParkedSessionRegistry; // Sessions parked behind blocked-by dependencies
+	private sessionOrchestrator: SessionOrchestrator; // Runner creation + message wiring
 	private issueTrackers: Map<string, IIssueTrackerService> = new Map(); // one issue tracker per Linear workspace (keyed by linearWorkspaceId)
 	private linearEventTransport: LinearEventTransport | null = null; // Single event transport for webhook delivery
 	private gitHubEventTransport: GitHubEventTransport | null = null; // GitHub event transport for forwarded GitHub webhooks
@@ -251,25 +237,6 @@ export class EdgeWorker extends EventEmitter {
 	 * Key format: `${createdAt}:${issueId}`
 	 */
 	private processedIssueUpdateKeys = new Set<string>();
-
-	/**
-	 * Sessions parked due to blocked-by dependencies.
-	 * Key: Linear issue ID (the blocked issue)
-	 * Value: All data needed to replay initializeAgentRunner when unblocked
-	 */
-	private parkedSessions = new Map<
-		string,
-		{
-			agentSession: AgentSessionCreatedWebhook["agentSession"];
-			repositories: RepositoryConfig[];
-			linearWorkspaceId: string;
-			guidance?: AgentSessionCreatedWebhook["guidance"];
-			commentBody?: string | null;
-			baseBranchOverrides?: Map<string, string>;
-			routingMethod?: string;
-			blockingIssueIds: string[];
-		}
-	>();
 
 	constructor(config: EdgeWorkerConfig) {
 		super();
@@ -541,6 +508,116 @@ export class EdgeWorker extends EventEmitter {
 				this.buildSkillSessionContext(repo, issue, session),
 		});
 
+		// Session split (Phase F): parked/warm/orchestration state machines.
+		// (In Phase G this construction moves to composeEdgeWorker.)
+		this.parkedRegistry = new ParkedSessionRegistry();
+		this.warmPool = new WarmSessionPool({
+			agentSessionManager: this.agentSessionManager,
+			// Warm and cold paths share the SAME AccessPolicy compute+adapter so
+			// their home-directory denials can't drift (Frozen decision #2).
+			accessPolicy: { compute, toClaudeToolPatterns },
+			mcpConfigService: this.mcpConfigService,
+			skillsPluginResolver: this.skillsPluginResolver,
+			gitService: this.gitService,
+			logger: this.logger,
+			cyrusHome: this.cyrusHome,
+			getConfig: () => this.config,
+			getRepositoryForSession: (sessionId) => {
+				const repoId = this.sessionRepositories.get(sessionId);
+				return repoId ? this.repositories.get(repoId) : undefined;
+			},
+			buildAllowedTools: (repository) => this.buildAllowedTools(repository),
+			buildDisallowedTools: (repository) =>
+				this.buildDisallowedTools(repository),
+		});
+		this.sessionOrchestrator = new SessionOrchestrator({
+			logger: this.logger,
+			cyrusHome: this.cyrusHome,
+			agentSessionManager: this.agentSessionManager,
+			warmPool: this.warmPool,
+			runnerConfigBuilder: this.runnerConfigBuilder,
+			skillsPluginResolver: this.skillsPluginResolver,
+			gitService: this.gitService,
+			promptAssembler: this.promptAssembler,
+			getConfig: () => this.config,
+			getClaudeSessionStore: () => this.claudeSessionStore,
+			getSandboxSettings: () => this.sdkSandboxSettings ?? undefined,
+			getEgressCaCertPath: () => this.egressCaCertPath ?? undefined,
+			createCyrusAgentSession: (
+				sessionId,
+				issue,
+				repositories,
+				agentSessionManager,
+				linearWorkspaceId,
+				baseBranchOverrides,
+				routingMethod,
+			) =>
+				this.createCyrusAgentSession(
+					sessionId,
+					issue,
+					repositories,
+					agentSessionManager,
+					linearWorkspaceId,
+					baseBranchOverrides,
+					routingMethod,
+				),
+			buildSessionPrompt: (
+				isNewSession,
+				session,
+				fullIssue,
+				repository,
+				promptBody,
+				attachmentManifest,
+				commentAuthor,
+				commentTimestamp,
+			) =>
+				this.buildSessionPrompt(
+					isNewSession,
+					session,
+					fullIssue,
+					repository,
+					promptBody,
+					attachmentManifest,
+					commentAuthor,
+					commentTimestamp,
+				),
+			determineSystemPromptFromLabels: (labels, repository) =>
+				this.determineSystemPromptFromLabels(labels, repository),
+			buildAllowedTools: (repositories, promptType) =>
+				this.buildAllowedTools(repositories, promptType),
+			buildDisallowedTools: (repositories, promptType) =>
+				this.buildDisallowedTools(repositories, promptType),
+			buildSkillSessionContext: (repository, fullIssue, session) =>
+				this.buildSkillSessionContext(repository, fullIssue, session),
+			resolveSkillRepoPaths: (repository, session) =>
+				this.resolveSkillRepoPaths(repository, session),
+			fetchFullIssueDetails: (issueId, workspaceId) =>
+				this.fetchFullIssueDetails(issueId, workspaceId),
+			fetchIssueLabels: (issue) => this.fetchIssueLabels(issue),
+			createAskUserQuestionCallback: (sid, wid) =>
+				this.createAskUserQuestionCallback(sid, wid),
+			savePersistedState: () => this.savePersistedState(),
+			postInstantAcknowledgment: (sessionId, linearWorkspaceId) =>
+				this.postInstantAcknowledgment(sessionId, linearWorkspaceId),
+			postSystemPromptSelectionThought: (
+				sessionId,
+				labels,
+				linearWorkspaceId,
+				repositoryId,
+			) =>
+				this.postSystemPromptSelectionThought(
+					sessionId,
+					labels,
+					linearWorkspaceId,
+					repositoryId,
+				),
+			emitSessionStarted: (issueId, issue, repositoryId) => {
+				this.emit("session:started", issueId, issue, repositoryId);
+				this.config.handlers?.onSessionStart?.(issueId, issue, repositoryId);
+			},
+			resumeSessionDelegate: (...args) => this.resumeAgentSession(...args),
+		});
+
 		// Components will be initialized and registered in start() method before server starts
 	}
 
@@ -565,8 +642,8 @@ export class EdgeWorker extends EventEmitter {
 		// Pre-warm the 30 most recent Claude sessions in the background
 		// so their first query after restart has near-zero cold-start latency.
 		// Disabled by default; opt in with CYRUS_ENABLE_WARM_SESSIONS=1.
-		if (this.isWarmSessionsEnabled()) {
-			this.warmupRecentSessions(30).catch((err) => {
+		if (this.warmPool.isEnabled()) {
+			this.warmPool.warmup(30).catch((err) => {
 				this.logger.warn("Session warmup failed (non-fatal):", err);
 			});
 		}
@@ -1253,7 +1330,7 @@ export class EdgeWorker extends EventEmitter {
 
 			// Create agent runner using the standard config builder
 			const { config: runnerConfig, runnerType } =
-				await this.buildAgentRunnerConfig(
+				await this.sessionOrchestrator.buildAgentRunnerConfig(
 					session,
 					repository,
 					githubSessionId,
@@ -1270,7 +1347,10 @@ export class EdgeWorker extends EventEmitter {
 					"github", // sessionPlatform → uses githubMcpConfigs override
 				);
 
-			const runner = this.createRunnerForType(runnerType, runnerConfig);
+			const runner = this.sessionOrchestrator.createRunnerForType(
+				runnerType,
+				runnerConfig,
+			);
 
 			// Store the runner in the session manager
 			agentSessionManager.addAgentRunner(githubSessionId, runner);
@@ -2987,32 +3067,14 @@ ${taskSection}`;
 			`Issue ${issueIdentifier} moved to ${stateType} — checking for parked sessions to wake`,
 		);
 
-		// Find parked sessions that were blocked by this issue
-		const sessionsToWake: string[] = [];
-		for (const [blockedIssueId, parked] of this.parkedSessions.entries()) {
-			if (parked.blockingIssueIds.includes(completedIssueId)) {
-				// Remove this blocker from the list
-				parked.blockingIssueIds = parked.blockingIssueIds.filter(
-					(id) => id !== completedIssueId,
-				);
-
-				// If no more blockers, wake the session
-				if (parked.blockingIssueIds.length === 0) {
-					sessionsToWake.push(blockedIssueId);
-				} else {
-					this.logger.debug(
-						`Parked session for issue ${blockedIssueId} still has ${parked.blockingIssueIds.length} remaining blocker(s)`,
-					);
-				}
-			}
-		}
+		// Drop this blocker from every parked entry; the registry returns the
+		// issue IDs whose blocker list is now empty (ready to wake).
+		const sessionsToWake = this.parkedRegistry.resolveBlocker(completedIssueId);
 
 		// Wake up unblocked sessions
 		for (const blockedIssueId of sessionsToWake) {
-			const parked = this.parkedSessions.get(blockedIssueId);
+			const parked = this.parkedRegistry.wake(blockedIssueId);
 			if (!parked) continue;
-
-			this.parkedSessions.delete(blockedIssueId);
 
 			this.logger.info(
 				`Waking parked session for issue ${parked.agentSession.issue?.identifier} — all blockers resolved`,
@@ -3025,17 +3087,17 @@ ${taskSection}`;
 				`All blocking dependencies are now resolved — starting work.`,
 			);
 
-			// Replay the normal initializeAgentRunner flow
+			// Replay the normal startSession flow
 			try {
-				await this.initializeAgentRunner(
-					parked.agentSession,
-					parked.repositories,
-					parked.linearWorkspaceId,
-					parked.guidance,
-					parked.commentBody,
-					parked.baseBranchOverrides,
-					parked.routingMethod,
-				);
+				await this.sessionOrchestrator.startSession({
+					agentSession: parked.agentSession,
+					repositories: parked.repositories,
+					linearWorkspaceId: parked.linearWorkspaceId,
+					guidance: parked.guidance,
+					commentBody: parked.commentBody,
+					baseBranchOverrides: parked.baseBranchOverrides,
+					routingMethod: parked.routingMethod,
+				});
 			} catch (error) {
 				this.logger.error(
 					`Failed to wake parked session for issue ${blockedIssueId}:`,
@@ -3053,7 +3115,7 @@ ${taskSection}`;
 		_webhook: AgentSessionPromptedWebhook,
 		issueId: string,
 	): Promise<void> {
-		const parked = this.parkedSessions.get(issueId);
+		const parked = this.parkedRegistry.get(issueId);
 		if (!parked) return;
 
 		const blockResult = await this.checkBlockedByDependencies(
@@ -3063,7 +3125,7 @@ ${taskSection}`;
 
 		if (blockResult.blocked) {
 			// Still blocked — update the parked entry and re-post status
-			parked.blockingIssueIds = blockResult.blockingIssueIds;
+			this.parkedRegistry.setBlockers(issueId, blockResult.blockingIssueIds);
 			const blockerList = blockResult.blockingIdentifiers
 				.map((id) => `**${id}**`)
 				.join(", ");
@@ -3079,7 +3141,7 @@ ${taskSection}`;
 		}
 
 		// Blockers resolved — wake the session
-		this.parkedSessions.delete(issueId);
+		this.parkedRegistry.wake(issueId);
 		this.logger.info(
 			`Re-prompt cleared blockers for ${parked.agentSession.issue?.identifier} — waking session`,
 		);
@@ -3091,15 +3153,15 @@ ${taskSection}`;
 		);
 
 		try {
-			await this.initializeAgentRunner(
-				parked.agentSession,
-				parked.repositories,
-				parked.linearWorkspaceId,
-				parked.guidance,
-				parked.commentBody,
-				parked.baseBranchOverrides,
-				parked.routingMethod,
-			);
+			await this.sessionOrchestrator.startSession({
+				agentSession: parked.agentSession,
+				repositories: parked.repositories,
+				linearWorkspaceId: parked.linearWorkspaceId,
+				guidance: parked.guidance,
+				commentBody: parked.commentBody,
+				baseBranchOverrides: parked.baseBranchOverrides,
+				routingMethod: parked.routingMethod,
+			});
 		} catch (error) {
 			this.logger.error(
 				`Failed to wake parked session for issue ${issueId} on re-prompt:`,
@@ -3515,7 +3577,7 @@ ${taskSection}`;
 		if (blockResult.blocked) {
 			// Park the session — don't create worktree or runner
 			const parkedIssueId = agentSession.issue!.id;
-			this.parkedSessions.set(parkedIssueId, {
+			this.parkedRegistry.park(parkedIssueId, {
 				agentSession,
 				repositories,
 				linearWorkspaceId,
@@ -3543,7 +3605,7 @@ ${taskSection}`;
 		}
 
 		// Initialize agent runner using shared logic (pass full repositories array)
-		await this.initializeAgentRunner(
+		await this.sessionOrchestrator.startSession({
 			agentSession,
 			repositories,
 			linearWorkspaceId,
@@ -3551,247 +3613,7 @@ ${taskSection}`;
 			commentBody,
 			baseBranchOverrides,
 			routingMethod,
-		);
-	}
-
-	/**
-
-	/**
-	 * Initialize and start agent runner for an agent session
-	 * This method contains the shared logic for creating an agent runner that both
-	 * handleAgentSessionCreatedWebhook and handleUserPromptedAgentActivity use.
-	 *
-	 * @param agentSession The Linear agent session
-	 * @param repositories Repository configurations (primary repo is repositories[0])
-	 * @param linearWorkspaceId Linear workspace ID (from webhook.organizationId)
-	 * @param guidance Optional guidance rules from Linear
-	 * @param commentBody Optional comment body (for mentions)
-	 * @param baseBranchOverrides Per-repo base branch overrides from [repo=name#branch] syntax
-	 */
-	private async initializeAgentRunner(
-		agentSession: AgentSessionCreatedWebhook["agentSession"],
-		repositories: RepositoryConfig[],
-		linearWorkspaceId: string,
-		guidance?: AgentSessionCreatedWebhook["guidance"],
-		commentBody?: string | null,
-		baseBranchOverrides?: Map<string, string>,
-		routingMethod?: string,
-	): Promise<void> {
-		const sessionId = agentSession.id;
-		const { issue } = agentSession;
-
-		if (!issue) {
-			this.logger.warn("Cannot initialize Claude runner without issue");
-			return;
-		}
-
-		const primaryRepo = repositories[0]!;
-
-		const log = this.logger.withContext({
-			sessionId,
-			issueIdentifier: issue.identifier,
 		});
-
-		// Log guidance if present
-		if (guidance && guidance.length > 0) {
-			log.debug(`Agent guidance received: ${guidance.length} rule(s)`);
-			for (const rule of guidance) {
-				let origin = "Unknown";
-				if (rule.origin) {
-					if (rule.origin.__typename === "TeamOriginWebhookPayload") {
-						origin = `Team: ${rule.origin.team.displayName}`;
-					} else {
-						origin = "Organization";
-					}
-				}
-				log.info(`- ${origin}: ${rule.body.substring(0, 100)}...`);
-			}
-		}
-
-		// HACK: This is required since the comment body is always populated, thus there is no other way to differentiate between the two trigger events
-		const AGENT_SESSION_MARKER = "This thread is for an agent session";
-		const isMentionTriggered =
-			commentBody && !commentBody.includes(AGENT_SESSION_MARKER);
-		// Check if the comment contains the /label-based-prompt command
-		const isLabelBasedPromptRequested = commentBody?.includes(
-			"/label-based-prompt",
-		);
-
-		const agentSessionManager = this.agentSessionManager;
-
-		// Post instant acknowledgment thought
-		await this.postInstantAcknowledgment(sessionId, linearWorkspaceId);
-
-		// Create the session using the shared method (pass full repositories array)
-		const sessionData = await this.createCyrusAgentSession(
-			sessionId,
-			issue,
-			repositories,
-			agentSessionManager,
-			linearWorkspaceId,
-			baseBranchOverrides,
-			routingMethod,
-		);
-
-		// Destructure the session data (excluding allowedTools which we'll build with promptType)
-		const {
-			session,
-			fullIssue,
-			workspace: _workspace,
-			attachmentResult,
-			attachmentsDir: _attachmentsDir,
-			allowedDirectories,
-		} = sessionData;
-
-		// Fetch labels early (needed for system prompt and runner selection)
-		const labels = await this.fetchIssueLabels(fullIssue);
-
-		log.info(`Starting agent session for issue ${fullIssue.identifier}`);
-
-		// Build and start Claude with initial prompt using full issue (streaming mode)
-		log.info(`Building initial prompt for issue ${fullIssue.identifier}`);
-		try {
-			// Create input for unified prompt assembly
-			const input: PromptAssemblyInput = {
-				session,
-				fullIssue,
-				repositories,
-				repository: primaryRepo,
-				userComment: commentBody || "", // Empty for delegation, present for mentions
-				attachmentManifest: attachmentResult.manifest,
-				guidance: guidance || undefined,
-				agentSession,
-				labels,
-				isNewSession: true,
-				isStreaming: false, // Not yet streaming
-				isMentionTriggered: isMentionTriggered || false,
-				isLabelBasedPromptRequested: isLabelBasedPromptRequested || false,
-				resolvedBaseBranches: sessionData.workspace.resolvedBaseBranches,
-				linearWorkspaceId,
-			};
-
-			// Use unified prompt assembly
-			const assembly = await this.promptAssembler.assemble(input);
-
-			// Get systemPromptVersion for tracking (TODO: add to PromptAssembly metadata)
-			let systemPromptVersion: string | undefined;
-			let promptType:
-				| "debugger"
-				| "builder"
-				| "scoper"
-				| "orchestrator"
-				| "graphite-orchestrator"
-				| undefined;
-
-			if (!isMentionTriggered || isLabelBasedPromptRequested) {
-				const systemPromptResult = await this.determineSystemPromptFromLabels(
-					labels,
-					primaryRepo,
-				);
-				systemPromptVersion = systemPromptResult?.version;
-				promptType = systemPromptResult?.type;
-
-				// Post thought about system prompt selection
-				if (assembly.systemPrompt) {
-					await this.postSystemPromptSelectionThought(
-						sessionId,
-						labels,
-						linearWorkspaceId,
-						primaryRepo.id,
-					);
-				}
-			}
-
-			// Build allowed tools list with Linear MCP tools (now with prompt type context)
-			const allowedTools = this.buildAllowedTools(repositories, promptType);
-			const disallowedTools = this.buildDisallowedTools(
-				repositories,
-				promptType,
-			);
-
-			log.debug(
-				`Configured allowed tools for ${fullIssue.identifier}:`,
-				allowedTools,
-			);
-			if (disallowedTools.length > 0) {
-				log.debug(
-					`Configured disallowed tools for ${fullIssue.identifier}:`,
-					disallowedTools,
-				);
-			}
-
-			// Create agent runner with system prompt from assembly
-			// buildAgentRunnerConfig now determines runner type from labels internally
-			const { config: runnerConfig, runnerType } =
-				await this.buildAgentRunnerConfig(
-					session,
-					primaryRepo,
-					sessionId,
-					assembly.systemPrompt,
-					allowedTools,
-					allowedDirectories,
-					disallowedTools,
-					undefined, // resumeSessionId
-					labels, // Pass labels for runner selection and model override
-					fullIssue.description || undefined, // Description tags can override label selectors
-					undefined, // maxTurns
-					linearWorkspaceId,
-					this.buildSkillSessionContext(primaryRepo, fullIssue, session),
-				);
-
-			log.debug(
-				`Label-based runner selection for new session: ${runnerType} (session ${sessionId})`,
-			);
-
-			const runner = this.createRunnerForType(runnerType, runnerConfig);
-
-			// Store runner by comment ID
-			agentSessionManager.addAgentRunner(sessionId, runner);
-
-			// Save state after mapping changes
-			await this.savePersistedState();
-
-			// Emit events using full issue (core Issue type)
-			this.emit("session:started", fullIssue.id, fullIssue, primaryRepo.id);
-			this.config.handlers?.onSessionStart?.(
-				fullIssue.id,
-				fullIssue,
-				primaryRepo.id,
-			);
-
-			// Update runner with version information (if available)
-			// Note: updatePromptVersions is specific to ClaudeRunner
-			if (
-				systemPromptVersion &&
-				"updatePromptVersions" in runner &&
-				typeof runner.updatePromptVersions === "function"
-			) {
-				runner.updatePromptVersions({
-					systemPromptVersion,
-				});
-			}
-
-			// Log metadata for debugging
-			log.debug(
-				`Initial prompt built successfully - components: ${assembly.metadata.components.join(", ")}, type: ${assembly.metadata.promptType}, length: ${assembly.userPrompt.length} characters`,
-			);
-
-			// Start session - use streaming mode if supported for ability to add messages later
-			if (runner.supportsStreamingInput && runner.startStreaming) {
-				log.debug(`Starting streaming session`);
-				const sessionInfo = await runner.startStreaming(assembly.userPrompt);
-				log.debug(`Streaming session started: ${sessionInfo.sessionId}`);
-			} else {
-				log.debug(`Starting non-streaming session`);
-				const sessionInfo = await runner.start(assembly.userPrompt);
-				log.debug(`Non-streaming session started: ${sessionInfo.sessionId}`);
-			}
-			// Note: AgentSessionManager will be initialized automatically when the first system message
-			// is received via handleClaudeMessage() callback
-		} catch (error) {
-			log.error(`Error in prompt building/starting:`, error);
-			throw error;
-		}
 	}
 
 	/**
@@ -3936,15 +3758,15 @@ ${taskSection}`;
 		// Initialize agent runner with the selected repository (wrapped in array)
 		// routingMethod="user-selected" will be included in the combined routing activity
 		// Use organizationId from webhook as the Linear-native workspace ID source
-		await this.initializeAgentRunner(
+		await this.sessionOrchestrator.startSession({
 			agentSession,
-			[repository],
-			webhook.organizationId,
+			repositories: [repository],
+			linearWorkspaceId: webhook.organizationId,
 			guidance,
 			commentBody,
-			undefined,
-			"user-selected",
-		);
+			baseBranchOverrides: undefined,
+			routingMethod: "user-selected",
+		});
 	}
 
 	/**
@@ -4237,7 +4059,7 @@ ${taskSection}`;
 		const issueIdForParkedCheck = webhook.agentSession?.issue?.id;
 		if (
 			issueIdForParkedCheck &&
-			this.parkedSessions.has(issueIdForParkedCheck)
+			this.parkedRegistry.isParked(issueIdForParkedCheck)
 		) {
 			await this.handleParkedSessionReprompt(webhook, issueIdForParkedCheck);
 			return;
@@ -4390,68 +4212,23 @@ ${taskSection}`;
 	}
 
 	/**
-	 * Handle Claude messages
+	 * Handle Claude session error.
+	 *
+	 * Thin delegator to {@link SessionOrchestrator.handleSessionError} — retained
+	 * (same signature) so existing tests that call `(edgeWorker as any)
+	 * .handleClaudeError` keep working until Phase G. TODO(Phase G): delete.
+	 * @internal - retained for test compatibility only.
 	 */
-	private async handleClaudeMessage(
-		sessionId: string,
-		message: AgentMessage,
-		_repositoryId: string,
-	): Promise<void> {
-		await this.agentSessionManager.handleClaudeMessage(sessionId, message);
-	}
-
-	/**
-	 * Handle Claude session error
-	 * Silently ignores AbortError (user-initiated stop), logs other errors
-	 */
-	private async handleClaudeError(
+	async handleClaudeError(
 		error: Error,
 		sessionId?: string,
 		repositoryId?: string,
 	): Promise<void> {
-		// AbortError is expected when user stops Claude process, don't log it
-		// Check by name since the SDK's AbortError class may not match our imported definition
-		const isAbortError =
-			error.name === "AbortError" || error.message.includes("aborted by user");
-
-		// Also check for SIGTERM (exit code 143), which indicates graceful termination
-		const isSigterm = error.message.includes(
-			"Claude Code process exited with code 143",
-		);
-
-		if (isAbortError || isSigterm) {
-			return;
-		}
-		this.logger.error("Unhandled claude error:", {
+		return this.sessionOrchestrator.handleSessionError(
 			error,
 			sessionId,
 			repositoryId,
-		});
-
-		// A genuine runner crash (subprocess died, stream errored, non-143 exit)
-		// never produces a `result` message, so `completeSession` never runs.
-		// Without surfacing it here the Linear issue stays "In Progress" with a
-		// dead runner and the user sees nothing. When we know which session
-		// crashed, tell the user and transition it to a terminal error state.
-		if (!sessionId) {
-			return;
-		}
-		try {
-			await this.agentSessionManager.failSession(
-				sessionId,
-				`The agent session ended unexpectedly and could not continue.\n\n\`${error.message}\`\n\nComment on this issue to start a new session.`,
-			);
-		} catch (failError) {
-			this.logger.error("Failed to surface runner crash to Linear:", failError);
-		}
-
-		// Reclaim the pre-warmed slot so a crashed session doesn't leak a warm
-		// instance or hand a stale one to a later resume.
-		this.warmInstances.delete(sessionId);
-
-		// Persist the Error transition so a restart doesn't resurrect a zombie
-		// Active session with no runner.
-		await this.savePersistedState();
+		);
 	}
 
 	/**
@@ -4535,29 +4312,6 @@ ${taskSection}`;
 			return [worktreePath];
 		}
 		return [repository.repositoryPath];
-	}
-
-	/**
-	 * Instantiate the appropriate runner for the given type.
-	 */
-	private createRunnerForType(
-		runnerType: RunnerType,
-		config: RunnerConfig,
-	): IAgentRunner {
-		switch (runnerType) {
-			case "claude": {
-				// Inject the hosted SessionStore at the last moment so it only
-				// attaches to Claude runners (the field is Claude-specific).
-				const claudeConfig: ClaudeRunnerConfig = this.claudeSessionStore
-					? { ...config, sessionStore: this.claudeSessionStore }
-					: config;
-				return new ClaudeRunner(claudeConfig, this.isWarmSessionsEnabled());
-			}
-			case "cursor":
-				return new CursorRunner(config);
-			default:
-				throw new Error(`Unknown runner type: ${runnerType satisfies never}`);
-		}
 	}
 
 	/**
@@ -5261,110 +5015,6 @@ ${taskSection}`;
 	}
 
 	/**
-	 * Resolve the default runner type for SimpleRunner (classification) use.
-	 * Uses config.defaultRunner if set, otherwise auto-detects from API keys,
-	 * falling back to "claude".
-	 */
-	/**
-	 * Build agent runner configuration with common settings.
-	 * Delegates to RunnerConfigBuilder for shared config assembly.
-	 * @returns Object containing the runner config and runner type to use
-	 */
-	private async buildAgentRunnerConfig(
-		session: CyrusAgentSession,
-		repository: RepositoryConfig,
-		sessionId: string,
-		systemPrompt: string | undefined,
-		allowedTools: string[],
-		allowedDirectories: string[],
-		disallowedTools: string[],
-		resumeSessionId?: string,
-		labels?: string[],
-		issueDescription?: string,
-		maxTurns?: number,
-		linearWorkspaceId?: string,
-		skillContext?: SkillSessionContext,
-		/**
-		 * Which platform initiated the session — drives which
-		 * `EdgeWorkerConfig.<platform>McpConfigs` override list applies.
-		 * Defaults to `"linear"` (the pre-platform-aware behavior).
-		 */
-		sessionPlatform: "linear" | "github" = "linear",
-	): Promise<{ config: RunnerConfig; runnerType: RunnerType }> {
-		const log = this.logger.withContext({
-			sessionId,
-			platform: session.issueContext?.trackerId,
-			issueIdentifier: session.issueContext?.issueIdentifier,
-		});
-
-		// Resolve plugins once so we can also derive the per-session scoped
-		// skill allow-list from the same filesystem snapshot.
-		const plugins = await this.skillsPluginResolver.resolve();
-		const resolvedSkillContext: SkillSessionContext = skillContext ?? {
-			repositoryId: repository.id,
-			repoPaths: this.resolveSkillRepoPaths(repository, session),
-		};
-		const allowedSkillNames =
-			await this.skillsPluginResolver.discoverSkillNames(
-				plugins,
-				resolvedSkillContext,
-			);
-
-		const result = this.runnerConfigBuilder.buildIssueConfig({
-			session,
-			repository,
-			sessionId,
-			systemPrompt,
-			allowedTools,
-			allowedDirectories,
-			disallowedTools,
-			resumeSessionId,
-			labels,
-			issueDescription,
-			maxTurns,
-			// Per-platform MCP config paths — GitHub gets the `githubMcpConfigs`
-			// knob (single-repo PR contexts); Linear gets `linearMcpConfigs`.
-			// Not a blanket override: the builder uses `repository.mcpConfigPath`
-			// when this repo has its own `allowedTools` override (so the repo's
-			// permission rules and MCP server set travel as a unit), and only
-			// falls through to this list when the repo inherits the platform
-			// allow-list.
-			platformMcpConfigOverrides:
-				sessionPlatform === "linear"
-					? this.config.linearMcpConfigs
-					: this.config.githubMcpConfigs,
-			linearWorkspaceId,
-			cyrusHome: this.cyrusHome,
-			logger: log,
-			plugins,
-			skills: allowedSkillNames,
-			sandboxSettings: this.sdkSandboxSettings ?? undefined,
-			egressCaCertPath: this.egressCaCertPath ?? undefined,
-			onMessage: (message: AgentMessage) => {
-				this.handleClaudeMessage(sessionId, message, repository.id);
-			},
-			onError: (error: Error) =>
-				this.handleClaudeError(error, sessionId, repository.id),
-			createAskUserQuestionCallback: (sid, wid) =>
-				this.createAskUserQuestionCallback(sid, wid)!,
-			requireLinearWorkspaceId,
-		});
-
-		// Attach pre-warmed session if available (only for Claude runner).
-		// Skipped entirely when warm sessions are not enabled.
-		if (result.runnerType === "claude" && this.isWarmSessionsEnabled()) {
-			const warmSession = this.warmInstances.get(sessionId);
-			if (warmSession) {
-				this.warmInstances.delete(sessionId);
-				(result.config as ClaudeRunnerConfig).warmSession = warmSession;
-				log.debug("Attaching pre-warmed session to runner config");
-			}
-		}
-
-		return result;
-	}
-
-	/**
 	 * Create an onAskUserQuestion callback for the ClaudeRunner.
 	 * This callback delegates to the AskUserQuestionHandler which posts
 	 * elicitations to Linear and waits for user responses.
@@ -5574,21 +5224,6 @@ ${taskSection}`;
 	}
 
 	/**
-	 * Whether the warm-session feature is enabled.
-	 *
-	 * Warm sessions are an opt-in optimization that pre-spawns Claude Code
-	 * subprocesses on startup so the first query after a restart skips the
-	 * cold-start cost. Disabled by default; opt in by setting
-	 * `CYRUS_ENABLE_WARM_SESSIONS=1` (or `=true`).
-	 */
-	private isWarmSessionsEnabled(): boolean {
-		const raw = process.env.CYRUS_ENABLE_WARM_SESSIONS;
-		if (!raw) return false;
-		const v = raw.toLowerCase().trim();
-		return v === "1" || v === "true";
-	}
-
-	/**
 	 * Whether the remote Claude session store is explicitly disabled.
 	 *
 	 * The remote store mirrors SDK transcripts to the Cyrus hosted control
@@ -5602,188 +5237,6 @@ ${taskSection}`;
 		if (!raw) return false;
 		const v = raw.toLowerCase().trim();
 		return v === "1" || v === "true";
-	}
-
-	/**
-	 * Pre-warm the N most recently updated Claude sessions so the first query
-	 * after a CLI restart has near-zero cold-start latency (~20x faster).
-	 *
-	 * Uses startup() from @anthropic-ai/claude-agent-sdk with MCP_CONNECTION_NONBLOCKING=true
-	 * so the warm instances are ready in ~500ms rather than ~4s.
-	 * Warm instances are stored in this.warmInstances keyed by agentSessionId and
-	 * consumed by buildAgentRunnerConfig() when the first message arrives.
-	 *
-	 * Gated by `isWarmSessionsEnabled()` — callers should check before invoking.
-	 */
-	private async warmupRecentSessions(count = 30): Promise<void> {
-		const allSessions = this.agentSessionManager.getAllSessions();
-
-		// Only warm Claude sessions that have a persisted session ID and a workspace path
-		const candidates = allSessions
-			.filter((s) => s.claudeSessionId && s.workspace?.path)
-			.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
-			.slice(0, count);
-
-		if (candidates.length === 0) {
-			this.logger.debug("No Claude sessions to pre-warm");
-			return;
-		}
-
-		this.logger.info(
-			`Pre-warming ${candidates.length} most recent Claude sessions...`,
-		);
-
-		const { startup } = await import("@anthropic-ai/claude-agent-sdk");
-
-		// Resolve the skill plugins once — they are global (same for every
-		// session), so there is no need to re-resolve per candidate. Without
-		// these, warm-resumed sessions get the Skill tool but an empty skill set,
-		// leaving them strictly weaker than a cold session (which resolves skills
-		// in buildAgentRunnerConfig()).
-		const warmPlugins = await this.skillsPluginResolver.resolve();
-
-		await Promise.all(
-			candidates.map(async (session) => {
-				try {
-					const repoId = this.sessionRepositories.get(session.id);
-					const repo = repoId ? this.repositories.get(repoId) : undefined;
-					if (!repo) {
-						this.logger.debug(
-							`No repo for session ${session.id}, skipping warmup`,
-						);
-						return;
-					}
-
-					// Build MCP config for this session (same as the live runner would use)
-					const linearWorkspaceId = requireLinearWorkspaceId(repo);
-					const mcpConfig = this.mcpConfigService.buildMcpConfig(
-						repo.id,
-						linearWorkspaceId,
-						session.id,
-					);
-
-					// Merge any file-based MCP configs (reuses shared normalization).
-					// Warmup paths reconstruct Linear-triggered issue sessions:
-					// if the repo has its own `allowedTools` override its
-					// mcpConfigPath stays scoped to that repo, otherwise the
-					// team-level `linearMcpConfigs` list applies. Same coupling
-					// the live `buildIssueConfig` path uses.
-					const mcpConfigPath = resolveIssueMcpConfigPath(
-						repo,
-						this.config.linearMcpConfigs,
-						this.mcpConfigService.buildMergedMcpConfigPath.bind(
-							this.mcpConfigService,
-						),
-					);
-					let mcpServers: Record<string, McpServerConfig> = { ...mcpConfig };
-					if (mcpConfigPath) {
-						const paths = Array.isArray(mcpConfigPath)
-							? mcpConfigPath
-							: [mcpConfigPath];
-						for (const filePath of paths) {
-							try {
-								if (existsSync(filePath)) {
-									const fileContent = JSON.parse(
-										readFileSync(filePath, "utf8"),
-									);
-									const servers = fileContent.mcpServers || {};
-									normalizeMcpHttpTransport(servers);
-									mcpServers = { ...mcpServers, ...servers };
-								}
-							} catch {
-								// Ignore unreadable MCP config files
-							}
-						}
-					}
-
-					const repoConfig = repo as unknown as Record<string, unknown>;
-					const model =
-						(session.metadata?.model as string | undefined) ||
-						(repoConfig.claudeDefaultModel as string | undefined) ||
-						(repoConfig.model as string | undefined) ||
-						"claude-opus-4-6";
-
-					// Build allowed/disallowed tools — same as what buildAgentRunnerConfig() uses.
-					// Without these, startup() inherits the user's defaultMode ("default"),
-					// which causes macOS permission prompts for file writes.
-					const allowedTools = this.buildAllowedTools(repo);
-
-					// Reconstruct the home-directory Read denials that ClaudeRunner.start()
-					// computes at query time. Warm sessions run warmSession.query()
-					// directly and never see those query-time options, so without
-					// re-deriving them here a resumed session could read ~/.ssh, ~/.aws,
-					// etc. Use the SAME AccessPolicy.compute() + toClaudeToolPatterns the
-					// cold path (ClaudeRunner.start) uses so warm and cold derive
-					// disallowedTools identically — this is the drift-hole fix. Mirror the
-					// live allowedDirectories composition so the attachments/repo/git dirs
-					// stay readable.
-					const workspaceFolderName = basename(session.workspace.path);
-					const attachmentsDir = join(
-						this.cyrusHome,
-						workspaceFolderName,
-						"attachments",
-					);
-					const allowedDirectories = [
-						...new Set([
-							attachmentsDir,
-							repo.repositoryPath,
-							session.workspace.path,
-							...this.gitService.getGitMetadataDirectoriesForWorkspace(
-								session.workspace,
-							),
-						]),
-					];
-					const { disallowedTools } = toClaudeToolPatterns(
-						compute({
-							homeDir: homedir(),
-							dirLister: nodeDirLister,
-							cwd: session.workspace.path,
-							allowReadDirectories: allowedDirectories,
-							toolDisallow: this.buildDisallowedTools(repo),
-						}),
-					);
-
-					// Skills for this session's repo/worktree — mirrors the live
-					// resolveSkillsConfig() path so warm sessions have the same skill
-					// set (and skill allow-list) as cold ones.
-					const skills = await this.skillsPluginResolver.discoverSkillNames(
-						warmPlugins,
-						{
-							repositoryId: repo.id,
-							repoPaths: [session.workspace.path],
-						},
-					);
-
-					const warm = await startup({
-						options: {
-							resume: session.claudeSessionId,
-							model,
-							cwd: session.workspace.path,
-							...(Object.keys(mcpServers).length > 0 && { mcpServers }),
-							...(allowedTools.length > 0 && { allowedTools }),
-							...(disallowedTools.length > 0 && { disallowedTools }),
-							...(warmPlugins.length > 0 && { plugins: warmPlugins }),
-							...(skills !== undefined && { skills }),
-							settingSources: ["user", "project", "local"],
-							// CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is intentionally not set here;
-							// see CYPACK-1108 and ClaudeRunner.start() for context.
-							env: buildBaseSessionEnv(),
-						},
-					});
-
-					this.warmInstances.set(session.id, warm);
-					this.logger.info(
-						`Pre-warmed session ${session.id} (${session.issueContext?.issueIdentifier ?? "unknown"})`,
-					);
-				} catch (err) {
-					this.logger.debug(`Failed to pre-warm session ${session.id}:`, err);
-				}
-			}),
-		);
-
-		this.logger.info(
-			`Session pre-warm complete: ${this.warmInstances.size} sessions ready`,
-		);
 	}
 
 	/**
@@ -5977,21 +5430,14 @@ ${taskSection}`;
 	}
 
 	/**
-	 * Handle prompt with streaming check - centralized logic for all input types
+	 * Handle prompt with streaming check — thin delegator to
+	 * {@link SessionOrchestrator.handlePromptWithStreamingCheck}.
 	 *
-	 * This method implements the unified pattern for handling prompts:
-	 * 1. Check if runner is actively streaming
-	 * 2. Add to stream if streaming, OR resume session if not
+	 * Retained (same signature) because tests spy this method on the EdgeWorker
+	 * instance, and the orchestrator's resume path routes back through this
+	 * instance's {@link resumeAgentSession} (via `resumeSessionDelegate`).
+	 * TODO(Phase G): delete.
 	 *
-	 * @param session The Cyrus agent session
-	 * @param repository Repository configuration
-	 * @param sessionId Linear agent activity session ID
-	 * @param agentSessionManager Agent session manager instance
-	 * @param promptBody The prompt text to send
-	 * @param attachmentManifest Optional attachment manifest to append
-	 * @param isNewSession Whether this is a new session
-	 * @param additionalAllowedDirs Additional directories to allow access to
-	 * @param logContext Context string for logging (e.g., "prompted webhook", "parent resume")
 	 * @returns true if message was added to stream, false if session was resumed
 	 */
 	private async handlePromptWithStreamingCheck(
@@ -6008,44 +5454,7 @@ ${taskSection}`;
 		commentAuthor?: string,
 		commentTimestamp?: string,
 	): Promise<boolean> {
-		const log = this.logger.withContext({ sessionId });
-		const existingRunner = session.agentRunner;
-
-		// Handle running case - add message to existing stream (if supported)
-		if (
-			existingRunner?.isRunning() &&
-			existingRunner.supportsStreamingInput &&
-			existingRunner.addStreamMessage
-		) {
-			log.debug(
-				`Adding prompt to existing stream for ${sessionId} (${logContext})`,
-			);
-
-			// Append attachment manifest to the prompt if we have one
-			let fullPrompt = promptBody;
-			if (attachmentManifest) {
-				fullPrompt = `${promptBody}\n\n${attachmentManifest}`;
-			}
-
-			// `addStreamMessage` can reject the message if the turn ended in the
-			// race window between "still running" and "turn finished". Fall
-			// through to the resume path so the comment is never dropped. Claude's
-			// streaming input never throws here, so this is effectively a no-op.
-			try {
-				existingRunner.addStreamMessage(fullPrompt);
-				return true; // Message added to stream
-			} catch (error) {
-				log.warn(
-					`Streaming message rejected for ${sessionId}; falling back to resume (${logContext})`,
-					{ error: error instanceof Error ? error.message : String(error) },
-				);
-			}
-		}
-
-		// Not streaming (or streaming was rejected) - resume/start session
-		log.debug(`Resuming Claude session for ${sessionId} (${logContext})`);
-
-		await this.resumeAgentSession(
+		return this.sessionOrchestrator.handlePromptWithStreamingCheck(
 			session,
 			repository,
 			sessionId,
@@ -6054,13 +5463,11 @@ ${taskSection}`;
 			attachmentManifest,
 			isNewSession,
 			additionalAllowedDirs,
+			logContext,
 			linearWorkspaceId,
-			undefined, // maxTurns
 			commentAuthor,
 			commentTimestamp,
 		);
-
-		return false; // Session was resumed
 	}
 
 	/**
@@ -6111,164 +5518,20 @@ ${taskSection}`;
 		commentAuthor?: string,
 		commentTimestamp?: string,
 	): Promise<void> {
-		const log = this.logger.withContext({ sessionId });
-		// Check for existing runner
-		const existingRunner = session.agentRunner;
-
-		// If there's an existing running runner that supports streaming, add to it
-		if (
-			existingRunner?.isRunning() &&
-			existingRunner.supportsStreamingInput &&
-			existingRunner.addStreamMessage
-		) {
-			let fullPrompt = promptBody;
-			if (attachmentManifest) {
-				fullPrompt = `${promptBody}\n\n${attachmentManifest}`;
-			}
-			// See handlePromptWithStreamingCheck: a steer-only backend can reject
-			// the message if the turn just ended. Fall through to a fresh resume
-			// turn rather than dropping the comment. No-op for Claude.
-			try {
-				existingRunner.addStreamMessage(fullPrompt);
-				return;
-			} catch (error) {
-				log.warn(
-					`Streaming message rejected for ${sessionId}; falling back to resume`,
-					{ error: error instanceof Error ? error.message : String(error) },
-				);
-			}
-		}
-
-		// Stop existing runner if it's not running
-		if (existingRunner) {
-			existingRunner.stop();
-		}
-
-		// Get issueId from issueContext (preferred) or deprecated issueId field
-		const issueIdForResume = session.issueContext?.issueId ?? session.issueId;
-		if (!issueIdForResume) {
-			log.error(`No issue ID found for session ${session.id}`);
-			throw new Error(`No issue ID found for session ${session.id}`);
-		}
-
-		// Fetch full issue details using workspace ID (from webhook context or repo fallback)
-		const resolvedWorkspaceId =
-			linearWorkspaceId ?? requireLinearWorkspaceId(repository);
-		const fullIssue = await this.fetchFullIssueDetails(
-			issueIdForResume,
-			resolvedWorkspaceId,
-		);
-		if (!fullIssue) {
-			log.error(`Failed to fetch full issue details for ${issueIdForResume}`);
-			throw new Error(
-				`Failed to fetch full issue details for ${issueIdForResume}`,
-			);
-		}
-
-		// Fetch issue labels early to determine runner type
-		const labels = await this.fetchIssueLabels(fullIssue);
-
-		// Determine whether to resume based on the existing runner session ID
-		// (Claude or Cursor — whichever originally created the session).
-		const existingRunnerSessionId =
-			session.claudeSessionId ?? session.cursorSessionId;
-		const hasExistingSession =
-			!isNewSession && Boolean(existingRunnerSessionId);
-		const needsNewSession = isNewSession || !hasExistingSession;
-
-		// Fetch system prompt based on labels
-
-		const systemPromptResult = await this.determineSystemPromptFromLabels(
-			labels,
-			repository,
-		);
-		const systemPrompt = systemPromptResult?.prompt;
-		const promptType = systemPromptResult?.type;
-
-		// Build allowed and disallowed tools lists
-		const allowedTools = this.buildAllowedTools(repository, promptType);
-		const disallowedTools = this.buildDisallowedTools(repository, promptType);
-
-		// Set up attachments directory
-		const workspaceFolderName = basename(session.workspace.path);
-		const attachmentsDir = join(
-			this.cyrusHome,
-			workspaceFolderName,
-			"attachments",
-		);
-		await mkdir(attachmentsDir, { recursive: true });
-
-		const allowedDirectories = [
-			...new Set([
-				attachmentsDir,
-				repository.repositoryPath,
-				...additionalAllowedDirectories,
-				...this.gitService.getGitMetadataDirectoriesForWorkspace(
-					session.workspace,
-				),
-			]),
-		];
-
-		const resumeSessionId = needsNewSession
-			? undefined
-			: existingRunnerSessionId;
-
-		console.log(
-			`[resumeAgentSession] needsNewSession=${needsNewSession}, resumeSessionId=${resumeSessionId ?? "none"}`,
-		);
-
-		// Create runner configuration
-		// buildAgentRunnerConfig determines runner type from labels for new sessions
-		// For existing sessions, we still need labels for model override but ignore runner type
-		const { config: runnerConfig, runnerType } =
-			await this.buildAgentRunnerConfig(
-				session,
-				repository,
-				sessionId,
-				systemPrompt,
-				allowedTools,
-				allowedDirectories,
-				disallowedTools,
-				resumeSessionId,
-				labels, // Always pass labels to preserve model override
-				fullIssue.description || undefined, // Description tags can override label selectors
-				maxTurns, // Pass maxTurns if specified
-				resolvedWorkspaceId,
-				this.buildSkillSessionContext(repository, fullIssue, session),
-			);
-
-		// Create the appropriate runner based on session state
-		const runner = this.createRunnerForType(runnerType, runnerConfig);
-
-		// Store runner
-		agentSessionManager.addAgentRunner(sessionId, runner);
-
-		// Save state
-		await this.savePersistedState();
-
-		// Prepare the full prompt
-		const fullPrompt = await this.buildSessionPrompt(
-			isNewSession,
+		return this.sessionOrchestrator.resumeSession(
 			session,
-			fullIssue,
 			repository,
+			sessionId,
+			agentSessionManager,
 			promptBody,
 			attachmentManifest,
+			isNewSession,
+			additionalAllowedDirectories,
+			linearWorkspaceId,
+			maxTurns,
 			commentAuthor,
 			commentTimestamp,
 		);
-
-		// Start session - use streaming mode if supported for ability to add messages later
-		try {
-			if (runner.supportsStreamingInput && runner.startStreaming) {
-				await runner.startStreaming(fullPrompt);
-			} else {
-				await runner.start(fullPrompt);
-			}
-		} catch (error) {
-			log.error(`Failed to start streaming session for ${sessionId}:`, error);
-			throw error;
-		}
 	}
 
 	/**

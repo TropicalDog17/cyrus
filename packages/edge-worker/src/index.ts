@@ -33,6 +33,8 @@ export type { SerializedGlobalRegistryState } from "./GlobalSessionRegistry.js";
 export { GlobalSessionRegistry } from "./GlobalSessionRegistry.js";
 export type { McpConfigServiceDeps } from "./McpConfigService.js";
 export { McpConfigService } from "./McpConfigService.js";
+export type { ParkedSession } from "./ParkedSessionRegistry.js";
+export { ParkedSessionRegistry } from "./ParkedSessionRegistry.js";
 export { RepositoryRouter } from "./RepositoryRouter.js";
 export type {
 	IMcpConfigProvider,
@@ -40,6 +42,11 @@ export type {
 	IssueRunnerConfigInput,
 } from "./RunnerConfigBuilder.js";
 export { RunnerConfigBuilder } from "./RunnerConfigBuilder.js";
+export type {
+	SessionOrchestratorDeps,
+	StartSessionRequest,
+} from "./SessionOrchestrator.js";
+export { SessionOrchestrator } from "./SessionOrchestrator.js";
 export { SharedApplicationServer } from "./SharedApplicationServer.js";
 export { SkillsPluginResolver } from "./SkillsPluginResolver.js";
 export type {
@@ -59,4 +66,6 @@ export {
 	UserAccessControl,
 } from "./UserAccessControl.js";
 
+export type { WarmSessionPoolDeps } from "./WarmSessionPool.js";
+export { WarmSessionPool } from "./WarmSessionPool.js";
 export { WorktreeIncludeService } from "./WorktreeIncludeService.js";
