@@ -1,0 +1,32 @@
+name: Deploy to troppc
+
+# Redeploy the locally-running Cyrus agent on troppc whenever main advances.
+# Runs on a self-hosted runner registered to this repo (see scripts/deploy-local.sh
+# and the runner-setup notes in that script's header). Manual redeploys via the
+# "Run workflow" button (workflow_dispatch).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Never run two deploys at once; let an in-flight deploy finish rather than
+# cancelling it mid-build.
+concurrency:
+  group: deploy-troppc
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Scope to the troppc runner via a custom label; register the runner with
+    # `--labels cyrus-deploy` (in addition to the default self-hosted label).
+    runs-on: [self-hosted, cyrus-deploy]
+    steps:
+      - name: Checkout (for the deploy script)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/deploy-local.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Build main + restart cyrus.service
+        run: bash scripts/deploy-local.sh
