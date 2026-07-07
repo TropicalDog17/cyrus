@@ -72,9 +72,9 @@ import {
 	isStopSignalMessage,
 	isUnassignMessage,
 	isUserPromptMessage,
+	normalizeConfigPaths,
 	PersistenceManager,
 	requireLinearWorkspaceId,
-	resolvePath,
 	WebhookIpValidator,
 } from "cyrus-core";
 import { CursorRunner } from "cyrus-cursor-runner";
@@ -264,29 +264,9 @@ export class EdgeWorker extends EventEmitter {
 		}
 	>();
 
-	/**
-	 * Resolve `~/` prefixes in path-bearing config fields that are otherwise
-	 * passed verbatim to `fs.readFileSync` (which does not expand tildes).
-	 * Repository-scoped paths are normalized separately in addNew /
-	 * updateModified; this covers the platform-level MCP config lists that
-	 * cyrus-hosted writes with literal `~/.cyrus/...` prefixes when
-	 * generating self-host config.
-	 */
-	private static normalizeConfigPaths(
-		config: EdgeWorkerConfig,
-	): EdgeWorkerConfig {
-		const resolveList = (paths: string[] | undefined): string[] | undefined =>
-			paths ? paths.map(resolvePath) : undefined;
-		return {
-			...config,
-			linearMcpConfigs: resolveList(config.linearMcpConfigs),
-			githubMcpConfigs: resolveList(config.githubMcpConfigs),
-		};
-	}
-
 	constructor(config: EdgeWorkerConfig) {
 		super();
-		this.config = EdgeWorker.normalizeConfigPaths(config);
+		this.config = normalizeConfigPaths(config);
 		this.cyrusHome = config.cyrusHome;
 		this.logger = createLogger({ component: "EdgeWorker" });
 		this.persistenceManager = new PersistenceManager(
@@ -438,25 +418,11 @@ export class EdgeWorker extends EventEmitter {
 			},
 		);
 
-		// Initialize repositories with path resolution
-		for (const repo of config.repositories) {
+		// Initialize repositories. Paths are already normalized by
+		// `normalizeConfigPaths(config)` above, so use them directly.
+		for (const repo of this.config.repositories) {
 			if (repo.isActive !== false) {
-				// Resolve paths that may contain tilde (~) prefix
-				const resolvedRepo: RepositoryConfig = {
-					...repo,
-					repositoryPath: resolvePath(repo.repositoryPath),
-					workspaceBaseDir: resolvePath(repo.workspaceBaseDir),
-					mcpConfigPath: Array.isArray(repo.mcpConfigPath)
-						? repo.mcpConfigPath.map(resolvePath)
-						: repo.mcpConfigPath
-							? resolvePath(repo.mcpConfigPath)
-							: undefined,
-					promptTemplatePath: repo.promptTemplatePath
-						? resolvePath(repo.promptTemplatePath)
-						: undefined,
-				};
-
-				this.repositories.set(repo.id, resolvedRepo);
+				this.repositories.set(repo.id, repo);
 			}
 		}
 
@@ -599,7 +565,8 @@ export class EdgeWorker extends EventEmitter {
 				await this.addNewRepositories(changes.added);
 				// Live-update sandbox / egress proxy settings
 				await this.applySandboxConfigChanges(changes.newConfig);
-				this.config = EdgeWorker.normalizeConfigPaths(changes.newConfig);
+				// `changes.newConfig` is reconcile's already-normalized `merged`.
+				this.config = changes.newConfig;
 				this.configManager.setConfig(changes.newConfig);
 				this.runnerSelectionService.setConfig(changes.newConfig);
 				this.toolPermissionResolver.setConfig(changes.newConfig);
@@ -2131,23 +2098,8 @@ ${taskSection}`;
 			try {
 				this.logger.info(`➕ Adding repository: ${repo.name} (${repo.id})`);
 
-				// Resolve paths that may contain tilde (~) prefix
-				const resolvedRepo: RepositoryConfig = {
-					...repo,
-					repositoryPath: resolvePath(repo.repositoryPath),
-					workspaceBaseDir: resolvePath(repo.workspaceBaseDir),
-					mcpConfigPath: Array.isArray(repo.mcpConfigPath)
-						? repo.mcpConfigPath.map(resolvePath)
-						: repo.mcpConfigPath
-							? resolvePath(repo.mcpConfigPath)
-							: undefined,
-					promptTemplatePath: repo.promptTemplatePath
-						? resolvePath(repo.promptTemplatePath)
-						: undefined,
-				};
-
-				// Add to internal map
-				this.repositories.set(repo.id, resolvedRepo);
+				// Paths already normalized by reconcile's normalizeConfigPaths.
+				this.repositories.set(repo.id, repo);
 
 				this.logger.info(`✅ Repository added successfully: ${repo.name}`);
 			} catch (error) {
@@ -2174,23 +2126,8 @@ ${taskSection}`;
 
 				this.logger.info(`🔄 Updating repository: ${repo.name} (${repo.id})`);
 
-				// Resolve paths that may contain tilde (~) prefix
-				const resolvedRepo: RepositoryConfig = {
-					...repo,
-					repositoryPath: resolvePath(repo.repositoryPath),
-					workspaceBaseDir: resolvePath(repo.workspaceBaseDir),
-					mcpConfigPath: Array.isArray(repo.mcpConfigPath)
-						? repo.mcpConfigPath.map(resolvePath)
-						: repo.mcpConfigPath
-							? resolvePath(repo.mcpConfigPath)
-							: undefined,
-					promptTemplatePath: repo.promptTemplatePath
-						? resolvePath(repo.promptTemplatePath)
-						: undefined,
-				};
-
-				// Update stored config
-				this.repositories.set(repo.id, resolvedRepo);
+				// Paths already normalized by reconcile's normalizeConfigPaths.
+				this.repositories.set(repo.id, repo);
 
 				// If active status changed
 				if (oldRepo.isActive !== repo.isActive) {
