@@ -33,7 +33,6 @@
 		"cyrus-core": "workspace:*",
 		"cyrus-github-event-transport": "workspace:*",
 		"cyrus-linear-event-transport": "workspace:*",
-		"cyrus-loop": "workspace:*",
 		"cyrus-mcp-tools": "workspace:*",
 		"fastify": "^5.8.5",
 		"fastify-mcp": "^2.1.0",

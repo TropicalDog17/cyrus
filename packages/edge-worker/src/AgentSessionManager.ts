@@ -389,18 +389,6 @@ export class AgentSessionManager extends EventEmitter {
 		}
 
 		log.info(`Session completed (subtype: ${resultMessage.subtype})`);
-
-		// Compounding loop (Lane C): announce the terminal session so the loop can post the blind
-		// gate for any PR captured during it. Only fires on the normal path — user-stops returned
-		// above. Emitted after the final result entry so the gate lands after the response.
-		this.emit("sessionComplete", {
-			sessionId,
-			issueId: session.issueContext?.issueId ?? session.issueId,
-			issueIdentifier: session.issueContext?.issueIdentifier,
-			repositoryId: session.repositories[0]?.repositoryId,
-			worktree: session.workspace.path,
-			status,
-		});
 	}
 
 	/**

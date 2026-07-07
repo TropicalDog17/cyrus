@@ -228,7 +228,6 @@ export function buildPrMarkerHook(
 		new GitHubPrMarkerProvider(),
 		new GitLabMrMarkerProvider(),
 	],
-	onPrOpened?: (result: PrMarkerResult & { cwd: string }) => void,
 ): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
 	return {
 		PostToolUse: [
@@ -245,21 +244,7 @@ export function buildPrMarkerHook(
 							return {};
 						}
 						try {
-							const result = provider.ensureMarker(post.cwd, log);
-							// Fire the loop trigger only when a PR actually exists. Capture is
-							// idempotent (shouldCapture dedupes by head SHA), so firing on every
-							// create/edit of the same head is safe.
-							if (result && onPrOpened) {
-								try {
-									onPrOpened({ ...result, cwd: post.cwd });
-								} catch (err) {
-									log.warn(
-										`[PrMarkerHook] onPrOpened callback threw: ${
-											(err as Error).message
-										}`,
-									);
-								}
-							}
+							provider.ensureMarker(post.cwd, log);
 						} catch (err) {
 							log.warn(
 								`[PrMarkerHook] ${provider.name} provider threw: ${

@@ -4,9 +4,6 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Added
-- **Compounding review loop (fork).** Cyrus now learns from every reviewed PR. When it opens a pull request it captures the diff and runs a mechanical evidence ledger (tests, lint, build, typecheck), then posts a *blind* review to the Linear issue showing only the diff and that evidence — never an AI opinion — and asks you for a verdict. Reply `/approve`, `/reject`, or `/rework` (optionally with findings like `- missed null check :: recurring`): an approved verdict merges the PR, and every verdict is recorded so recurring mistakes become durable "failure rules" that are fed back into future sessions as context. Configure it in `~/.cyrus/loop.json`; see `docs/CYRUS_LOOP.md`. GitHub-only.
-
 ### Removed
 - **This fork runs Claude only, on Linear + GitHub.** The Gemini, Codex, and Cursor runners and the GitLab and Slack integrations have been removed. Issues always route to Claude regardless of any `[agent=…]` description selector or runner label, and `defaultRunner` now accepts only `claude`.
 
