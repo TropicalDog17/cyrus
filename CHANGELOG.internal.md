@@ -4,6 +4,9 @@ This changelog documents internal development changes, refactors, tooling update
 
 ## [Unreleased]
 
+### Added
+- **Deploy-on-merge for the self-hosted "troppc" agent.** Added `.github/workflows/deploy.yml` (self-hosted runner, label `cyrus-deploy`) + `scripts/deploy-local.sh`: every push to `main` fetches the branch tip into a dedicated deploy clone (`~/cyrus-deploy`, kept separate from the dev working copy so uncommitted work is never hard-reset), runs `pnpm install --frozen-lockfile && pnpm build`, stamps `BUILD_INFO.txt`, repoints the `cyrus.service` systemd user unit at the freshly-built entrypoint via an idempotent drop-in, and restarts it. The script is also runnable by hand (`CYRUS_DEPLOY_SKIP_RESTART=1` for a build-only dry run). Requires a self-hosted runner registered to the repo with the `cyrus-deploy` label.
+
 ### Removed
 - **Trimmed the fork to Linear + GitHub + Claude.** Deleted the `gemini-runner`, `codex-runner`, `cursor-runner`, `simple-agent-runner`, `gitlab-event-transport`, and `slack-event-transport` packages and their EdgeWorker/config wiring; narrowed `RunnerTypeSchema` to `["claude"]` (regenerated `core/schemas/`), collapsed `RunnerSelectionService`/`RunnerConfigBuilder` to Claude-only, and removed the chat cluster (`SlackChatAdapter`/`ChatSessionHandler`/`ChatRepositoryProvider`) and the slack/gitlab config fields (incl. `ConfigManager` merge-whitelist / `globalKeys` / `normalizeConfigPaths`). Kept `config-updater` and `cloudflare-tunnel-client`. The read-only tool preset survives as `READONLY_DEFAULT_ALLOWED_TOOLS` (was Slack-named). `pnpm audit` clean.
 
