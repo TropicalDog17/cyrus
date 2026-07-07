@@ -1,7 +1,12 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { SDKResultMessage } from "cyrus-core";
+import type {
+	AgentAssistantMessage,
+	AgentResultMessage,
+	AgentToolUseBlock,
+	AgentUserMessage,
+} from "cyrus-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Hoisted mock for @cursor/sdk so we can drive Agent.create / Agent.resume
@@ -246,13 +251,18 @@ describe("CursorRunner (SDK adapter)", () => {
 
 		const resultMessage = runner
 			.getMessages()
-			.find((m): m is SDKResultMessage => m.type === "result");
+			.find((m): m is AgentResultMessage => m.type === "result");
 		expect(resultMessage).toBeDefined();
 		const usage = resultMessage!.usage;
-		expect(usage.input_tokens).toBe(300);
-		expect(usage.output_tokens).toBe(125);
-		expect(usage.cache_read_input_tokens).toBe(30);
-		expect(usage.cache_creation_input_tokens).toBe(5);
+		expect(usage.inputTokens).toBe(300);
+		expect(usage.outputTokens).toBe(125);
+		expect(usage.cacheReadTokens).toBe(30);
+		expect(usage.cacheWriteTokens).toBe(5);
+		expect(usage.costUsd).toBe(0);
+		// Neutral usage must not counterfeit Anthropic cache buckets.
+		expect(usage).not.toHaveProperty("cache_creation_input_tokens");
+		expect(usage).not.toHaveProperty("cache_read_input_tokens");
+		expect(usage).not.toHaveProperty("cache_creation");
 	});
 
 	it("coalesces consecutive assistant text deltas into a single message", async () => {
@@ -336,18 +346,12 @@ describe("CursorRunner (SDK adapter)", () => {
 			workingDirectory: workspace,
 		});
 		await runner.start("hi");
-		type Block = { type: string; text?: string };
 		const assistantTexts: string[] = [];
-		for (const m of runner.getMessages() as Array<{
-			type: string;
-			message?: { content?: unknown };
-		}>) {
+		for (const m of runner.getMessages()) {
 			if (m.type !== "assistant") continue;
-			const content = m.message?.content;
-			if (!Array.isArray(content)) continue;
-			const text = (content as Block[])
-				.filter((b) => b?.type === "text")
-				.map((b) => b.text ?? "")
+			const text = m.content
+				.filter((b) => b.type === "text")
+				.map((b) => (b.type === "text" ? b.text : ""))
 				.join("");
 			if (text.length > 0) assistantTexts.push(text);
 		}
@@ -394,21 +398,20 @@ describe("CursorRunner (SDK adapter)", () => {
 
 		const msgs = runner.getMessages();
 		const toolUse = msgs.find(
-			(m) =>
-				m.type === "assistant" &&
-				Array.isArray((m as any).message?.content) &&
-				(m as any).message.content[0]?.type === "tool_use",
+			(m): m is AgentAssistantMessage =>
+				m.type === "assistant" && m.content[0]?.type === "tool_use",
 		);
 		const toolResult = msgs.find(
-			(m) =>
-				m.type === "user" &&
-				Array.isArray((m as any).message?.content) &&
-				(m as any).message.content[0]?.type === "tool_result",
+			(m): m is AgentUserMessage =>
+				m.type === "user" && m.content[0]?.type === "tool_result",
 		);
 		expect(toolUse).toBeDefined();
 		expect(toolResult).toBeDefined();
-		expect((toolUse as any).message.content[0].name).toBe("Bash");
-		expect((toolResult as any).message.content[0].content).toBe("file1\nfile2");
+		expect((toolUse!.content[0] as AgentToolUseBlock).name).toBe("Bash");
+		const trBlock = toolResult!.content[0];
+		expect(trBlock.type === "tool_result" && trBlock.content).toBe(
+			"file1\nfile2",
+		);
 	});
 
 	it("maps mcp tool_use blocks into mcp__server__tool names", async () => {
@@ -455,12 +458,12 @@ describe("CursorRunner (SDK adapter)", () => {
 		await runner.start("call mcp");
 		const msgs = runner.getMessages();
 		const tu = msgs.find(
-			(m) =>
-				m.type === "assistant" &&
-				(m as any).message.content[0]?.type === "tool_use",
-		) as any;
-		expect(tu.message.content[0].name).toBe("mcp__linear__list_issues");
-		expect(tu.message.content[0].input).toEqual({ teamId: "abc" });
+			(m): m is AgentAssistantMessage =>
+				m.type === "assistant" && m.content[0]?.type === "tool_use",
+		);
+		const tuBlock = tu!.content[0] as AgentToolUseBlock;
+		expect(tuBlock.name).toBe("mcp__linear__list_issues");
+		expect(tuBlock.input).toEqual({ teamId: "abc" });
 	});
 
 	it("uses Agent.resume when resumeSessionId is provided", async () => {
@@ -506,9 +509,58 @@ describe("CursorRunner (SDK adapter)", () => {
 		runner.on("error", () => {});
 		await runner.start("hi");
 		const msgs = runner.getMessages();
-		const last = msgs[msgs.length - 1] as any;
+		const last = msgs[msgs.length - 1] as AgentResultMessage;
 		expect(last.type).toBe("result");
-		expect(last.is_error).toBe(true);
+		expect(last.isError).toBe(true);
+	});
+
+	it("exposes provider === 'cursor'", async () => {
+		const runner = new CursorRunner({
+			cyrusHome: tempWorkspace(),
+			workingDirectory: tempWorkspace(),
+		});
+		expect(runner.provider).toBe("cursor");
+	});
+
+	it("emits a neutral thinking block for thinking events (no longer dropped)", async () => {
+		const workspace = tempWorkspace();
+		const cyrusHome = tempWorkspace();
+		sdkMock.__install({
+			agentId: "agent-think",
+			events: [
+				{
+					type: "system",
+					subtype: "init",
+					agent_id: "agent-think",
+					run_id: "r",
+				},
+				{
+					type: "thinking",
+					agent_id: "agent-think",
+					run_id: "r",
+					text: "Considering the approach...",
+				},
+				{
+					type: "status",
+					agent_id: "agent-think",
+					run_id: "r",
+					status: "FINISHED",
+				},
+			],
+		});
+
+		const runner = new CursorRunner({ cyrusHome, workingDirectory: workspace });
+		await runner.start("think about it");
+
+		const thinking = runner
+			.getMessages()
+			.filter((m): m is AgentAssistantMessage => m.type === "assistant")
+			.flatMap((m) => m.content)
+			.find((b) => b.type === "thinking");
+		expect(thinking).toBeDefined();
+		expect(thinking?.type === "thinking" && thinking.thinking).toBe(
+			"Considering the approach...",
+		);
 	});
 
 	it("writes Cyrus permission config file with translated patterns during run", async () => {

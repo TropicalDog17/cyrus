@@ -21,7 +21,11 @@ import {
 	type SessionCronSummary,
 	type StopHookInput,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentPendingWork, AskUserQuestionInput } from "cyrus-core";
+import type {
+	AgentMessage,
+	AgentPendingWork,
+	AskUserQuestionInput,
+} from "cyrus-core";
 import {
 	createLogger,
 	type IAgentRunner,
@@ -30,6 +34,7 @@ import {
 	StreamingPrompt,
 } from "cyrus-core";
 import dotenv from "dotenv";
+import { toAgentMessage } from "./claude-message-projection.js";
 import { ClaudeMessageFormatter, type IMessageFormatter } from "./formatter.js";
 import { buildHomeDirectoryDisallowedTools } from "./home-directory-restrictions.js";
 import {
@@ -259,18 +264,21 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 	 */
 	readonly supportsStreamingInput = true;
 
+	/** Provider dispatch tag (see IAgentRunner.provider). */
+	readonly provider = "claude" as const;
+
 	private config: ClaudeRunnerConfig;
 	private logger: ILogger;
 	private abortController: AbortController | null = null;
 	private sessionInfo: ClaudeSessionInfo | null = null;
 	private logStream: WriteStream | null = null;
 	private readableLogStream: WriteStream | null = null;
-	private messages: SDKMessage[] = [];
+	private messages: AgentMessage[] = [];
 	private streamingPrompt: StreamingPrompt | null = null;
 	private activeQuery: Query | null = null;
 	private cyrusHome: string;
 	private formatter: IMessageFormatter;
-	private pendingResultMessage: SDKMessage | null = null;
+	private pendingResultMessage: AgentMessage | null = null;
 	private canUseToolCallback: CanUseTool | undefined;
 	private repositoryEnv: Record<string, string> = {};
 	private keepSessionWarm: boolean;
@@ -795,9 +803,7 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					this.setupLogging();
 				}
 
-				this.messages.push(message);
-
-				// Log to detailed JSON log
+				// Log to detailed JSON log (raw SDK shape, for replay/debugging)
 				if (this.logStream) {
 					const logEntry = {
 						type: "sdk-message",
@@ -807,21 +813,31 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					this.logStream.write(`${JSON.stringify(logEntry)}\n`);
 				}
 
-				// Log to human-readable log
+				// Log to human-readable log (raw SDK shape)
 				if (this.readableLogStream) {
 					this.writeReadableLogEntry(message);
 				}
 
-				// Emit all messages (including result) immediately in-loop.
+				// Project the raw SDK message into the neutral AgentMessage
+				// contract. Informational SDK frames (stream_event, tool_progress,
+				// auth_status, tool_use_summary, prompt_suggestion, …) project to
+				// null and are dropped instead of being surfaced to consumers.
+				// Emit neutral messages (including result) immediately in-loop.
 				// When keepSessionWarm is true, the streamingPrompt stays open for
 				// follow-up messages so the SDK session can be reused. Otherwise we
 				// complete the streaming prompt on result so the for-await loop exits
 				// and the subprocess can shut down (pre-warm-sessions behavior).
-				this.logger.event("message_emitted", {
-					messageType: message.type,
-					claudeSessionId: this.sessionInfo?.sessionId,
-				});
-				this.emit("message", message);
+				const neutral = toAgentMessage(message);
+				if (neutral) {
+					this.messages.push(neutral);
+					this.logger.event("message_emitted", {
+						messageType: neutral.type,
+						claudeSessionId: this.sessionInfo?.sessionId,
+					});
+					this.emit("message", neutral);
+				}
+				// processMessage reads the raw SDK shape to emit text/assistant/
+				// tool-use convenience events.
 				this.processMessage(message);
 				if (
 					message.type === "result" &&
@@ -860,10 +876,10 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 			});
 			this.sessionInfo.isRunning = false;
 
-			// Emit deferred result message after marking isRunning = false
+			// Emit deferred result message after marking isRunning = false.
+			// (Already projected to a neutral AgentMessage.)
 			if (this.pendingResultMessage) {
 				this.emit("message", this.pendingResultMessage);
-				this.processMessage(this.pendingResultMessage);
 				this.pendingResultMessage = null;
 			}
 
@@ -1126,7 +1142,7 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 	/**
 	 * Get all messages from current session
 	 */
-	getMessages(): SDKMessage[] {
+	getMessages(): AgentMessage[] {
 		return [...this.messages];
 	}
 

@@ -6,8 +6,8 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { LinearClient } from "@linear/sdk";
 import type {
+	ClaudeRunnerConfig,
 	McpServerConfig,
-	SDKMessage,
 	SessionStore,
 	WarmQuery,
 } from "cyrus-claude-runner";
@@ -23,6 +23,7 @@ import { ConfigUpdater } from "cyrus-config-updater";
 import type {
 	AgentActivityCreateInput,
 	AgentEvent,
+	AgentMessage,
 	AgentRunnerConfig,
 	AgentSessionCreatedWebhook,
 	AgentSessionPromptedWebhook,
@@ -139,6 +140,7 @@ import {
 	type RepositoryRouterDeps,
 } from "./RepositoryRouter.js";
 import {
+	type RunnerConfig,
 	RunnerConfigBuilder,
 	resolveIssueMcpConfigPath,
 } from "./RunnerConfigBuilder.js";
@@ -1630,18 +1632,11 @@ ${taskSection}`;
 				.find((m) => m.type === "assistant");
 
 			let summary = "Task completed. Please review the changes on this branch.";
-			if (
-				lastAssistantMessage &&
-				lastAssistantMessage.type === "assistant" &&
-				"message" in lastAssistantMessage
-			) {
-				const msg = lastAssistantMessage as {
-					message: { content: Array<{ type: string; text?: string }> };
-				};
-				const textBlock = msg.message.content?.find(
+			if (lastAssistantMessage && lastAssistantMessage.type === "assistant") {
+				const textBlock = lastAssistantMessage.content.find(
 					(block) => block.type === "text" && block.text,
 				);
-				if (textBlock?.text) {
+				if (textBlock?.type === "text" && textBlock.text) {
 					summary = textBlock.text;
 				}
 			}
@@ -4331,7 +4326,7 @@ ${taskSection}`;
 	 */
 	private async handleClaudeMessage(
 		sessionId: string,
-		message: SDKMessage,
+		message: AgentMessage,
 		_repositoryId: string,
 	): Promise<void> {
 		await this.agentSessionManager.handleClaudeMessage(sessionId, message);
@@ -4479,13 +4474,13 @@ ${taskSection}`;
 	 */
 	private createRunnerForType(
 		runnerType: RunnerType,
-		config: AgentRunnerConfig,
+		config: RunnerConfig,
 	): IAgentRunner {
 		switch (runnerType) {
 			case "claude": {
 				// Inject the hosted SessionStore at the last moment so it only
 				// attaches to Claude runners (the field is Claude-specific).
-				const claudeConfig = this.claudeSessionStore
+				const claudeConfig: ClaudeRunnerConfig = this.claudeSessionStore
 					? { ...config, sessionStore: this.claudeSessionStore }
 					: config;
 				return new ClaudeRunner(claudeConfig, this.isWarmSessionsEnabled());
@@ -5561,7 +5556,7 @@ ${input.userComment}
 		 * Defaults to `"linear"` (the pre-platform-aware behavior).
 		 */
 		sessionPlatform: "linear" | "github" = "linear",
-	): Promise<{ config: AgentRunnerConfig; runnerType: RunnerType }> {
+	): Promise<{ config: RunnerConfig; runnerType: RunnerType }> {
 		const log = this.logger.withContext({
 			sessionId,
 			platform: session.issueContext?.trackerId,
@@ -5611,7 +5606,7 @@ ${input.userComment}
 			skills: allowedSkillNames,
 			sandboxSettings: this.sdkSandboxSettings ?? undefined,
 			egressCaCertPath: this.egressCaCertPath ?? undefined,
-			onMessage: (message: SDKMessage) => {
+			onMessage: (message: AgentMessage) => {
 				this.handleClaudeMessage(sessionId, message, repository.id);
 			},
 			onError: (error: Error) =>
@@ -5627,9 +5622,7 @@ ${input.userComment}
 			const warmSession = this.warmInstances.get(sessionId);
 			if (warmSession) {
 				this.warmInstances.delete(sessionId);
-				(
-					result.config as AgentRunnerConfig & { warmSession?: WarmQuery }
-				).warmSession = warmSession;
+				(result.config as ClaudeRunnerConfig).warmSession = warmSession;
 				log.debug("Attaching pre-warmed session to runner config");
 			}
 		}

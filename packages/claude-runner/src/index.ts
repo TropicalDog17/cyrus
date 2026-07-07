@@ -11,6 +11,10 @@ export type {
 } from "@anthropic-ai/claude-agent-sdk";
 export { AbortError, ClaudeRunner } from "./ClaudeRunner.js";
 export {
+	flattenToolResultContent,
+	toAgentMessage,
+} from "./claude-message-projection.js";
+export {
 	availableTools,
 	getAllTools,
 	getCoordinatorTools,

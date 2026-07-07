@@ -1,11 +1,9 @@
-import type {
-	SDKAssistantMessage,
-	SDKUserMessage,
-} from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeMessageFormatter } from "cyrus-claude-runner";
+import type { AgentAssistantMessage, AgentUserMessage } from "cyrus-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager";
 import type { IActivitySink } from "../src/sinks/IActivitySink";
+import { assistantToolUse, userToolResult } from "./agent-message-builders";
 
 /**
  * Regression test for CYPACK-1115: deferred-tool messages (ToolSearch and
@@ -54,62 +52,21 @@ describe("AgentSessionManager - concurrent message handling", () => {
 		const formatter = new ClaudeMessageFormatter();
 		const runnerStub = {
 			getFormatter: () => formatter,
-			constructor: { name: "ClaudeRunner" },
+			provider: "claude",
 		} as unknown as Parameters<typeof manager.addAgentRunner>[1];
 		manager.addAgentRunner(sessionId, runnerStub);
 	});
 
-	function buildToolUse(id: string, query: string): SDKAssistantMessage {
-		return {
-			type: "assistant",
-			session_id: "claude-session",
-			parent_tool_use_id: null,
-			uuid: `uuid-${id}`,
-			message: {
-				id: "msg_1",
-				type: "message",
-				role: "assistant",
-				model: "claude",
-				stop_reason: "tool_use",
-				stop_sequence: null,
-				usage: {
-					input_tokens: 0,
-					output_tokens: 0,
-					cache_creation_input_tokens: 0,
-					cache_read_input_tokens: 0,
-				},
-				content: [
-					{
-						type: "tool_use",
-						id,
-						name: "ToolSearch",
-						input: { query, max_results: 3 },
-					},
-				],
-			},
-		} as unknown as SDKAssistantMessage;
+	function buildToolUse(id: string, query: string): AgentAssistantMessage {
+		return assistantToolUse(id, "ToolSearch", { query, max_results: 3 });
 	}
 
-	function buildToolResult(id: string, toolNames: string[]): SDKUserMessage {
-		return {
-			type: "user",
-			session_id: "claude-session",
-			parent_tool_use_id: null,
-			uuid: `uuid-result-${id}`,
-			message: {
-				role: "user",
-				content: [
-					{
-						type: "tool_result",
-						tool_use_id: id,
-						content: toolNames.map((tool_name) => ({
-							type: "tool_reference",
-							tool_name,
-						})),
-					},
-				],
-			},
-		} as unknown as SDKUserMessage;
+	// The runner's projection flattens a tool_result's tool_reference blocks to a
+	// newline-joined tool-name string; the neutral block carries that string.
+	function buildToolResult(id: string, toolNames: string[]): AgentUserMessage {
+		return userToolResult(id, toolNames.join("\n"), false, {
+			parentToolUseId: null,
+		});
 	}
 
 	it("keeps action=ToolSearch when tool_use and tool_result arrive back-to-back without awaits", async () => {
@@ -119,7 +76,7 @@ describe("AgentSessionManager - concurrent message handling", () => {
 		// registered, producing action="Tool".
 		const firingPromises: Promise<void>[] = [];
 
-		const fire = (message: SDKAssistantMessage | SDKUserMessage) => {
+		const fire = (message: AgentAssistantMessage | AgentUserMessage) => {
 			firingPromises.push(manager.handleClaudeMessage(sessionId, message));
 		};
 

@@ -1,11 +1,13 @@
-import type {
-	SDKAssistantMessage,
-	SDKSystemMessage,
-} from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeMessageFormatter } from "cyrus-claude-runner";
+import type { AgentAssistantMessage } from "cyrus-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager";
 import type { IActivitySink } from "../src/sinks/IActivitySink";
+import {
+	assistantText,
+	assistantToolUse,
+	systemInitMessage,
+} from "./agent-message-builders";
 
 /**
  * Regression test for CYPACK-1112 / CYPACK-978 follow-up:
@@ -53,93 +55,31 @@ describe("AgentSessionManager - empty assistant thought suppression", () => {
 		const formatter = new ClaudeMessageFormatter();
 		const runnerStub = {
 			getFormatter: () => formatter,
-			constructor: { name: "ClaudeRunner" },
+			provider: "claude",
 		} as unknown as Parameters<typeof manager.addAgentRunner>[1];
 		manager.addAgentRunner(sessionId, runnerStub);
 	});
 
-	function buildEmptyTextAssistantMessage(uuid: string): SDKAssistantMessage {
-		return {
-			type: "assistant",
-			session_id: "claude-session",
-			parent_tool_use_id: null,
-			uuid,
-			message: {
-				id: "msg_empty",
-				type: "message",
-				role: "assistant",
-				model: "claude",
-				stop_reason: "end_turn",
-				stop_sequence: null,
-				usage: {
-					input_tokens: 0,
-					output_tokens: 0,
-					cache_creation_input_tokens: 0,
-					cache_read_input_tokens: 0,
-				},
-				content: [{ type: "text", text: "" }],
-			},
-		} as unknown as SDKAssistantMessage;
+	function buildEmptyTextAssistantMessage(
+		_uuid: string,
+	): AgentAssistantMessage {
+		return assistantText("");
 	}
 
 	function buildWhitespaceTextAssistantMessage(
-		uuid: string,
-	): SDKAssistantMessage {
-		return {
-			type: "assistant",
-			session_id: "claude-session",
-			parent_tool_use_id: null,
-			uuid,
-			message: {
-				id: "msg_ws",
-				type: "message",
-				role: "assistant",
-				model: "claude",
-				stop_reason: "end_turn",
-				stop_sequence: null,
-				usage: {
-					input_tokens: 0,
-					output_tokens: 0,
-					cache_creation_input_tokens: 0,
-					cache_read_input_tokens: 0,
-				},
-				content: [{ type: "text", text: "\n \n\t" }],
-			},
-		} as unknown as SDKAssistantMessage;
+		_uuid: string,
+	): AgentAssistantMessage {
+		return assistantText("\n \n\t");
 	}
 
 	function buildToolUseAssistantMessage(
-		uuid: string,
+		_uuid: string,
 		toolUseId: string,
-	): SDKAssistantMessage {
-		return {
-			type: "assistant",
-			session_id: "claude-session",
-			parent_tool_use_id: null,
-			uuid,
-			message: {
-				id: "msg_tool",
-				type: "message",
-				role: "assistant",
-				model: "claude",
-				stop_reason: "tool_use",
-				stop_sequence: null,
-				usage: {
-					input_tokens: 0,
-					output_tokens: 0,
-					cache_creation_input_tokens: 0,
-					cache_read_input_tokens: 0,
-				},
-				content: [
-					{
-						type: "tool_use",
-						id: toolUseId,
-						name: "Bash",
-						input: { command: "ls", description: "List files" },
-					},
-				],
-			},
-		} as unknown as SDKAssistantMessage;
+	): AgentAssistantMessage {
+		return assistantToolUse(toolUseId, "Bash", {
+			command: "ls",
+			description: "List files",
+		});
 	}
 
 	it("does not post a blank thought when an assistant message has empty text", async () => {
@@ -147,17 +87,7 @@ describe("AgentSessionManager - empty assistant thought suppression", () => {
 		//   system init (posts "Using model: ...")
 		//   assistant [text=""]   <-- should NOT produce a blank thought
 		//   assistant [tool_use Bash]
-		const systemInit: SDKSystemMessage = {
-			type: "system",
-			subtype: "init",
-			session_id: "claude-session",
-			model: "claude-opus-4-6",
-			tools: ["Bash"],
-			permissionMode: "allowed_tools",
-			apiKeySource: "claude_desktop",
-		} as unknown as SDKSystemMessage;
-
-		await manager.handleClaudeMessage(sessionId, systemInit);
+		await manager.handleClaudeMessage(sessionId, systemInitMessage());
 		await manager.handleClaudeMessage(
 			sessionId,
 			buildEmptyTextAssistantMessage("uuid-empty"),

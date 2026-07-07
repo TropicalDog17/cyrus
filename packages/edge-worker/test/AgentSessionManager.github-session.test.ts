@@ -1,11 +1,11 @@
-import type {
-	SDKAssistantMessage,
-	SDKStatusMessage,
-	SDKSystemMessage,
-} from "cyrus-claude-runner";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager";
 import type { IActivitySink } from "../src/sinks/IActivitySink";
+import {
+	assistantText,
+	statusMessage,
+	systemInitMessage,
+} from "./agent-message-builders";
 
 /**
  * Tests that GitHub (non-Linear) sessions skip all Linear activity posting.
@@ -71,22 +71,9 @@ describe("AgentSessionManager - GitHub Session", () => {
 	it("should skip postActivity for assistant messages in GitHub sessions", async () => {
 		createGitHubSession();
 
-		const assistantMessage: SDKAssistantMessage = {
-			type: "assistant",
-			message: {
-				id: "msg-1",
-				type: "message",
-				role: "assistant",
-				content: [{ type: "text", text: "Here is my response." }],
-				model: "claude-sonnet-4-5-20250514",
-				stop_reason: "end_turn",
-				stop_sequence: null,
-				usage: { input_tokens: 10, output_tokens: 20 },
-			} as any,
-			parent_tool_use_id: null,
-			uuid: "00000000-0000-0000-0000-000000000001" as `${string}-${string}-${string}-${string}-${string}`,
-			session_id: "claude-session-1",
-		};
+		const assistantMessage = assistantText("Here is my response.", {
+			sessionId: "claude-session-1",
+		});
 
 		await manager.handleClaudeMessage(sessionId, assistantMessage);
 
@@ -96,15 +83,13 @@ describe("AgentSessionManager - GitHub Session", () => {
 	it("should skip model notification for GitHub sessions", async () => {
 		createGitHubSession();
 
-		const systemMessage = {
-			type: "system",
-			subtype: "init",
-			session_id: "claude-session-1",
+		const systemMessage = systemInitMessage({
+			sessionId: "claude-session-1",
 			model: "claude-sonnet-4-5-20250514",
 			tools: ["bash", "grep", "edit"],
 			permissionMode: "default",
 			apiKeySource: "user",
-		} as SDKSystemMessage;
+		});
 
 		await manager.handleClaudeMessage(sessionId, systemMessage);
 
@@ -119,15 +104,9 @@ describe("AgentSessionManager - GitHub Session", () => {
 	it("should skip status messages for GitHub sessions", async () => {
 		createGitHubSession();
 
-		const statusMessage: SDKStatusMessage = {
-			type: "system",
-			subtype: "status",
-			status: "compacting",
-			uuid: "00000000-0000-0000-0000-000000000002" as `${string}-${string}-${string}-${string}-${string}`,
-			session_id: "claude-session-1",
-		};
+		const statusMsg = statusMessage("compacting", "claude-session-1");
 
-		await manager.handleClaudeMessage(sessionId, statusMessage);
+		await manager.handleClaudeMessage(sessionId, statusMsg);
 
 		expect(postActivitySpy).not.toHaveBeenCalled();
 	});
@@ -137,31 +116,17 @@ describe("AgentSessionManager - GitHub Session", () => {
 	it("should still sync assistant messages for Linear sessions", async () => {
 		createLinearSession();
 
-		const assistantMessage: SDKAssistantMessage = {
-			type: "assistant",
-			message: {
-				id: "msg-1",
-				type: "message",
-				role: "assistant",
-				content: [{ type: "text", text: "Here is my response." }],
-				model: "claude-sonnet-4-5-20250514",
-				stop_reason: "end_turn",
-				stop_sequence: null,
-				usage: { input_tokens: 10, output_tokens: 20 },
-			} as any,
-			parent_tool_use_id: null,
-			uuid: "00000000-0000-0000-0000-000000000001" as `${string}-${string}-${string}-${string}-${string}`,
-			session_id: "claude-session-1",
-		};
+		const assistantMessage = assistantText("Here is my response.", {
+			sessionId: "claude-session-1",
+		});
 
 		await manager.handleClaudeMessage(sessionId, assistantMessage);
 
 		// Assistant text is held in the one-behind buffer until the next message
 		// flushes it. Send a second assistant message to flush the first.
-		const secondMessage: SDKAssistantMessage = {
-			...assistantMessage,
-			uuid: "00000000-0000-0000-0000-000000000002" as `${string}-${string}-${string}-${string}-${string}`,
-		};
+		const secondMessage = assistantText("Here is my response.", {
+			sessionId: "claude-session-1",
+		});
 		await manager.handleClaudeMessage(sessionId, secondMessage);
 
 		expect(postActivitySpy).toHaveBeenCalled();
@@ -170,15 +135,13 @@ describe("AgentSessionManager - GitHub Session", () => {
 	it("should still post model notifications for Linear sessions", async () => {
 		createLinearSession();
 
-		const systemMessage = {
-			type: "system",
-			subtype: "init",
-			session_id: "claude-session-1",
+		const systemMessage = systemInitMessage({
+			sessionId: "claude-session-1",
 			model: "claude-sonnet-4-5-20250514",
 			tools: ["bash", "grep", "edit"],
 			permissionMode: "default",
 			apiKeySource: "user",
-		} as SDKSystemMessage;
+		});
 
 		await manager.handleClaudeMessage(sessionId, systemMessage);
 

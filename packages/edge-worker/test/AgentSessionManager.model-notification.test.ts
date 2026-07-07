@@ -1,7 +1,7 @@
-import type { SDKSystemMessage } from "cyrus-claude-runner";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager";
 import type { IActivitySink } from "../src/sinks/IActivitySink";
+import { systemInitMessage } from "./agent-message-builders";
 
 describe("AgentSessionManager - Model Notification", () => {
 	let manager: AgentSessionManager;
@@ -42,15 +42,11 @@ describe("AgentSessionManager - Model Notification", () => {
 
 	it("should post model notification when system init message is received", async () => {
 		// Create a system init message with model information
-		const systemMessage: SDKSystemMessage = {
-			type: "system",
-			subtype: "init",
-			session_id: "claude-session-123",
+		const systemMessage = systemInitMessage({
+			sessionId: "claude-session-123",
 			model: "claude-3-opus-20240229",
 			tools: ["bash", "grep", "edit"],
-			permissionMode: "allowed_tools",
-			apiKeySource: "claude_desktop",
-		};
+		});
 
 		// Handle the system message
 		await manager.handleClaudeMessage(sessionId, systemMessage);
@@ -72,15 +68,11 @@ describe("AgentSessionManager - Model Notification", () => {
 
 	it("should not post model notification if model is not provided", async () => {
 		// Create a system init message without model information
-		const systemMessage: SDKSystemMessage = {
-			type: "system",
-			subtype: "init",
-			session_id: "claude-session-123",
+		const systemMessage = systemInitMessage({
+			sessionId: "claude-session-123",
 			model: "",
 			tools: ["bash", "grep", "edit"],
-			permissionMode: "allowed_tools",
-			apiKeySource: "claude_desktop",
-		};
+		});
 
 		// Handle the system message
 		await manager.handleClaudeMessage(sessionId, systemMessage);
@@ -96,15 +88,11 @@ describe("AgentSessionManager - Model Notification", () => {
 
 	it("should update session metadata with model information", async () => {
 		// Create a system init message with model information
-		const systemMessage: SDKSystemMessage = {
-			type: "system",
-			subtype: "init",
-			session_id: "claude-session-123",
+		const systemMessage = systemInitMessage({
+			sessionId: "claude-session-123",
 			model: "claude-3-sonnet-20240229",
 			tools: ["bash", "grep", "edit"],
-			permissionMode: "allowed_tools",
-			apiKeySource: "claude_desktop",
-		};
+		});
 
 		// Handle the system message
 		await manager.handleClaudeMessage(sessionId, systemMessage);
@@ -125,15 +113,11 @@ describe("AgentSessionManager - Model Notification", () => {
 			.mockImplementation(() => {});
 
 		// Create a system init message with model information
-		const systemMessage: SDKSystemMessage = {
-			type: "system",
-			subtype: "init",
-			session_id: "claude-session-123",
+		const systemMessage = systemInitMessage({
+			sessionId: "claude-session-123",
 			model: "claude-3-opus-20240229",
 			tools: ["bash", "grep", "edit"],
-			permissionMode: "allowed_tools",
-			apiKeySource: "claude_desktop",
-		};
+		});
 
 		// Handle the system message
 		await manager.handleClaudeMessage(sessionId, systemMessage);

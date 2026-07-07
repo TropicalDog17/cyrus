@@ -25,6 +25,7 @@ vi.mock("os", () => ({
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { AbortError, ClaudeRunner } from "../src/ClaudeRunner";
+import { toAgentMessage } from "../src/claude-message-projection";
 import type { ClaudeRunnerConfig, SDKMessage } from "../src/types";
 
 describe("ClaudeRunner", () => {
@@ -267,8 +268,14 @@ describe("ClaudeRunner", () => {
 			await runner.start("test");
 
 			expect(messageHandler).toHaveBeenCalledTimes(2);
-			expect(messageHandler).toHaveBeenNthCalledWith(1, mockMessages[0]);
-			expect(messageHandler).toHaveBeenNthCalledWith(2, mockMessages[1]);
+			expect(messageHandler).toHaveBeenNthCalledWith(
+				1,
+				toAgentMessage(mockMessages[0]),
+			);
+			expect(messageHandler).toHaveBeenNthCalledWith(
+				2,
+				toAgentMessage(mockMessages[1]),
+			);
 		});
 
 		it("should emit complete event with all messages", async () => {
@@ -292,7 +299,9 @@ describe("ClaudeRunner", () => {
 
 			await runner.start("test");
 
-			expect(completeHandler).toHaveBeenCalledWith(mockMessages);
+			expect(completeHandler).toHaveBeenCalledWith(
+				mockMessages.map(toAgentMessage),
+			);
 		});
 	});
 
@@ -591,7 +600,9 @@ describe("ClaudeRunner", () => {
 			const sessionInfo = await runner.start("test");
 
 			expect(sessionInfo.sessionId).toBe("extracted-session-123");
-			expect(messageHandler).toHaveBeenCalledTimes(2);
+			// The informational "start" frame projects to null and is dropped;
+			// only the assistant message is emitted.
+			expect(messageHandler).toHaveBeenCalledTimes(1);
 		});
 
 		it("should update streaming prompt when session ID is extracted", async () => {
@@ -690,7 +701,7 @@ describe("ClaudeRunner", () => {
 			await runner.start("test");
 
 			const messages = runner.getMessages();
-			expect(messages).toEqual(mockMessages);
+			expect(messages).toEqual(mockMessages.map(toAgentMessage));
 		});
 
 		it("should return copy of messages array", async () => {
@@ -800,9 +811,18 @@ describe("ClaudeRunner", () => {
 
 			// Verify all message types are processed
 			expect(messageHandler).toHaveBeenCalledTimes(3);
-			expect(messageHandler).toHaveBeenNthCalledWith(1, mockMessages[0]);
-			expect(messageHandler).toHaveBeenNthCalledWith(2, mockMessages[1]);
-			expect(messageHandler).toHaveBeenNthCalledWith(3, mockMessages[2]);
+			expect(messageHandler).toHaveBeenNthCalledWith(
+				1,
+				toAgentMessage(mockMessages[0]),
+			);
+			expect(messageHandler).toHaveBeenNthCalledWith(
+				2,
+				toAgentMessage(mockMessages[1]),
+			);
+			expect(messageHandler).toHaveBeenNthCalledWith(
+				3,
+				toAgentMessage(mockMessages[2]),
+			);
 		});
 
 		it("should filter system messages from readable log", async () => {
@@ -839,8 +859,12 @@ describe("ClaudeRunner", () => {
 			// Both messages should be captured in detailed log (via message handler)
 			expect(messageHandler).toHaveBeenCalledTimes(2);
 			// But readable log logic would filter out system messages
-			expect(messageHandler).toHaveBeenCalledWith(mockMessages[0]); // system
-			expect(messageHandler).toHaveBeenCalledWith(mockMessages[1]); // assistant
+			expect(messageHandler).toHaveBeenCalledWith(
+				toAgentMessage(mockMessages[0]),
+			); // system
+			expect(messageHandler).toHaveBeenCalledWith(
+				toAgentMessage(mockMessages[1]),
+			); // assistant
 		});
 
 		it("should filter TaskCreate tool calls from readable log", async () => {
@@ -889,7 +913,9 @@ describe("ClaudeRunner", () => {
 
 			// Message should be captured in detailed log
 			expect(messageHandler).toHaveBeenCalledTimes(1);
-			expect(messageHandler).toHaveBeenCalledWith(mockMessages[0]);
+			expect(messageHandler).toHaveBeenCalledWith(
+				toAgentMessage(mockMessages[0]),
+			);
 
 			// Readable log logic would filter out TaskCreate but keep Read
 			// (This tests the filtering logic in writeReadableLogEntry)

@@ -1,19 +1,15 @@
 import { EventEmitter } from "node:events";
-import type {
-	APIAssistantMessage,
-	APIUserMessage,
-	SDKAssistantMessage,
-	SDKMessage,
-	SDKRateLimitEvent,
-	SDKResultMessage,
-	SDKStatusMessage,
-	SDKSystemMessage,
-	SDKUserMessage,
-} from "cyrus-claude-runner";
 import {
+	type AgentAssistantMessage,
+	type AgentMessage,
 	type AgentPendingWork,
+	type AgentRateLimitMessage,
+	type AgentResultMessage,
 	AgentSessionStatus,
 	AgentSessionType,
+	type AgentStatusMessage,
+	type AgentSystemInitMessage,
+	type AgentUserMessage,
 	type CyrusAgentSession,
 	type CyrusAgentSessionEntry,
 	createLogger,
@@ -36,16 +32,6 @@ import type {
 	ActivitySignal,
 	IActivitySink,
 } from "./sinks/index.js";
-
-/**
- * Whether a session's runner is the Cursor runner. Used to record the runner
- * session id against the correct field (`cursorSessionId` vs `claudeSessionId`)
- * so resumes stick with the harness that created the session. Identified by
- * constructor name to avoid a hard dependency on the cursor-runner package here.
- */
-function isCursorRunner(runner: IAgentRunner | undefined): boolean {
-	return runner?.constructor.name === "CursorRunner";
-}
 
 /**
  * Payload for {@link AgentSessionManagerEvents.sessionComplete}. Raw session facts; EdgeWorker
@@ -265,7 +251,7 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	updateAgentSessionWithRunnerSessionId(
 		sessionId: string,
-		claudeSystemMessage: SDKSystemMessage,
+		initMessage: AgentSystemInitMessage,
 	): void {
 		const linearSession = this.sessions.get(sessionId);
 		if (!linearSession) {
@@ -274,19 +260,19 @@ export class AgentSessionManager extends EventEmitter {
 			return;
 		}
 
-		if (isCursorRunner(linearSession.agentRunner)) {
-			linearSession.cursorSessionId = claudeSystemMessage.session_id;
+		if (linearSession.agentRunner?.provider === "cursor") {
+			linearSession.cursorSessionId = initMessage.sessionId;
 		} else {
-			linearSession.claudeSessionId = claudeSystemMessage.session_id;
+			linearSession.claudeSessionId = initMessage.sessionId;
 		}
 
 		linearSession.updatedAt = Date.now();
 		linearSession.metadata = {
 			...linearSession.metadata, // Preserve existing metadata
-			model: claudeSystemMessage.model,
-			tools: claudeSystemMessage.tools,
-			permissionMode: claudeSystemMessage.permissionMode,
-			apiKeySource: claudeSystemMessage.apiKeySource,
+			model: initMessage.model,
+			tools: initMessage.tools,
+			permissionMode: initMessage.permissionMode,
+			apiKeySource: initMessage.apiKeySource,
 		};
 	}
 
@@ -295,36 +281,31 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	private async createSessionEntry(
 		sessionId: string,
-		sdkMessage: SDKUserMessage | SDKAssistantMessage,
+		message: AgentUserMessage | AgentAssistantMessage,
 	): Promise<CyrusAgentSessionEntry> {
 		// Extract tool info if this is an assistant message
 		const toolInfo =
-			sdkMessage.type === "assistant" ? this.extractToolInfo(sdkMessage) : null;
+			message.type === "assistant" ? this.extractToolInfo(message) : null;
 		// Extract tool_use_id and error status if this is a user message with tool_result
 		const toolResultInfo =
-			sdkMessage.type === "user"
-				? this.extractToolResultInfo(sdkMessage)
-				: null;
-		// Extract SDK error from assistant messages (e.g., rate_limit, billing_error)
-		// SDKAssistantMessage has optional `error?: SDKAssistantMessageError` field
-		// See: @anthropic-ai/claude-agent-sdk sdk.d.ts lines 1013-1022
-		// Evidence from ~/.cyrus/logs/CYGROW-348 session jsonl shows assistant messages with
-		// "error":"rate_limit" field when usage limits are hit
-		const sdkError =
-			sdkMessage.type === "assistant" ? sdkMessage.error : undefined;
+			message.type === "user" ? this.extractToolResultInfo(message) : null;
+		// Extract provider error from assistant messages (e.g., rate_limit,
+		// billing_error). The neutral AgentAssistantMessage carries the optional
+		// `error?: SDKAssistantMessageError` tag through from the runner.
+		const sdkError = message.type === "assistant" ? message.error : undefined;
 
 		// Record the runner session id against the runner that produced it.
 		const runner = this.sessions.get(sessionId)?.agentRunner;
 
 		const sessionEntry: CyrusAgentSessionEntry = {
-			...(isCursorRunner(runner)
-				? { cursorSessionId: sdkMessage.session_id }
-				: { claudeSessionId: sdkMessage.session_id }),
-			type: sdkMessage.type,
-			content: this.extractContent(sdkMessage),
+			...(runner?.provider === "cursor"
+				? { cursorSessionId: message.sessionId }
+				: { claudeSessionId: message.sessionId }),
+			type: message.type,
+			content: this.extractContent(message),
 			metadata: {
 				timestamp: Date.now(),
-				parentToolUseId: sdkMessage.parent_tool_use_id || undefined,
+				parentToolUseId: message.parentToolUseId || undefined,
 				...(toolInfo && {
 					toolUseId: toolInfo.id,
 					toolName: toolInfo.name,
@@ -348,7 +329,7 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	async completeSession(
 		sessionId: string,
-		resultMessage: SDKResultMessage,
+		resultMessage: AgentResultMessage,
 	): Promise<void> {
 		const session = this.sessions.get(sessionId);
 		if (!session) {
@@ -371,7 +352,7 @@ export class AgentSessionManager extends EventEmitter {
 
 		// Update session status and metadata
 		await this.updateSessionStatus(sessionId, status, {
-			totalCostUsd: resultMessage.total_cost_usd,
+			totalCostUsd: resultMessage.usage.costUsd,
 			usage: resultMessage.usage,
 		});
 
@@ -444,7 +425,7 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	private async handleChildSessionCompletion(
 		sessionId: string,
-		resultMessage: SDKResultMessage,
+		resultMessage: AgentResultMessage,
 	): Promise<void> {
 		const log = this.sessionLog(sessionId);
 		if (!this.getParentSessionId || !this.resumeParentSession) {
@@ -493,7 +474,7 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	async handleClaudeMessage(
 		sessionId: string,
-		message: SDKMessage,
+		message: AgentMessage,
 	): Promise<void> {
 		const prev =
 			this.messageProcessingQueues.get(sessionId) ?? Promise.resolve();
@@ -514,7 +495,7 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	private async processClaudeMessage(
 		sessionId: string,
-		message: SDKMessage,
+		message: AgentMessage,
 	): Promise<void> {
 		const log = this.sessionLog(sessionId);
 		try {
@@ -524,27 +505,17 @@ export class AgentSessionManager extends EventEmitter {
 						this.updateAgentSessionWithRunnerSessionId(sessionId, message);
 
 						// Post model notification
-						const systemMessage = message as SDKSystemMessage;
-						if (systemMessage.model) {
-							await this.postModelNotificationThought(
-								sessionId,
-								systemMessage.model,
-							);
+						if (message.model) {
+							await this.postModelNotificationThought(sessionId, message.model);
 						}
 					} else if (message.subtype === "status") {
 						// Handle status updates (compacting, etc.)
-						await this.handleStatusMessage(
-							sessionId,
-							message as SDKStatusMessage,
-						);
+						await this.handleStatusMessage(sessionId, message);
 					}
 					break;
 
 				case "user": {
-					const userEntry = await this.createSessionEntry(
-						sessionId,
-						message as SDKUserMessage,
-					);
+					const userEntry = await this.createSessionEntry(sessionId, message);
 					await this.syncEntryToActivitySink(userEntry, sessionId);
 					break;
 				}
@@ -552,7 +523,7 @@ export class AgentSessionManager extends EventEmitter {
 				case "assistant": {
 					const assistantEntry = await this.createSessionEntry(
 						sessionId,
-						message as SDKAssistantMessage,
+						message,
 					);
 					// Buffer the text content so addResultEntry can post it as the response.
 					// Track whether this body is a tool_use input (JSON) rather than real
@@ -595,15 +566,17 @@ export class AgentSessionManager extends EventEmitter {
 					// Result arrived: discard buffered entry (addResultEntry uses lastAssistantBodyBySession
 					// to post the content as a response activity)
 					this.bufferedAssistantEntryBySession.delete(sessionId);
-					await this.completeSession(sessionId, message as SDKResultMessage);
+					await this.completeSession(sessionId, message);
 					break;
 
-				case "rate_limit_event":
-					this.handleRateLimitEvent(sessionId, message as SDKRateLimitEvent);
+				case "rate_limit":
+					this.handleRateLimitEvent(sessionId, message);
 					break;
 
 				default:
-					log.warn(`Unknown message type: ${(message as any).type}`);
+					log.warn(
+						`Unknown message type: ${(message as { type: string }).type}`,
+					);
 			}
 		} catch (error) {
 			log.error(`Error handling message:`, error);
@@ -632,10 +605,10 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	private handleRateLimitEvent(
 		sessionId: string,
-		message: SDKRateLimitEvent,
+		message: AgentRateLimitMessage,
 	): void {
 		const log = this.sessionLog(sessionId);
-		const info = message.rate_limit_info;
+		const info = message.info;
 
 		if (info.status === "rejected") {
 			const resetsAt = info.resetsAt
@@ -678,7 +651,7 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	private async addResultEntry(
 		sessionId: string,
-		resultMessage: SDKResultMessage,
+		resultMessage: AgentResultMessage,
 	): Promise<void> {
 		// For error results, content may be in errors[] rather than result.
 		const resultText =
@@ -700,7 +673,7 @@ export class AgentSessionManager extends EventEmitter {
 		this.lastAssistantBodyIsToolInputBySession.delete(sessionId);
 
 		let content: string;
-		if (resultMessage.is_error) {
+		if (resultMessage.isError) {
 			content = (
 				"errors" in resultMessage &&
 				Array.isArray(resultMessage.errors) &&
@@ -736,15 +709,15 @@ export class AgentSessionManager extends EventEmitter {
 
 		const runner = this.sessions.get(sessionId)?.agentRunner;
 		const resultEntry: CyrusAgentSessionEntry = {
-			...(isCursorRunner(runner)
-				? { cursorSessionId: resultMessage.session_id }
-				: { claudeSessionId: resultMessage.session_id }),
+			...(runner?.provider === "cursor"
+				? { cursorSessionId: resultMessage.sessionId }
+				: { claudeSessionId: resultMessage.sessionId }),
 			type: "result",
 			content,
 			metadata: {
 				timestamp: Date.now(),
-				durationMs: resultMessage.duration_ms,
-				isError: resultMessage.is_error,
+				durationMs: resultMessage.durationMs,
+				isError: resultMessage.isError,
 			},
 		};
 
@@ -754,113 +727,71 @@ export class AgentSessionManager extends EventEmitter {
 	}
 
 	/**
-	 * Extract content from Claude message
+	 * Extract flattened content from a neutral agent message. The runner's
+	 * projection layer already flattened tool_result blocks to strings (incl.
+	 * the ToolSearch `tool_reference` names), so this just joins the block
+	 * texts: text/thinking surface their prose, tool_use serializes its input,
+	 * tool_result emits its already-flattened content.
 	 */
 	private extractContent(
-		sdkMessage: SDKUserMessage | SDKAssistantMessage,
+		message: AgentUserMessage | AgentAssistantMessage,
 	): string {
-		const message =
-			sdkMessage.type === "user"
-				? (sdkMessage.message as APIUserMessage)
-				: (sdkMessage.message as APIAssistantMessage);
-
-		if (typeof message.content === "string") {
-			return message.content;
-		}
-
-		if (Array.isArray(message.content)) {
-			return message.content
-				.map((block) => {
-					if (block.type === "text") {
-						return block.text;
-					} else if (block.type === "tool_use") {
-						// For tool use blocks, return the input as JSON string
-						return JSON.stringify(block.input, null, 2);
-					} else if (block.type === "tool_result") {
-						// For tool_result blocks, extract just the text content
-						// Also store the error status in metadata if needed
-						if ("is_error" in block && block.is_error) {
-							// Mark this as an error result - we'll handle this elsewhere
-						}
-						if (typeof block.content === "string") {
-							return block.content;
-						}
-						if (Array.isArray(block.content)) {
-							return block.content
-								.map((contentBlock: any) => {
-									if (contentBlock.type === "text") {
-										return contentBlock.text;
-									}
-									// ToolSearch emits tool_reference blocks; preserve the tool name
-									// so the formatter can render "Loaded tools: `X`, `Y`".
-									if (
-										contentBlock.type === "tool_reference" &&
-										contentBlock.tool_name
-									) {
-										return contentBlock.tool_name;
-									}
-									return "";
-								})
-								.filter(Boolean)
-								.join("\n");
-						}
-						return "";
-					}
-					return "";
-				})
-				.filter(Boolean)
-				.join("\n");
-		}
-
-		return "";
+		return message.content
+			.map((block) => {
+				if (block.type === "text") {
+					return block.text;
+				}
+				if (block.type === "thinking") {
+					// Surface reasoning as text instead of dropping it (Cursor
+					// thinking previously never reached the timeline).
+					return block.thinking;
+				}
+				if (block.type === "tool_use") {
+					// For tool use blocks, return the input as JSON string
+					return JSON.stringify(block.input, null, 2);
+				}
+				if (block.type === "tool_result") {
+					// Already flattened to a string by the runner projection.
+					return block.content;
+				}
+				return "";
+			})
+			.filter(Boolean)
+			.join("\n");
 	}
 
 	/**
-	 * Extract tool information from Claude assistant message
+	 * Extract tool information from a neutral assistant message
 	 */
 	private extractToolInfo(
-		sdkMessage: SDKAssistantMessage,
+		message: AgentAssistantMessage,
 	): { id: string; name: string; input: any } | null {
-		const message = sdkMessage.message as APIAssistantMessage;
-
-		if (Array.isArray(message.content)) {
-			const toolUse = message.content.find(
-				(block) => block.type === "tool_use",
-			);
-			if (
-				toolUse &&
-				"id" in toolUse &&
-				"name" in toolUse &&
-				"input" in toolUse
-			) {
-				return {
-					id: toolUse.id,
-					name: toolUse.name,
-					input: toolUse.input,
-				};
-			}
+		const toolUse = message.content.find((block) => block.type === "tool_use");
+		if (toolUse && toolUse.type === "tool_use") {
+			return {
+				id: toolUse.id,
+				name: toolUse.name,
+				input: toolUse.input,
+			};
 		}
 		return null;
 	}
 
 	/**
-	 * Extract tool_use_id and error status from Claude user message containing tool_result
+	 * Extract tool_use_id and error status from a neutral user message
+	 * containing a tool_result block
 	 */
 	private extractToolResultInfo(
-		sdkMessage: SDKUserMessage,
+		message: AgentUserMessage,
 	): { toolUseId: string; isError: boolean } | null {
-		const message = sdkMessage.message as APIUserMessage;
-
-		if (Array.isArray(message.content)) {
-			const toolResult = message.content.find(
-				(block) => block.type === "tool_result",
-			);
-			if (toolResult && "tool_use_id" in toolResult) {
-				return {
-					toolUseId: toolResult.tool_use_id,
-					isError: "is_error" in toolResult && toolResult.is_error === true,
-				};
-			}
+		const toolResult = message.content.find(
+			(block) => block.type === "tool_result",
+		);
+		if (toolResult && toolResult.type === "tool_result") {
+			return {
+				toolUseId: toolResult.toolUseId,
+				isError: toolResult.isError,
+			};
 		}
 		return null;
 	}
@@ -1820,7 +1751,7 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	private async handleStatusMessage(
 		sessionId: string,
-		message: SDKStatusMessage,
+		message: AgentStatusMessage,
 	): Promise<void> {
 		const session = this.sessions.get(sessionId);
 		if (!session?.externalSessionId) {

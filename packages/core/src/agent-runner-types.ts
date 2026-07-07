@@ -3,8 +3,7 @@ import type {
 	HookCallbackMatcher,
 	HookEvent,
 	McpServerConfig,
-	SDKMessage,
-	SDKUserMessage,
+	SDKAssistantMessageError,
 	SdkPluginConfig,
 	SessionCronSummary,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -240,6 +239,14 @@ export interface IAgentRunner {
 	readonly supportsStreamingInput: boolean;
 
 	/**
+	 * Which agent provider this runner adapts. Enables provider dispatch
+	 * (e.g. recording the runner session id against the right field) without a
+	 * `constructor.name` sniff and without reverse-deriving the runner from
+	 * which session-id field happens to be populated.
+	 */
+	readonly provider: "claude" | "cursor";
+
+	/**
 	 * Start a new agent session with a string prompt (legacy/simple mode)
 	 *
 	 * This method initiates a complete agent session with a single prompt string.
@@ -423,11 +430,13 @@ export interface IAgentRunner {
 }
 
 /**
- * Configuration for agent runner
+ * Neutral base configuration for an agent runner.
  *
- * This type aliases to the Claude SDK configuration structure. When implementing
- * adapters for other providers (e.g., Gemini), they should map their config to
- * this structure or extend it with provider-specific options.
+ * This is the provider-agnostic base that `ClaudeRunnerConfig` and
+ * `CursorRunnerConfig` extend with their own provider-specific extras. Its
+ * message callbacks (`onMessage` / `onComplete`) are typed against the neutral
+ * {@link AgentMessage} union — every runner projects its native stream into
+ * that shape before emitting.
  *
  * @example
  * ```typescript
@@ -552,26 +561,149 @@ export interface AgentSessionInfo {
 	isRunning: boolean;
 }
 
-/**
- * Type alias for agent messages
- *
- * Maps to Claude SDK's SDKMessage type, which is a union of:
- * - SDKUserMessage (user inputs)
- * - SDKAssistantMessage (agent responses)
- * - SDKSystemMessage (system prompts)
- * - SDKResultMessage (completion/error results)
- *
- * Other provider adapters should map their message types to this structure.
- */
-export type AgentMessage = SDKMessage;
+// ============================================================================
+// NEUTRAL AGENT MESSAGE UNION
+// ============================================================================
+// A genuinely provider-agnostic streaming message contract. Both runners
+// (Claude, Cursor) project their native SDK streams into this union before
+// emitting, so the edge-worker consumer never sees a provider-shaped message.
+// camelCase throughout; no Anthropic cache-bucket fields (so Cursor no longer
+// has to counterfeit them).
 
 /**
- * Type alias for user messages
- *
- * Maps to Claude SDK's SDKUserMessage type.
- * Used for prompts and user inputs to the agent.
+ * Neutral token/cost usage for a completed turn. Deliberately omits Anthropic's
+ * cache-creation ephemeral bucket breakdown — a runner that cannot report those
+ * (Cursor) no longer has to fabricate them.
  */
-export type AgentUserMessage = SDKUserMessage;
+export interface AgentUsage {
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	costUsd: number;
+}
+
+/** Assistant/user text content block. */
+export interface AgentTextBlock {
+	type: "text";
+	text: string;
+}
+/** Assistant reasoning/thinking content block. */
+export interface AgentThinkingBlock {
+	type: "thinking";
+	thinking: string;
+}
+/** Assistant tool invocation content block. */
+export interface AgentToolUseBlock {
+	type: "tool_use";
+	id: string;
+	name: string;
+	input: unknown;
+}
+export type AgentAssistantContentBlock =
+	| AgentTextBlock
+	| AgentThinkingBlock
+	| AgentToolUseBlock;
+
+/**
+ * Tool result content block (delivered on a user message). `content` is already
+ * flattened to a single string by the runner's projection layer.
+ */
+export interface AgentToolResultBlock {
+	type: "tool_result";
+	toolUseId: string;
+	isError: boolean;
+	content: string;
+}
+export type AgentUserContentBlock = AgentTextBlock | AgentToolResultBlock;
+
+/** System init message — the first message that carries the runner session id. */
+export interface AgentSystemInitMessage {
+	type: "system";
+	subtype: "init";
+	sessionId: string;
+	model: string;
+	tools: string[];
+	permissionMode?: string;
+	apiKeySource?: string;
+}
+
+/** System status message (e.g. context compaction). */
+export interface AgentStatusMessage {
+	type: "system";
+	subtype: "status";
+	sessionId: string;
+	status: "compacting" | "requesting" | null;
+}
+
+/** Assistant turn carrying text / thinking / tool_use blocks. */
+export interface AgentAssistantMessage {
+	type: "assistant";
+	sessionId: string;
+	parentToolUseId: string | null;
+	content: AgentAssistantContentBlock[];
+	/** Provider-native error tag (rate_limit, billing_error, …), when present. */
+	error?: SDKAssistantMessageError;
+}
+
+/** User turn carrying text and/or tool_result blocks. */
+export interface AgentUserMessage {
+	type: "user";
+	sessionId: string;
+	parentToolUseId: string | null;
+	content: AgentUserContentBlock[];
+}
+
+/** Successful session result. */
+export interface AgentResultSuccessMessage {
+	type: "result";
+	subtype: "success";
+	sessionId: string;
+	result: string;
+	isError: false;
+	durationMs: number;
+	usage: AgentUsage;
+}
+
+/** Failed session result. */
+export interface AgentResultErrorMessage {
+	type: "result";
+	subtype: "error";
+	sessionId: string;
+	errors: string[];
+	isError: true;
+	durationMs: number;
+	usage: AgentUsage;
+}
+export type AgentResultMessage =
+	| AgentResultSuccessMessage
+	| AgentResultErrorMessage;
+
+/** Rate-limit information (claude.ai subscription runners). */
+export interface AgentRateLimitInfo {
+	status: "allowed" | "allowed_warning" | "rejected";
+	resetsAt?: number;
+	rateLimitType?: string;
+	utilization?: number;
+}
+/** Rate-limit event. */
+export interface AgentRateLimitMessage {
+	type: "rate_limit";
+	sessionId: string;
+	info: AgentRateLimitInfo;
+}
+
+/**
+ * The neutral streaming message contract runners emit. A discriminated union
+ * over `type` (and, for system/result, `subtype`).
+ */
+export type AgentMessage =
+	| AgentSystemInitMessage
+	| AgentStatusMessage
+	| AgentAssistantMessage
+	| AgentUserMessage
+	| AgentResultMessage
+	| AgentRateLimitMessage;
 
 /**
  * Re-export SDK types for convenience

@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 - **This fork runs on Linear + GitHub with Claude and Cursor executors.** The Gemini and Codex runners and the GitLab and Slack integrations have been removed. `defaultRunner` accepts `claude` (default) or `cursor`.
 
 ### Fixed
+- Cursor sessions now show the agent's reasoning in the issue timeline. Previously Cursor "thinking" steps were silently dropped, so its timeline skipped straight from one action to the next with no visible reasoning; those thoughts now appear alongside Claude's.
 - Cyrus no longer loses its memory of in-progress issues if it is restarted or killed at the wrong moment. Session state is now saved atomically and can never be left half-written; if the state file is ever damaged, Cyrus automatically recovers from a backup instead of silently starting fresh and abandoning every active issue.
 - When a working session crashes unexpectedly (its underlying process dies or the connection breaks mid-task), Cyrus now tells you on the issue that the session ended and how to retry, instead of silently leaving the issue stuck "In Progress" with no explanation.
 - After Cyrus restarts, issues that were still being worked on when it stopped no longer appear to hang forever with a spinning "working" indicator. Cyrus now marks each interrupted session on the issue and invites you to comment to resume it from where it left off.

@@ -33,12 +33,16 @@ import type {
 // version, and only pays the import cost when a Cursor session actually
 // starts.
 import type {
+	AgentAssistantContentBlock,
+	AgentAssistantMessage,
+	AgentMessage,
+	AgentResultMessage,
+	AgentSystemInitMessage,
+	AgentToolResultBlock,
+	AgentUsage,
+	AgentUserMessage,
 	IAgentRunner,
 	IMessageFormatter,
-	SDKAssistantMessage,
-	SDKMessage,
-	SDKResultMessage,
-	SDKUserMessage,
 } from "cyrus-core";
 import { CursorMessageFormatter } from "./formatter.js";
 import {
@@ -53,11 +57,6 @@ import type {
 } from "./types.js";
 
 type ToolInput = Record<string, unknown>;
-
-type SDKSystemInitMessage = Extract<
-	SDKMessage,
-	{ type: "system"; subtype: "init" }
->;
 
 interface CursorHooksRestoreState {
 	hooksPath: string;
@@ -93,83 +92,33 @@ function normalizeCursorModel(model?: string): string | undefined {
 	return model;
 }
 
-function createAssistantToolUseMessage(
+function createAssistantToolUseBlocks(
 	toolUseId: string,
 	toolName: string,
 	toolInput: ToolInput,
-	messageId: string = crypto.randomUUID(),
-): SDKAssistantMessage["message"] {
-	const contentBlocks = [
+): AgentAssistantContentBlock[] {
+	return [
 		{ type: "tool_use", id: toolUseId, name: toolName, input: toolInput },
-	] as unknown as SDKAssistantMessage["message"]["content"];
-
-	return {
-		id: messageId,
-		type: "message",
-		role: "assistant",
-		content: contentBlocks,
-		model: "cursor-agent",
-		stop_reason: null,
-		stop_sequence: null,
-		stop_details: null,
-		usage: {
-			input_tokens: 0,
-			output_tokens: 0,
-			cache_creation_input_tokens: 0,
-			cache_read_input_tokens: 0,
-			cache_creation: null,
-		} as SDKAssistantMessage["message"]["usage"],
-		container: null,
-		context_management: null,
-		diagnostics: null,
-	};
+	];
 }
 
-function createAssistantTextMessage(
+function createAssistantTextBlocks(
 	content: string,
-	messageId: string = crypto.randomUUID(),
-): SDKAssistantMessage["message"] {
-	const contentBlocks = [
-		{ type: "text", text: content },
-	] as unknown as SDKAssistantMessage["message"]["content"];
-
-	return {
-		id: messageId,
-		type: "message",
-		role: "assistant",
-		content: contentBlocks,
-		model: "cursor-agent",
-		stop_reason: null,
-		stop_sequence: null,
-		stop_details: null,
-		usage: {
-			input_tokens: 0,
-			output_tokens: 0,
-			cache_creation_input_tokens: 0,
-			cache_read_input_tokens: 0,
-			cache_creation: null,
-		} as SDKAssistantMessage["message"]["usage"],
-		container: null,
-		context_management: null,
-		diagnostics: null,
-	};
+): AgentAssistantContentBlock[] {
+	return [{ type: "text", text: content }];
 }
 
-function createUserToolResultMessage(
+function createToolResultBlock(
 	toolUseId: string,
 	result: string,
 	isError: boolean,
-): SDKUserMessage["message"] {
-	const contentBlocks = [
-		{
-			type: "tool_result",
-			tool_use_id: toolUseId,
-			content: result,
-			is_error: isError,
-		},
-	] as unknown as SDKUserMessage["message"]["content"];
-
-	return { role: "user", content: contentBlocks };
+): AgentToolResultBlock {
+	return {
+		type: "tool_result",
+		toolUseId,
+		isError,
+		content: result,
+	};
 }
 
 interface CursorTokenTotals {
@@ -183,24 +132,17 @@ function toFiniteNumber(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-function createResultUsage(
-	totals?: CursorTokenTotals,
-): SDKResultMessage["usage"] {
+function createResultUsage(totals?: CursorTokenTotals): AgentUsage {
+	// Neutral usage — no Anthropic cache-bucket counterfeiting. Cursor reports a
+	// single cacheWrite/cacheRead counter which maps 1:1 onto the neutral fields.
+	// Cursor does not report a per-turn USD cost, so costUsd is 0.
 	return {
-		input_tokens: totals?.inputTokens ?? 0,
-		output_tokens: totals?.outputTokens ?? 0,
-		// Cursor's `turn-ended` delta exposes `cacheWriteTokens` as a single
-		// counter that maps onto Anthropic's `cache_creation_input_tokens`. The
-		// SDK does not split ephemeral 1h vs 5m — we report 0 for both buckets
-		// and put the full count in the parent field (which is what Cyrus
-		// formatters and Linear's cost display read first).
-		cache_creation_input_tokens: totals?.cacheWriteTokens ?? 0,
-		cache_read_input_tokens: totals?.cacheReadTokens ?? 0,
-		cache_creation: {
-			ephemeral_1h_input_tokens: 0,
-			ephemeral_5m_input_tokens: 0,
-		},
-	} as SDKResultMessage["usage"];
+		inputTokens: totals?.inputTokens ?? 0,
+		outputTokens: totals?.outputTokens ?? 0,
+		cacheReadTokens: totals?.cacheReadTokens ?? 0,
+		cacheWriteTokens: totals?.cacheWriteTokens ?? 0,
+		costUsd: 0,
+	};
 }
 
 /**
@@ -402,13 +344,16 @@ export declare interface CursorRunner {
 export class CursorRunner extends EventEmitter implements IAgentRunner {
 	readonly supportsStreamingInput = false;
 
+	/** Provider dispatch tag (see IAgentRunner.provider). */
+	readonly provider = "cursor" as const;
+
 	private config: CursorRunnerConfig;
 	private sessionInfo: CursorSessionInfo | null = null;
-	private messages: SDKMessage[] = [];
+	private messages: AgentMessage[] = [];
 	private formatter: IMessageFormatter;
 	private agent: SDKAgent | null = null;
 	private currentRun: Run | null = null;
-	private pendingResultMessage: SDKResultMessage | null = null;
+	private pendingResultMessage: AgentResultMessage | null = null;
 	private hasInitMessage = false;
 	private lastAssistantText: string | null = null;
 	private assistantTextBuffer = "";
@@ -612,7 +557,7 @@ export class CursorRunner extends EventEmitter implements IAgentRunner {
 		return this.sessionInfo?.isRunning ?? false;
 	}
 
-	getMessages(): SDKMessage[] {
+	getMessages(): AgentMessage[] {
 		return [...this.messages];
 	}
 
@@ -719,14 +664,11 @@ export class CursorRunner extends EventEmitter implements IAgentRunner {
 			.trim();
 		if (!text) return;
 
-		const message: SDKUserMessage = {
+		const message: AgentUserMessage = {
 			type: "user",
-			message: {
-				role: "user",
-				content: [{ type: "text", text }],
-			},
-			parent_tool_use_id: null,
-			session_id: this.sessionInfo?.sessionId || "pending",
+			sessionId: this.sessionInfo?.sessionId || "pending",
+			parentToolUseId: null,
+			content: [{ type: "text", text }],
 		};
 		this.pushMessage(message);
 	}
@@ -742,9 +684,21 @@ export class CursorRunner extends EventEmitter implements IAgentRunner {
 		this.emitToolResult(projection);
 	}
 
-	private handleThinkingEvent(_event: CursorSDKThinkingMessage): void {
-		// cyrus-core's SDKAssistantMessage content blocks don't yet include
-		// "thinking"; intentionally drop these to avoid invalid shapes.
+	private handleThinkingEvent(event: CursorSDKThinkingMessage): void {
+		this.emitInitMessage();
+		const thinking = typeof event.text === "string" ? event.text : "";
+		if (!thinking.trim()) return;
+		// The neutral AgentAssistantMessage carries a first-class thinking block,
+		// so Cursor reasoning is no longer dropped (previously a documented
+		// data-loss hole because the old Claude-shaped content blocks had no
+		// "thinking" variant).
+		const message: AgentAssistantMessage = {
+			type: "assistant",
+			sessionId: this.sessionInfo?.sessionId || "pending",
+			parentToolUseId: null,
+			content: [{ type: "thinking", thinking }],
+		};
+		this.pushMessage(message);
 	}
 
 	private handleStatusEvent(event: CursorSDKStatusMessage): void {
@@ -969,41 +923,41 @@ export class CursorRunner extends EventEmitter implements IAgentRunner {
 	private emitToolUse(projection: ToolProjection): void {
 		if (this.emittedToolUseIds.has(projection.toolUseId)) return;
 		this.emittedToolUseIds.add(projection.toolUseId);
-		const message: SDKAssistantMessage = {
+		const message: AgentAssistantMessage = {
 			type: "assistant",
-			message: createAssistantToolUseMessage(
+			sessionId: this.sessionInfo?.sessionId || "pending",
+			parentToolUseId: null,
+			content: createAssistantToolUseBlocks(
 				projection.toolUseId,
 				projection.toolName,
 				projection.toolInput,
 			),
-			parent_tool_use_id: null,
-			uuid: crypto.randomUUID(),
-			session_id: this.sessionInfo?.sessionId || "pending",
 		};
 		this.pushMessage(message);
 	}
 
 	private emitToolResult(projection: ToolProjection): void {
-		const message: SDKUserMessage = {
+		const message: AgentUserMessage = {
 			type: "user",
-			message: createUserToolResultMessage(
-				projection.toolUseId,
-				projection.result || "Tool completed",
-				projection.isError,
-			),
-			parent_tool_use_id: projection.toolUseId,
-			session_id: this.sessionInfo?.sessionId || "pending",
+			sessionId: this.sessionInfo?.sessionId || "pending",
+			parentToolUseId: projection.toolUseId,
+			content: [
+				createToolResultBlock(
+					projection.toolUseId,
+					projection.result || "Tool completed",
+					projection.isError,
+				),
+			],
 		};
 		this.pushMessage(message);
 	}
 
 	private pushAssistantText(text: string): void {
-		const message: SDKAssistantMessage = {
+		const message: AgentAssistantMessage = {
 			type: "assistant",
-			message: createAssistantTextMessage(text),
-			parent_tool_use_id: null,
-			uuid: crypto.randomUUID(),
-			session_id: this.sessionInfo?.sessionId || "pending",
+			sessionId: this.sessionInfo?.sessionId || "pending",
+			parentToolUseId: null,
+			content: createAssistantTextBlocks(text),
 		};
 		this.pushMessage(message);
 	}
@@ -1020,68 +974,45 @@ export class CursorRunner extends EventEmitter implements IAgentRunner {
 		if (this.hasInitMessage) return;
 		this.hasInitMessage = true;
 		const sessionId = this.sessionInfo?.sessionId || crypto.randomUUID();
-		const initMessage: SDKSystemInitMessage = {
+		const initMessage: AgentSystemInitMessage = {
 			type: "system",
 			subtype: "init",
-			cwd: this.config.workingDirectory || cwd(),
-			session_id: sessionId,
-			tools: this.config.allowedTools || [],
-			mcp_servers: [],
+			sessionId,
 			model: this.config.model || "gpt-5",
+			tools: this.config.allowedTools || [],
 			permissionMode: "default",
 			apiKeySource: this.config.cursorApiKey ? "user" : "project",
-			claude_code_version: "cursor-agent",
-			slash_commands: [],
-			output_style: "default",
-			skills: [],
-			plugins: [],
-			uuid: crypto.randomUUID(),
-			agents: undefined,
 		};
 		this.pushMessage(initMessage);
 	}
 
-	private createSuccessResultMessage(result: string): SDKResultMessage {
+	private createSuccessResultMessage(result: string): AgentResultMessage {
 		const durationMs = Math.max(Date.now() - this.startTimestampMs, 0);
 		return {
 			type: "result",
 			subtype: "success",
-			duration_ms: durationMs,
-			duration_api_ms: 0,
-			is_error: false,
-			num_turns: 1,
+			sessionId: this.sessionInfo?.sessionId || "pending",
 			result,
-			stop_reason: null,
-			total_cost_usd: 0,
+			isError: false,
+			durationMs,
 			usage: createResultUsage(this.tokenTotals),
-			modelUsage: {},
-			permission_denials: [],
-			uuid: crypto.randomUUID(),
-			session_id: this.sessionInfo?.sessionId || "pending",
 		};
 	}
 
-	private createErrorResultMessage(errorMessage: string): SDKResultMessage {
+	private createErrorResultMessage(errorMessage: string): AgentResultMessage {
 		const durationMs = Math.max(Date.now() - this.startTimestampMs, 0);
 		return {
 			type: "result",
-			subtype: "error_during_execution",
-			duration_ms: durationMs,
-			duration_api_ms: 0,
-			is_error: true,
-			num_turns: 1,
+			subtype: "error",
+			sessionId: this.sessionInfo?.sessionId || "pending",
 			errors: [errorMessage],
-			stop_reason: null,
-			total_cost_usd: 0,
+			isError: true,
+			durationMs,
 			usage: createResultUsage(this.tokenTotals),
-			modelUsage: {},
-			permission_denials: [],
-			uuid: crypto.randomUUID(),
-			session_id: this.sessionInfo?.sessionId || "pending",
 		};
 	}
 
-	private pushMessage(message: SDKMessage): void {
+	private pushMessage(message: AgentMessage): void {
 		this.messages.push(message);
 		this.emit("message", message);
 	}
@@ -1111,7 +1042,7 @@ export class CursorRunner extends EventEmitter implements IAgentRunner {
 		this.sessionInfo.isRunning = false;
 		this.uninstallPermissionsArtifacts();
 
-		let resultMessage: SDKResultMessage;
+		let resultMessage: AgentResultMessage;
 		if (this.pendingResultMessage) {
 			resultMessage = this.pendingResultMessage;
 		} else if (error || this.errorMessages.length > 0) {

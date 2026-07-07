@@ -1,22 +1,32 @@
 import { execSync } from "node:child_process";
 import type {
+	ClaudeRunnerConfig,
 	HookCallbackMatcher,
 	HookEvent,
 	McpServerConfig,
 	PostToolUseHookInput,
 	SandboxSettings,
-	SDKMessage,
 	SdkPluginConfig,
 	StopHookInput,
 } from "cyrus-claude-runner";
 import type {
-	AgentRunnerConfig,
+	AgentMessage,
 	CyrusAgentSession,
 	ILogger,
 	OnAskUserQuestion,
 	RepositoryConfig,
 	RunnerType,
 } from "cyrus-core";
+import type { CursorRunnerConfig } from "cyrus-cursor-runner";
+
+/**
+ * The concrete runner config the builder produces — a Claude or Cursor config.
+ * Both extend the neutral `AgentRunnerConfig` base; this union preserves the
+ * provider-specific extras without an untyped `& Record<string, unknown>`
+ * escape hatch.
+ */
+export type RunnerConfig = ClaudeRunnerConfig | CursorRunnerConfig;
+
 import { buildIntentToAddHook } from "./hooks/IntentToAddHook.js";
 import { buildPrMarkerHook } from "./hooks/PrMarkerHook.js";
 import { appendBrowserUseAddendum } from "./prompts/browserUsePromptAddendum.js";
@@ -82,7 +92,7 @@ export interface IssueRunnerConfigInput {
 	linearWorkspaceId?: string;
 	cyrusHome: string;
 	logger: ILogger;
-	onMessage: (message: SDKMessage) => void | Promise<void>;
+	onMessage: (message: AgentMessage) => void | Promise<void>;
 	onError: (error: Error) => void;
 	/** Factory to create AskUserQuestion callback (Claude runner only) */
 	createAskUserQuestionCallback?: (
@@ -154,7 +164,7 @@ export class RunnerConfigBuilder {
 	 * Issue sessions get full tool sets, model overrides, and hooks.
 	 */
 	buildIssueConfig(input: IssueRunnerConfigInput): {
-		config: AgentRunnerConfig;
+		config: RunnerConfig;
 		runnerType: RunnerType;
 	} {
 		const log = input.logger;
@@ -246,7 +256,10 @@ export class RunnerConfigBuilder {
 			input.session.workspace.repoPaths ?? {},
 		).filter((p): p is string => typeof p === "string" && p !== cwd);
 
-		const config: AgentRunnerConfig & Record<string, unknown> = {
+		// Typed superset: a Claude config plus the optional Cursor-only fields.
+		// The cursor-branch assignments below type-check against the
+		// Partial<CursorRunnerConfig> half; no untyped escape hatch needed.
+		const config: ClaudeRunnerConfig & Partial<CursorRunnerConfig> = {
 			workingDirectory: cwd,
 			allowedTools: input.allowedTools,
 			disallowedTools: input.disallowedTools,
@@ -342,8 +355,10 @@ export class RunnerConfigBuilder {
 	 */
 	private buildSandboxConfig(
 		input: IssueRunnerConfigInput,
-	): Record<string, unknown> {
-		const result: Record<string, unknown> = {};
+	): Partial<Pick<ClaudeRunnerConfig, "sandbox" | "additionalEnv">> {
+		const result: Partial<
+			Pick<ClaudeRunnerConfig, "sandbox" | "additionalEnv">
+		> = {};
 
 		if (input.sandboxSettings) {
 			result.sandbox = {
