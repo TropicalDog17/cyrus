@@ -14,7 +14,6 @@ import type {
 	AgentRunnerConfig,
 	AgentSessionCreatedWebhook,
 	AgentSessionPromptedWebhook,
-	ContentUpdateMessage,
 	CyrusAgentSession,
 	EdgeWorkerConfig,
 	IAgentRunner,
@@ -29,10 +28,6 @@ import type {
 	RepositoryConfig,
 	RunnerType,
 	SerializableEdgeWorkerState,
-	SessionStartMessage,
-	StopSignalMessage,
-	UnassignMessage,
-	UserPromptMessage,
 	Webhook,
 	WebhookIssue,
 } from "cyrus-core";
@@ -42,22 +37,6 @@ import {
 	compute,
 	createLogger,
 	DEFAULT_PROXY_URL,
-	isAgentSessionCreatedWebhook,
-	isAgentSessionPromptedWebhook,
-	isContentUpdateMessage,
-	isIssueAssignedWebhook,
-	isIssueCommentMentionWebhook,
-	isIssueDeletedWebhook,
-	isIssueNewCommentWebhook,
-	isIssueStateChangeMessage,
-	isIssueStateChangeWebhook,
-	isIssueStateIdUpdateWebhook,
-	isIssueTitleOrDescriptionUpdateWebhook,
-	isIssueUnassignedWebhook,
-	isSessionStartMessage,
-	isStopSignalMessage,
-	isUnassignMessage,
-	isUserPromptMessage,
 	normalizeConfigPaths,
 	PersistenceManager,
 	requireLinearWorkspaceId,
@@ -142,6 +121,7 @@ import { ToolPermissionResolver } from "./ToolPermissionResolver.js";
 import type { AgentSessionData, EdgeWorkerEvents } from "./types.js";
 import { UserAccessControl } from "./UserAccessControl.js";
 import { WarmSessionPool } from "./WarmSessionPool.js";
+import { WebhookRouter, type WebhookRouterDeps } from "./WebhookRouter.js";
 
 export declare interface EdgeWorker {
 	on<K extends keyof EdgeWorkerEvents>(
@@ -188,6 +168,7 @@ export class EdgeWorker extends EventEmitter {
 	private configPath?: string; // Path to config.json file
 	/** @internal - Exposed for testing only */
 	public repositoryRouter: RepositoryRouter; // Repository routing and selection
+	private webhookRouter: WebhookRouter; // Webhook/message dispatch + branch selection
 	private gitService: GitService;
 	private activeWebhookCount = 0; // Track number of webhooks currently being processed
 	/** Handler for AskUserQuestion tool invocations via Linear select signal */
@@ -334,6 +315,76 @@ export class EdgeWorker extends EventEmitter {
 				return this.getIssueTrackerForWorkspace(linearWorkspaceId) ?? null;
 			},
 		});
+
+		// Initialize the webhook/message router. Every dep is a late-bound arrow
+		// closure over `this` — CRITICAL: they bind to the heavy-body EdgeWorker
+		// methods (initializeAgentRunner via startAgentSession, handleStopSignal,
+		// handleGitHubWebhook, ...), NEVER to the thin delegator methods
+		// (handleWebhook / handleAgentSessionCreatedWebhook /
+		// handleUserPromptedAgentActivity), which would recurse forever.
+		// Late binding also lets tests reassign a handler on the instance and have
+		// the router pick it up (see EdgeWorker.status-endpoint.test.ts).
+		const webhookRouterDeps: WebhookRouterDeps = {
+			repositoryRouter: this.repositoryRouter,
+			askUserQuestionHandler: this.askUserQuestionHandler,
+			isParked: (issueId) => this.parkedRegistry.isParked(issueId),
+			getCachedRepositories: (issueId) => this.getCachedRepositories(issueId),
+			getRepositoryForSession: (agentSessionId) => {
+				const session = this.agentSessionManager.getSession(agentSessionId);
+				if (!session) return null;
+				const repoId = this.sessionRepositories.get(agentSessionId);
+				if (!repoId) return null;
+				return this.repositories.get(repoId) ?? null;
+			},
+			cacheIssueRepositories: (issueId, repoIds) => {
+				this.repositoryRouter.getIssueRepositoryCache().set(issueId, repoIds);
+			},
+			allRepositories: () => Array.from(this.repositories.values()),
+			postSessionLostResponse: async (agentSessionId) => {
+				await this.agentSessionManager.createResponseActivity(
+					agentSessionId,
+					"I couldn't process your message because the session configuration was lost. Please create a new session by mentioning me (@cyrus) in a new comment with your prompt.",
+				);
+			},
+			checkUserAccess: (webhook, repo) => this.checkUserAccess(webhook, repo),
+			handleBlockedUser: (webhook, repo, reason) =>
+				this.handleBlockedUser(webhook, repo, reason),
+			checkBlockedByDependencies: (agentSession, linearWorkspaceId) =>
+				this.checkBlockedByDependencies(agentSession, linearWorkspaceId),
+			parkSession: (
+				webhook,
+				repositories,
+				blockingIssueIds,
+				blockingIdentifiers,
+				opts,
+			) =>
+				this.parkAgentSession(
+					webhook,
+					repositories,
+					blockingIssueIds,
+					blockingIdentifiers,
+					opts,
+				),
+			startSession: (webhook, repositories, opts) =>
+				this.startAgentSession(webhook, repositories, opts),
+			continuePromptedActivity: (webhook, repositories) =>
+				this.handleNormalPromptedActivity(webhook, repositories),
+			stopSession: (webhook) => this.handleStopSignal(webhook),
+			handleParkedReprompt: (webhook, issueId) =>
+				this.handleParkedSessionReprompt(webhook, issueId),
+			handleRepositorySelection: (webhook) =>
+				this.handleRepositorySelectionResponse(webhook),
+			handleAskUserQuestion: (webhook) =>
+				this.handleAskUserQuestionResponse(webhook),
+			handleUnassigned: (webhook) => this.handleIssueUnassignedWebhook(webhook),
+			handleContentUpdate: (webhook) => this.handleIssueContentUpdate(webhook),
+			handleStateChange: (webhook) => this.handleIssueStateChange(webhook),
+			handleGitHubComment: (event) => this.handleGitHubWebhook(event),
+			handleGitHubPush: (payload) => this.handleGitHubPushWebhook(payload),
+			handleIssueTerminal: (message) =>
+				this.handleIssueStateChangeMessage(message),
+		};
+		this.webhookRouter = new WebhookRouter(webhookRouterDeps, this.logger);
 
 		// Initialize webhook IP validator
 		// Enabled by default in self-hosted mode (CYRUS_HOST_EXTERNAL=true),
@@ -935,28 +986,18 @@ export class EdgeWorker extends EventEmitter {
 					: undefined,
 		});
 
-		// Listen for legacy GitHub webhook events (deprecated, kept for backward compatibility)
+		// Listen for legacy GitHub webhook events (deprecated, kept for backward compatibility).
+		// The WebhookRouter performs the push-vs-comment fan-out; the comment handler
+		// (handleGitHubWebhook) owns its own activeWebhookCount shell. Kept
+		// fire-and-forget (.catch, not awaited) so a slow handler never blocks the
+		// transport.
 		this.gitHubEventTransport.on("event", (event: GitHubWebhookEvent) => {
-			// Route push events to the base branch notification handler
-			if (event.eventType === "push") {
-				this.handleGitHubPushWebhook(event.payload as GitHubPushPayload).catch(
-					(error) => {
-						this.logger.error(
-							"Failed to handle GitHub push webhook",
-							error instanceof Error ? error : new Error(String(error)),
-						);
-					},
+			this.webhookRouter.dispatchGitHubEvent(event).catch((error) => {
+				this.logger.error(
+					"Failed to handle GitHub webhook",
+					error instanceof Error ? error : new Error(String(error)),
 				);
-				return;
-			}
-			this.handleGitHubWebhook(event as GitHubCommentWebhookEvent).catch(
-				(error) => {
-					this.logger.error(
-						"Failed to handle GitHub webhook",
-						error instanceof Error ? error : new Error(String(error)),
-					);
-				},
-			);
+			});
 		});
 
 		// Listen for unified internal messages (new message bus)
@@ -2378,42 +2419,10 @@ ${taskSection}`;
 		}
 
 		try {
-			// Route to specific webhook handlers based on webhook type
-			// NOTE: Traditional webhooks (assigned, comment) are disabled in favor of agent session events
-			if (isIssueAssignedWebhook(webhook)) {
-				return;
-			} else if (isIssueCommentMentionWebhook(webhook)) {
-				return;
-			} else if (isIssueNewCommentWebhook(webhook)) {
-				return;
-			} else if (isIssueUnassignedWebhook(webhook)) {
-				// Keep unassigned webhook active
-				await this.handleIssueUnassignedWebhook(webhook);
-			} else if (isAgentSessionCreatedWebhook(webhook)) {
-				await this.handleAgentSessionCreatedWebhook(webhook, repos);
-			} else if (isAgentSessionPromptedWebhook(webhook)) {
-				await this.handleUserPromptedAgentActivity(webhook);
-			} else if (isIssueStateChangeWebhook(webhook)) {
-				// Intentional early return: state changes are handled exclusively via the message bus
-				// (handleIssueStateChangeMessage), not the legacy webhook path. This differs from
-				// unassign which still uses the legacy handler — state change was built message-bus-first.
-				return;
-			} else if (isIssueDeletedWebhook(webhook)) {
-				// Issue deletion also handled via message bus — same cleanup as terminal state.
-				return;
-			} else if (isIssueTitleOrDescriptionUpdateWebhook(webhook)) {
-				// Handle issue title/description/attachments updates - feed changes into active session
-				await this.handleIssueContentUpdate(webhook);
-			} else if (isIssueStateIdUpdateWebhook(webhook)) {
-				// Handle issue state changes — wake up parked sessions when blocking issues complete
-				await this.handleIssueStateChange(webhook);
-			} else {
-				if (process.env.CYRUS_WEBHOOK_DEBUG === "true") {
-					this.logger.debug(
-						`Unhandled webhook type: ${(webhook as any).action}`,
-					);
-				}
-			}
+			// Route to specific webhook handlers via the WebhookRouter, which owns
+			// the type -> handler dispatch table. The counter + try/catch shell
+			// stays here so status-endpoint tests observe net-zero activeWebhookCount.
+			await this.webhookRouter.dispatch(webhook, repos);
 		} catch (error) {
 			this.logger.error(
 				`Failed to process webhook: ${(webhook as any).action}`,
@@ -2456,29 +2465,11 @@ ${taskSection}`;
 		}
 
 		try {
-			// Route to specific message handlers based on action type
-			if (isSessionStartMessage(message)) {
-				await this.handleSessionStartMessage(message);
-			} else if (isUserPromptMessage(message)) {
-				await this.handleUserPromptMessage(message);
-			} else if (isStopSignalMessage(message)) {
-				await this.handleStopSignalMessage(message);
-			} else if (isContentUpdateMessage(message)) {
-				await this.handleContentUpdateMessage(message);
-			} else if (isUnassignMessage(message)) {
-				await this.handleUnassignMessage(message);
-			} else if (isIssueStateChangeMessage(message)) {
-				await this.handleIssueStateChangeMessage(message);
-			} else {
-				// This branch should never be reached due to exhaustive type checking
-				// If it is reached, log the unexpected message for debugging
-				if (process.env.CYRUS_WEBHOOK_DEBUG === "true") {
-					const unexpectedMessage = message as InternalMessage;
-					this.logger.debug(
-						`Unhandled message action: ${unexpectedMessage.action}`,
-					);
-				}
-			}
+			// Route via the WebhookRouter's message-bus table. IssueStateChangeMessage
+			// is the only type with real behavior; the others are near-no-op debug
+			// traces that run in parallel with legacy webhook handlers (see
+			// WebhookRouter.dispatchMessage).
+			await this.webhookRouter.dispatchMessage(message);
 		} catch (error) {
 			this.logger.error(
 				`Failed to process message: ${message.source}/${message.action}`,
@@ -2486,89 +2477,6 @@ ${taskSection}`;
 			);
 			// Don't re-throw message processing errors to prevent application crashes
 		}
-	}
-
-	/**
-	 * Handle session start message (unified handler for session creation).
-	 *
-	 * This is a placeholder that logs the message for now.
-	 * TODO: Migrate logic from handleAgentSessionCreatedWebhook and handleGitHubWebhook.
-	 */
-	private async handleSessionStartMessage(
-		message: SessionStartMessage,
-	): Promise<void> {
-		this.logger.debug(
-			`[MessageBus] Session start: ${message.workItemIdentifier} from ${message.source}`,
-		);
-		// TODO: Implement unified session start handling
-		// For now, the legacy handlers (handleAgentSessionCreatedWebhook, handleGitHubWebhook)
-		// continue to process the actual session creation via the 'event' emitter.
-	}
-
-	/**
-	 * Handle user prompt message (unified handler for mid-session prompts).
-	 *
-	 * This is a placeholder that logs the message for now.
-	 * TODO: Migrate logic from handleUserPromptedAgentActivity (branch 3).
-	 */
-	private async handleUserPromptMessage(
-		message: UserPromptMessage,
-	): Promise<void> {
-		this.logger.debug(
-			`[MessageBus] User prompt: ${message.workItemIdentifier} from ${message.source}`,
-		);
-		// TODO: Implement unified user prompt handling
-		// For now, the legacy handler (handleUserPromptedAgentActivity)
-		// continues to process the actual prompt via the 'event' emitter.
-	}
-
-	/**
-	 * Handle stop signal message (unified handler for session termination).
-	 *
-	 * This is a placeholder that logs the message for now.
-	 * TODO: Migrate logic from handleUserPromptedAgentActivity (branch 1).
-	 */
-	private async handleStopSignalMessage(
-		message: StopSignalMessage,
-	): Promise<void> {
-		this.logger.debug(
-			`[MessageBus] Stop signal: ${message.workItemIdentifier} from ${message.source}`,
-		);
-		// TODO: Implement unified stop signal handling
-		// For now, the legacy handler (handleUserPromptedAgentActivity)
-		// continues to process the actual stop via the 'event' emitter.
-	}
-
-	/**
-	 * Handle content update message (unified handler for issue/PR content changes).
-	 *
-	 * This is a placeholder that logs the message for now.
-	 * TODO: Migrate logic from handleIssueContentUpdate.
-	 */
-	private async handleContentUpdateMessage(
-		message: ContentUpdateMessage,
-	): Promise<void> {
-		this.logger.debug(
-			`[MessageBus] Content update: ${message.workItemIdentifier} from ${message.source}`,
-		);
-		// TODO: Implement unified content update handling
-		// For now, the legacy handler (handleIssueContentUpdate)
-		// continues to process the actual update via the 'event' emitter.
-	}
-
-	/**
-	 * Handle unassign message (unified handler for task unassignment).
-	 *
-	 * This is a placeholder that logs the message for now.
-	 * TODO: Migrate logic from handleIssueUnassignedWebhook.
-	 */
-	private async handleUnassignMessage(message: UnassignMessage): Promise<void> {
-		this.logger.debug(
-			`[MessageBus] Unassign: ${message.workItemIdentifier} from ${message.source}`,
-		);
-		// TODO: Implement unified unassign handling
-		// For now, the legacy handler (handleIssueUnassignedWebhook)
-		// continues to process the actual unassignment via the 'event' emitter.
 	}
 
 	/**
@@ -3468,141 +3376,31 @@ ${taskSection}`;
 	 * @param webhook The agent session created webhook
 	 * @param repos All available repositories for routing
 	 */
-	private async handleAgentSessionCreatedWebhook(
+	/** @internal - retained as a test-callable delegator; not used internally. */
+	async handleAgentSessionCreatedWebhook(
 		webhook: AgentSessionCreatedWebhook,
 		repos: RepositoryConfig[],
 	): Promise<void> {
-		const issueId = webhook.agentSession?.issue?.id;
+		// Thin delegator: the cache/route/needs_selection/selected branching and
+		// the access/blocked-by/park decision now live in WebhookRouter.
+		// Retained (same signature) so tests that call this via (worker as any)
+		// keep working. The router's parkSession/startSession deps bind to the
+		// heavy bodies below (parkAgentSession / startAgentSession), NOT to this
+		// delegator — see the WebhookRouterDeps wiring in the constructor.
+		return this.webhookRouter.routeCreatedWebhook(webhook, repos);
+	}
 
-		// Check the cache first, as the agentSessionCreated webhook may have been triggered by an @mention
-		// on an issue that already has an agentSession and an associated repository.
-		let repositories: RepositoryConfig[] | null = null;
-		let baseBranchOverrides: Map<string, string> | undefined;
-		let routingMethod: string | undefined;
-		if (issueId) {
-			const cachedRepos = this.getCachedRepositories(issueId);
-			if (cachedRepos && cachedRepos.length > 0) {
-				repositories = cachedRepos;
-				this.logger.debug(
-					`Using cached repositories [${cachedRepos.map((r) => r.name).join(", ")}] for issue ${issueId}`,
-				);
-			}
-		}
-
-		// If not cached, perform routing logic
-		if (!repositories) {
-			const routingResult =
-				await this.repositoryRouter.determineRepositoryForWebhook(
-					webhook,
-					repos,
-				);
-
-			if (routingResult.type === "none") {
-				if (process.env.CYRUS_WEBHOOK_DEBUG === "true") {
-					this.logger.info(
-						`No repository configured for webhook from workspace ${webhook.organizationId}`,
-					);
-				}
-				return;
-			}
-
-			// Handle needs_selection case
-			if (routingResult.type === "needs_selection") {
-				await this.repositoryRouter.elicitUserRepositorySelection(
-					webhook,
-					routingResult.workspaceRepos,
-				);
-				// Selection in progress - will be handled by handleRepositorySelectionResponse
-				return;
-			}
-
-			// At this point, routingResult.type === "selected"
-			repositories = routingResult.repositories;
-			baseBranchOverrides = routingResult.baseBranchOverrides;
-			if (baseBranchOverrides && baseBranchOverrides.size > 0) {
-				this.logger.info(
-					`baseBranchOverrides received from routing: ${Array.from(
-						baseBranchOverrides.entries(),
-					)
-						.map(([id, branch]) => `${id}→${branch}`)
-						.join(", ")}`,
-				);
-			} else {
-				this.logger.info(`No baseBranchOverrides from routing result`);
-			}
-			routingMethod = routingResult.routingMethod;
-
-			// Cache all matched repositories for this issue as string[]
-			if (issueId) {
-				this.repositoryRouter.getIssueRepositoryCache().set(
-					issueId,
-					repositories.map((r) => r.id),
-				);
-			}
-		}
-
-		if (!webhook.agentSession.issue) {
-			this.logger.warn("Agent session created webhook missing issue");
-			return;
-		}
-
-		// User access control check (use primary repo)
-		const primaryRepo = repositories[0]!;
-		const accessResult = this.checkUserAccess(webhook, primaryRepo);
-		if (!accessResult.allowed) {
-			this.logger.info(
-				`User ${accessResult.userName} blocked from delegating: ${accessResult.reason}`,
-			);
-			await this.handleBlockedUser(webhook, primaryRepo, accessResult.reason);
-			return;
-		}
-
-		// Use organizationId from webhook as the Linear-native workspace ID source
-		const linearWorkspaceId = webhook.organizationId;
-
-		const log = this.logger.withContext({
-			sessionId: webhook.agentSession.id,
-			platform: this.getRepositoryPlatform(linearWorkspaceId),
-			issueIdentifier: webhook.agentSession.issue.identifier,
-		});
-		log.info(`Handling agent session created`);
+	/**
+	 * Start a new agent session (heavy body). Bound as WebhookRouterDeps.startSession.
+	 */
+	private async startAgentSession(
+		webhook: AgentSessionCreatedWebhook,
+		repositories: RepositoryConfig[],
+		opts: { baseBranchOverrides?: Map<string, string>; routingMethod?: string },
+	): Promise<void> {
 		const { agentSession, guidance } = webhook;
 		const commentBody = agentSession.comment?.body;
-
-		// Check for blocked-by dependencies before starting work
-		const blockResult = await this.checkBlockedByDependencies(
-			agentSession,
-			linearWorkspaceId,
-		);
-		if (blockResult.blocked) {
-			// Park the session — don't create worktree or runner
-			const parkedIssueId = agentSession.issue!.id;
-			this.parkedRegistry.park(parkedIssueId, {
-				agentSession,
-				repositories,
-				linearWorkspaceId,
-				guidance,
-				commentBody,
-				baseBranchOverrides,
-				routingMethod,
-				blockingIssueIds: blockResult.blockingIssueIds,
-			});
-
-			// Post acknowledgment to the Linear agent session
-			const blockerList = blockResult.blockingIdentifiers
-				.map((id) => `**${id}**`)
-				.join(", ");
-			await this.postThought(
-				agentSession.id,
-				linearWorkspaceId,
-				`Blocked by ${blockerList} — will start automatically when ${blockResult.blockingIdentifiers.length === 1 ? "it is" : "they are"} resolved.`,
-			);
-
-			log.info(
-				`Session parked: issue ${agentSession.issue!.identifier} is blocked by ${blockResult.blockingIdentifiers.join(", ")}`,
-			);
-			return;
-		}
+		const linearWorkspaceId = webhook.organizationId;
 
 		// Initialize agent runner using shared logic (pass full repositories array)
 		await this.sessionOrchestrator.startSession({
@@ -3611,9 +3409,49 @@ ${taskSection}`;
 			linearWorkspaceId,
 			guidance,
 			commentBody,
-			baseBranchOverrides,
-			routingMethod,
+			baseBranchOverrides: opts.baseBranchOverrides,
+			routingMethod: opts.routingMethod,
 		});
+	}
+
+	/**
+	 * Park an agent session behind blocked-by dependencies (heavy body).
+	 * Bound as WebhookRouterDeps.parkSession — creates no worktree or runner.
+	 */
+	private async parkAgentSession(
+		webhook: AgentSessionCreatedWebhook,
+		repositories: RepositoryConfig[],
+		blockingIssueIds: string[],
+		blockingIdentifiers: string[],
+		opts: { baseBranchOverrides?: Map<string, string>; routingMethod?: string },
+	): Promise<void> {
+		const { agentSession, guidance } = webhook;
+		const commentBody = agentSession.comment?.body;
+		const linearWorkspaceId = webhook.organizationId;
+		const parkedIssueId = agentSession.issue!.id;
+
+		this.parkedRegistry.park(parkedIssueId, {
+			agentSession,
+			repositories,
+			linearWorkspaceId,
+			guidance,
+			commentBody,
+			baseBranchOverrides: opts.baseBranchOverrides,
+			routingMethod: opts.routingMethod,
+			blockingIssueIds,
+		});
+
+		// Post acknowledgment to the Linear agent session
+		const blockerList = blockingIdentifiers.map((id) => `**${id}**`).join(", ");
+		await this.postThought(
+			agentSession.id,
+			linearWorkspaceId,
+			`Blocked by ${blockerList} — will start automatically when ${blockingIdentifiers.length === 1 ? "it is" : "they are"} resolved.`,
+		);
+
+		this.logger.info(
+			`Session parked: issue ${agentSession.issue!.identifier} is blocked by ${blockingIdentifiers.join(", ")}`,
+		);
 	}
 
 	/**
@@ -4035,145 +3873,20 @@ ${taskSection}`;
 	 *
 	 * @param webhook The prompted webhook containing user's message
 	 */
-	private async handleUserPromptedAgentActivity(
+	/** @internal - retained as a test-callable delegator; not used internally. */
+	async handleUserPromptedAgentActivity(
 		webhook: AgentSessionPromptedWebhook,
 	): Promise<void> {
-		const agentSessionId = webhook.agentSession.id;
-		const activityBody = webhook.agentActivity?.content?.body || "";
-		const signal = (webhook.agentActivity as any)?.signal;
-		const isTextStopRequest = /^\s*stop(\s+session|\s+working)?[\s.!?]*$/i.test(
-			activityBody,
-		);
-
-		// Branch 1: Handle stop signal (checked FIRST, before any routing work)
-		// Per CLAUDE.md: "an agentSession MUST already exist" for stop signals
-		// IMPORTANT: Stop signals do NOT require repository lookup
-		if (signal === "stop" || isTextStopRequest) {
-			await this.handleStopSignal(webhook);
-			return;
-		}
-
-		// Branch 1.5: Handle re-prompt for parked (blocked-by) sessions
-		// When a user re-prompts and the session is parked, re-check blocking status.
-		// If blockers are resolved, wake the session immediately.
-		const issueIdForParkedCheck = webhook.agentSession?.issue?.id;
-		if (
-			issueIdForParkedCheck &&
-			this.parkedRegistry.isParked(issueIdForParkedCheck)
-		) {
-			await this.handleParkedSessionReprompt(webhook, issueIdForParkedCheck);
-			return;
-		}
-
-		// Branch 2: Handle repository selection response
-		// This is the first Claude runner initialization after user selects a repository.
-		// The selection handler extracts the choice from the response (or uses fallback)
-		// and caches the repository for future use.
-		if (this.repositoryRouter.hasPendingSelection(agentSessionId)) {
-			await this.handleRepositorySelectionResponse(webhook);
-			return;
-		}
-
-		// Branch 2.5: Handle AskUserQuestion response
-		// This handles responses to questions posed via the AskUserQuestion tool.
-		// The response is passed to the pending promise resolver.
-		if (this.askUserQuestionHandler.hasPendingQuestion(agentSessionId)) {
-			await this.handleAskUserQuestionResponse(webhook);
-			return;
-		}
-
-		// Branch 3: Handle normal prompted activity (existing session continuation)
-		// Per CLAUDE.md: "an agentSession MUST exist and a repository MUST already
-		// be associated with the Linear issue. The repository will be retrieved from
-		// the issue-to-repository cache - no new routing logic is performed."
-		const issueId = webhook.agentSession?.issue?.id;
-		if (!issueId) {
-			this.logger.error(
-				`No issue ID found in prompted webhook ${agentSessionId}`,
-			);
-			return;
-		}
-
-		// Resolve ALL cached repositories for this issue (not just the first).
-		// Multi-repo sessions need the full set for workspace recreation.
-		let repositories = this.getCachedRepositories(issueId);
-		if (!repositories || repositories.length === 0) {
-			// Fallback: attempt to recover repository for legacy/restarted sessions
-			this.logger.info(
-				`No cached repository for prompted webhook ${agentSessionId}, attempting fallback resolution`,
-			);
-
-			// First, check if the session manager already has this session
-			const session = this.agentSessionManager.getSession(agentSessionId);
-			if (session) {
-				const repoId = this.sessionRepositories.get(agentSessionId);
-				if (repoId) {
-					const repo = this.repositories.get(repoId) ?? null;
-					if (repo) {
-						repositories = [repo];
-						this.repositoryRouter
-							.getIssueRepositoryCache()
-							.set(issueId, [repoId]);
-						this.logger.info(
-							`Recovered repository ${repoId} for issue ${issueId} from session manager`,
-						);
-					}
-				}
-			}
-
-			// Second fallback: re-route via repository router
-			if (!repositories || repositories.length === 0) {
-				try {
-					const repos = Array.from(this.repositories.values());
-					const routingResult =
-						await this.repositoryRouter.determineRepositoryForWebhook(
-							webhook,
-							repos,
-						);
-
-					if (routingResult.type === "selected") {
-						repositories = routingResult.repositories;
-						this.repositoryRouter.getIssueRepositoryCache().set(
-							issueId,
-							routingResult.repositories.map((r) => r.id),
-						);
-						this.logger.info(
-							`Recovered repositories [${repositories.map((r) => r.name).join(", ")}] for issue ${issueId} via fallback routing (${routingResult.routingMethod})`,
-						);
-					}
-				} catch (error) {
-					this.logger.warn(
-						`Fallback repository routing failed for prompted webhook ${agentSessionId}`,
-						error,
-					);
-				}
-			}
-
-			if (!repositories || repositories.length === 0) {
-				// All recovery attempts failed - post visible feedback
-				await this.agentSessionManager.createResponseActivity(
-					agentSessionId,
-					"I couldn't process your message because the session configuration was lost. Please create a new session by mentioning me (@cyrus) in a new comment with your prompt.",
-				);
-				this.logger.warn(
-					`Failed to recover repository for prompted webhook ${agentSessionId} - all fallback methods exhausted`,
-				);
-				return;
-			}
-		}
-
-		// User access control check for mid-session prompts (use primary repo)
-		const primaryRepo = repositories[0]!;
-		const accessResult = this.checkUserAccess(webhook, primaryRepo);
-		if (!accessResult.allowed) {
-			this.logger.info(
-				`User ${accessResult.userName} blocked from prompting: ${accessResult.reason}`,
-			);
-			await this.handleBlockedUser(webhook, primaryRepo, accessResult.reason);
-			return;
-		}
-
-		await this.handleNormalPromptedActivity(webhook, repositories);
+		// Thin delegator: the 5-way branch selection (stop / parked / pending
+		// selection / ask-question / normal) plus the Branch-3 repo-cache
+		// resolution + fallback ladder + access check now live in
+		// WebhookRouter.routePromptedActivity. Retained (same signature) so tests
+		// that call this via (worker as any) keep working. The router's terminal
+		// deps bind to the heavy bodies (handleStopSignal,
+		// handleParkedSessionReprompt, handleRepositorySelectionResponse,
+		// handleAskUserQuestionResponse, handleNormalPromptedActivity), NOT to
+		// this delegator — see the WebhookRouterDeps wiring in the constructor.
+		return this.webhookRouter.routePromptedActivity(webhook);
 	}
 
 	/**
@@ -5549,17 +5262,6 @@ ${taskSection}`;
 				? "I've queued up your message as guidance"
 				: "Getting started on that...",
 		);
-	}
-
-	/**
-	 * Get the platform type for a workspace's issue tracker.
-	 */
-	private getRepositoryPlatform(linearWorkspaceId: string): string | undefined {
-		try {
-			return this.issueTrackers.get(linearWorkspaceId)?.getPlatformType();
-		} catch {
-			return undefined;
-		}
 	}
 
 	/**
