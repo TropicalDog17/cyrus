@@ -28,7 +28,7 @@ import {
 	getDefaultWorktreesDir,
 	type RepositoryConfig,
 } from "cyrus-core";
-import { attachCyrusLoop, EdgeWorker } from "cyrus-edge-worker";
+import { EdgeWorker } from "cyrus-edge-worker";
 import { bold, cyan, dim, gray, green, success } from "./src/utils/colors.js";
 
 // ============================================================================
@@ -274,15 +274,6 @@ async function startServer(): Promise<void> {
 
 		// Initialize EdgeWorker
 		const edgeWorker = new EdgeWorker(config);
-
-		// Compounding loop (Lane C): wire the Verify → blind-gate → Learn loop. Dormant in a normal
-		// F1 drive (F1's in-memory repo has no GitHub remote, so no `prOpened` fires); a failure
-		// here must never block the server.
-		try {
-			attachCyrusLoop({ host: edgeWorker });
-		} catch (error) {
-			console.error(`⚠️  Failed to attach compounding loop: ${error}`);
-		}
 
 		// Setup graceful shutdown
 		const shutdown = async (signal: string): Promise<void> => {

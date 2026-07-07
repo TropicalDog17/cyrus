@@ -16,16 +16,6 @@ export type {
 	AskUserQuestionHandlerDeps,
 } from "./AskUserQuestionHandler.js";
 export { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
-export type {
-	CyrusLoopAdapterDeps,
-	CyrusLoopHost,
-	ParsedVerdict,
-} from "./CyrusLoopAdapter.js";
-export {
-	attachCyrusLoop,
-	CyrusLoopAdapter,
-	parseVerdictCommand,
-} from "./CyrusLoopAdapter.js";
 export { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 export { EdgeWorker } from "./EdgeWorker.js";
 export { EgressProxy } from "./EgressProxy.js";
@@ -53,13 +43,7 @@ export type {
 export { LinearActivitySink } from "./sinks/index.js";
 export type { PromptType } from "./ToolPermissionResolver.js";
 export { ToolPermissionResolver } from "./ToolPermissionResolver.js";
-export type {
-	EdgeWorkerEvents,
-	LoopVerdictInput,
-	PrOpenedEventPayload,
-	SessionCompleteEventPayload,
-	VerdictReachedEventPayload,
-} from "./types.js";
+export type { EdgeWorkerEvents } from "./types.js";
 // User access control
 export {
 	type AccessCheckResult,

@@ -11,7 +11,6 @@ import {
 	GitHubPrMarkerProvider,
 	GitLabMrMarkerProvider,
 	type PrMarkerProvider,
-	type PrMarkerResult,
 } from "../src/hooks/PrMarkerHook.js";
 
 const silentLogger: ILogger = {
@@ -177,67 +176,5 @@ describe("buildPrMarkerHook", () => {
 		).resolves.toBeUndefined();
 
 		expect(warn).toHaveBeenCalledWith(expect.stringContaining("boom"));
-	});
-});
-
-describe("buildPrMarkerHook onPrOpened", () => {
-	function providerReturning(result: PrMarkerResult | null): PrMarkerProvider {
-		return {
-			name: result?.provider ?? "stub",
-			matches: () => true,
-			ensureMarker: () => result,
-		};
-	}
-
-	it("fires onPrOpened once with the PR facts + cwd when a PR exists", async () => {
-		const onPrOpened = vi.fn();
-		const result: PrMarkerResult = {
-			provider: "github",
-			number: 42,
-			headBranch: "me/dev-7-fix",
-			headSha: "abc",
-			baseBranch: "main",
-			createdAt: "2026-07-05T10:00:00Z",
-			url: "https://example/pr/42",
-		};
-		const hook = buildPrMarkerHook(
-			silentLogger,
-			[providerReturning(result)],
-			onPrOpened,
-		);
-		await runHook(
-			hook.PostToolUse![0],
-			makeHookInput("gh pr create", "/work/repo"),
-		);
-		expect(onPrOpened).toHaveBeenCalledTimes(1);
-		expect(onPrOpened).toHaveBeenCalledWith({ ...result, cwd: "/work/repo" });
-	});
-
-	it("does not fire onPrOpened when the provider returns null (no PR yet)", async () => {
-		const onPrOpened = vi.fn();
-		const hook = buildPrMarkerHook(
-			silentLogger,
-			[providerReturning(null)],
-			onPrOpened,
-		);
-		await runHook(hook.PostToolUse![0], makeHookInput("gh pr create"));
-		expect(onPrOpened).not.toHaveBeenCalled();
-	});
-
-	it("swallows an onPrOpened callback error so the session is not interrupted", async () => {
-		const warn = vi.fn();
-		const log = { ...silentLogger, warn } as unknown as ILogger;
-		const result: PrMarkerResult = {
-			provider: "github",
-			number: 1,
-			headBranch: "b",
-		};
-		const hook = buildPrMarkerHook(log, [providerReturning(result)], () => {
-			throw new Error("emit boom");
-		});
-		await expect(
-			runHook(hook.PostToolUse![0], makeHookInput("gh pr create")),
-		).resolves.toBeUndefined();
-		expect(warn).toHaveBeenCalledWith(expect.stringContaining("emit boom"));
 	});
 });

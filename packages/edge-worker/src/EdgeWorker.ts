@@ -150,11 +150,7 @@ import {
 import type { IActivitySink } from "./sinks/IActivitySink.js";
 import { LinearActivitySink } from "./sinks/LinearActivitySink.js";
 import { ToolPermissionResolver } from "./ToolPermissionResolver.js";
-import type {
-	AgentSessionData,
-	EdgeWorkerEvents,
-	LoopVerdictInput,
-} from "./types.js";
+import type { AgentSessionData, EdgeWorkerEvents } from "./types.js";
 import { UserAccessControl } from "./UserAccessControl.js";
 
 export declare interface EdgeWorker {
@@ -187,10 +183,6 @@ export class EdgeWorker extends EventEmitter {
 	private lastStopTimeBySession: Map<string, number> = new Map(); // Maps session ID to timestamp of last stop signal (for double-stop detection)
 	private warmInstances: Map<string, WarmQuery> = new Map(); // Pre-warmed Claude sessions keyed by agentSessionId
 	private issueTrackers: Map<string, IIssueTrackerService> = new Map(); // one issue tracker per Linear workspace (keyed by linearWorkspaceId)
-	/** Set by the compounding-loop adapter (Lane C) to divert diff-gate verdict prompts. */
-	private loopVerdictInterceptor?: (
-		input: LoopVerdictInput,
-	) => boolean | Promise<boolean>;
 	private linearEventTransport: LinearEventTransport | null = null; // Single event transport for webhook delivery
 	private gitHubEventTransport: GitHubEventTransport | null = null; // GitHub event transport for forwarded GitHub webhooks
 	private gitHubAppTokenProvider: GitHubAppTokenProvider | null = null; // Self-hosted GitHub App token minting
@@ -444,23 +436,6 @@ export class EdgeWorker extends EventEmitter {
 				);
 			},
 		);
-
-		// Compounding loop (Lane C): re-emit terminal sessions on the EdgeWorker bus, enriched with
-		// the repo name the loop keys on. The callback reads this.repositories at emit time (after
-		// the population loop below has run), so ordering here is fine.
-		this.agentSessionManager.on("sessionComplete", (p) => {
-			const repo = p.repositoryId
-				? this.repositories.get(p.repositoryId)
-				: undefined;
-			this.emit("sessionComplete", {
-				issueId: p.issueId ?? "",
-				issueIdentifier: p.issueIdentifier,
-				repositoryId: p.repositoryId ?? "",
-				repositoryName: repo?.name ?? "",
-				worktree: p.worktree,
-				status: String(p.status),
-			});
-		});
 
 		// Initialize repositories with path resolution
 		for (const repo of config.repositories) {
@@ -3225,30 +3200,6 @@ ${taskSection}`;
 	}
 
 	/**
-	 * Public accessor: the issue tracker serving a repository's Linear workspace. Used by the
-	 * compounding-loop adapter (Lane C) to post the blind gate. Undefined when the repo has no
-	 * resolvable workspace/tracker.
-	 */
-	getIssueTrackerForRepository(
-		repoId: string,
-	): IIssueTrackerService | undefined {
-		const repo = this.repositories.get(repoId);
-		if (!repo?.linearWorkspaceId) return undefined;
-		return this.issueTrackers.get(repo.linearWorkspaceId);
-	}
-
-	/**
-	 * Register the compounding-loop verdict interceptor (Lane C). EdgeWorker consults it on each
-	 * user prompt before starting a session; when it returns true the prompt was a diff-gate
-	 * verdict consumed by the loop and no Claude session is started.
-	 */
-	setLoopVerdictInterceptor(
-		fn: (input: LoopVerdictInput) => boolean | Promise<boolean>,
-	): void {
-		this.loopVerdictInterceptor = fn;
-	}
-
-	/**
 	 * Get the Linear API token for a workspace from workspace-level config.
 	 */
 	private getLinearTokenForWorkspace(linearWorkspaceId: string): string | null {
@@ -4306,22 +4257,6 @@ ${taskSection}`;
 		if (this.askUserQuestionHandler.hasPendingQuestion(agentSessionId)) {
 			await this.handleAskUserQuestionResponse(webhook);
 			return;
-		}
-
-		// Branch 2.75: Compounding-loop diff-gate verdict (Lane C). A verdict (`/approve`,
-		// `/reject`, `/rework`) on an issue with a pending blind gate is diverted to the loop —
-		// it must NOT spin up a Claude session. The interceptor returns false for anything else.
-		if (this.loopVerdictInterceptor) {
-			try {
-				const handled = await this.loopVerdictInterceptor({
-					issueId: webhook.agentSession?.issue?.id ?? "",
-					text: activityBody,
-					agentSessionId,
-				});
-				if (handled) return;
-			} catch (error) {
-				this.logger.error("Loop verdict interceptor threw:", error);
-			}
 		}
 
 		// Branch 3: Handle normal prompted activity (existing session continuation)
@@ -5739,9 +5674,6 @@ ${input.userComment}
 			createAskUserQuestionCallback: (sid, wid) =>
 				this.createAskUserQuestionCallback(sid, wid)!,
 			requireLinearWorkspaceId,
-			// Compounding loop (Lane C): re-emit PR-open events (enriched with session
-			// context by the builder) on the EdgeWorker bus for the cyrus-loop adapter.
-			onPrOpened: (payload) => this.emit("prOpened", payload),
 		});
 
 		// Attach pre-warmed session if available (only for Claude runner).

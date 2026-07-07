@@ -22,7 +22,6 @@ import { buildPrMarkerHook } from "./hooks/PrMarkerHook.js";
 import { appendBrowserUseAddendum } from "./prompts/browserUsePromptAddendum.js";
 import { appendCloudRuntimeAddendum } from "./prompts/cloudRuntimePromptAddendum.js";
 import { appendFailureModeAddendum } from "./prompts/failureModePromptAddendum.js";
-import type { PrOpenedEventPayload } from "./types.js";
 
 /**
  * Subset of McpConfigService consumed by RunnerConfigBuilder.
@@ -104,12 +103,6 @@ export interface IssueRunnerConfigInput {
 	sandboxSettings?: SandboxSettings;
 	/** CA cert path for MITM TLS termination — passed via child process env */
 	egressCaCertPath?: string;
-	/**
-	 * Fired when a Cyrus PR/MR is (re)opened during this session (from the PR-marker hook), with
-	 * the full session context already merged in. Wired by EdgeWorker to emit `prOpened` on the
-	 * bus so the compounding loop can capture the diff. Idempotent downstream.
-	 */
-	onPrOpened?: (payload: PrOpenedEventPayload) => void;
 }
 
 export function resolveIssueMcpConfigPath(
@@ -169,34 +162,7 @@ export class RunnerConfigBuilder {
 		// Configure hooks: PostToolUse for screenshot tools + PR-marker enforcement,
 		// plus the Stop hook that blocks the session when work is unshipped.
 		const screenshotHooks = this.buildScreenshotHooks(log);
-		const onPrOpened = input.onPrOpened;
-		const prMarkerHook = buildPrMarkerHook(
-			log,
-			undefined,
-			onPrOpened
-				? (pr) =>
-						onPrOpened({
-							provider: pr.provider,
-							issueId:
-								input.session.issueContext?.issueId ??
-								input.session.issueId ??
-								"",
-							issueIdentifier:
-								input.session.issueContext?.issueIdentifier ??
-								input.session.issue?.identifier,
-							repositoryId: input.repository.id,
-							repositoryName: input.repository.name,
-							repoDir: input.repository.repositoryPath,
-							worktree: input.session.workspace.path,
-							prNumber: pr.number,
-							headBranch: pr.headBranch,
-							headSha: pr.headSha,
-							baseBranch: pr.baseBranch,
-							prCreatedAt: pr.createdAt,
-							prUrl: pr.url,
-						})
-				: undefined,
-		);
+		const prMarkerHook = buildPrMarkerHook(log);
 		const intentToAddHook = buildIntentToAddHook(log);
 		const stopHook = this.buildStopHook(log);
 		const hooks: Partial<Record<HookEvent, HookCallbackMatcher[]>> = {
