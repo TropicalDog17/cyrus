@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- Cyrus can now read Jira ticket (and Confluence page) content for context via the Atlassian MCP server — for example, pulling in a Jira ticket linked from a Linear issue. Enable it by setting the `ATLASSIAN_MCP_TOKEN` environment variable (and optionally `ATLASSIAN_MCP_URL` to point at a self-hosted server or the SSE endpoint); when unset, nothing changes. See [docs/CONFIG_FILE.md](docs/CONFIG_FILE.md#atlassian-mcp-jira--confluence).
+- Cyrus can now read Jira ticket (and Confluence page) content for context via the Atlassian MCP server — for example, pulling in a Jira ticket linked from a Linear issue. Enable it by setting the `ATLASSIAN_MCP_TOKEN` environment variable (and optionally `ATLASSIAN_MCP_URL` to point at a self-hosted server or the SSE endpoint); when unset, nothing changes. See [docs/CONFIG_FILE.md](docs/CONFIG_FILE.md#atlassian-mcp-jira--confluence). ([DEV-110](https://linear.app/devtrop/issue/DEV-110/integrate-jira-with-cyrus), [#7](https://github.com/TropicalDog17/cyrus/pull/7))
 
 ### Removed
 - **This fork runs Claude only, on Linear + GitHub.** The Gemini, Codex, and Cursor runners and the GitLab and Slack integrations have been removed. Issues always route to Claude regardless of any `[agent=…]` description selector or runner label, and `defaultRunner` now accepts only `claude`.
