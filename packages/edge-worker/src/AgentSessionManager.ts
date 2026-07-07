@@ -38,6 +38,16 @@ import type {
 } from "./sinks/index.js";
 
 /**
+ * Whether a session's runner is the Cursor runner. Used to record the runner
+ * session id against the correct field (`cursorSessionId` vs `claudeSessionId`)
+ * so resumes stick with the harness that created the session. Identified by
+ * constructor name to avoid a hard dependency on the cursor-runner package here.
+ */
+function isCursorRunner(runner: IAgentRunner | undefined): boolean {
+	return runner?.constructor.name === "CursorRunner";
+}
+
+/**
  * Payload for {@link AgentSessionManagerEvents.sessionComplete}. Raw session facts; EdgeWorker
  * enriches (repositoryId → repo name) before re-emitting on its own bus for the loop adapter.
  */
@@ -250,7 +260,8 @@ export class AgentSessionManager extends EventEmitter {
 
 	/**
 	 * Update Agent Session with session ID from system initialization.
-	 * This fork runs Claude only.
+	 * Records the session id against the runner that produced it (Claude or
+	 * Cursor) so resumes stick with the same harness.
 	 */
 	updateAgentSessionWithRunnerSessionId(
 		sessionId: string,
@@ -263,7 +274,11 @@ export class AgentSessionManager extends EventEmitter {
 			return;
 		}
 
-		linearSession.claudeSessionId = claudeSystemMessage.session_id;
+		if (isCursorRunner(linearSession.agentRunner)) {
+			linearSession.cursorSessionId = claudeSystemMessage.session_id;
+		} else {
+			linearSession.claudeSessionId = claudeSystemMessage.session_id;
+		}
 
 		linearSession.updatedAt = Date.now();
 		linearSession.metadata = {
@@ -279,7 +294,7 @@ export class AgentSessionManager extends EventEmitter {
 	 * Create a session entry from user/assistant message (without syncing to Linear)
 	 */
 	private async createSessionEntry(
-		_sessionId: string,
+		sessionId: string,
 		sdkMessage: SDKUserMessage | SDKAssistantMessage,
 	): Promise<CyrusAgentSessionEntry> {
 		// Extract tool info if this is an assistant message
@@ -298,8 +313,13 @@ export class AgentSessionManager extends EventEmitter {
 		const sdkError =
 			sdkMessage.type === "assistant" ? sdkMessage.error : undefined;
 
+		// Record the runner session id against the runner that produced it.
+		const runner = this.sessions.get(sessionId)?.agentRunner;
+
 		const sessionEntry: CyrusAgentSessionEntry = {
-			claudeSessionId: sdkMessage.session_id,
+			...(isCursorRunner(runner)
+				? { cursorSessionId: sdkMessage.session_id }
+				: { claudeSessionId: sdkMessage.session_id }),
 			type: sdkMessage.type,
 			content: this.extractContent(sdkMessage),
 			metadata: {
@@ -714,8 +734,11 @@ export class AgentSessionManager extends EventEmitter {
 			return;
 		}
 
+		const runner = this.sessions.get(sessionId)?.agentRunner;
 		const resultEntry: CyrusAgentSessionEntry = {
-			claudeSessionId: resultMessage.session_id,
+			...(isCursorRunner(runner)
+				? { cursorSessionId: resultMessage.session_id }
+				: { claudeSessionId: resultMessage.session_id }),
 			type: "result",
 			content,
 			metadata: {

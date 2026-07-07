@@ -6,6 +6,7 @@ import {
 	isAgentSessionCreatedWebhook,
 	isAgentSessionPromptedWebhook,
 } from "cyrus-core";
+import { CursorRunner } from "cyrus-cursor-runner";
 import { LinearEventTransport } from "cyrus-linear-event-transport";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
@@ -24,6 +25,7 @@ vi.mock("fs/promises", () => ({
 
 // Mock dependencies
 vi.mock("cyrus-claude-runner");
+vi.mock("cyrus-cursor-runner");
 vi.mock("cyrus-linear-event-transport");
 vi.mock("@linear/sdk");
 vi.mock("../src/SharedApplicationServer.js");
@@ -45,10 +47,12 @@ vi.mock("cyrus-core", async (importOriginal) => {
 vi.mock("file-type");
 
 /**
- * This fork runs Claude only. These tests verify that:
- * - the Claude runner is always selected (regardless of labels)
- * - the Claude model is resolved from labels + `[model=...]` description tags
- * - session continuation resumes the existing Claude session
+ * This fork runs Claude (default) and Cursor. These tests verify that:
+ * - the Claude runner is selected by default and via claude/model labels
+ * - the Cursor runner is selected via a `cursor` label, `[agent=cursor]` tag,
+ *   or a `composer-*` model label
+ * - the model is resolved from labels + `[model=...]` description tags
+ * - session continuation resumes the existing runner session
  */
 describe("EdgeWorker - Runner Selection Based on Labels", () => {
 	let edgeWorker: EdgeWorker;
@@ -150,6 +154,20 @@ describe("EdgeWorker - Runner Selection Based on Labels", () => {
 			capturedRunnerType = "claude";
 			capturedRunnerConfig = config;
 			return mockClaudeRunner;
+		});
+
+		// Mock CursorRunner
+		const mockCursorRunner = {
+			supportsStreamingInput: false,
+			start: vi.fn().mockResolvedValue({ sessionId: "cursor-session-123" }),
+			stop: vi.fn(),
+			isStreaming: vi.fn().mockReturnValue(false),
+			getFormatter: vi.fn(),
+		};
+		vi.mocked(CursorRunner).mockImplementation(function (config: any) {
+			capturedRunnerType = "cursor";
+			capturedRunnerConfig = config;
+			return mockCursorRunner as any;
 		});
 
 		// Mock AgentSessionManager
@@ -283,6 +301,53 @@ Issue: {{issue_identifier}}`;
 		});
 	});
 
+	describe("Cursor Runner Selection", () => {
+		it("should select Cursor runner when 'cursor' label is present", async () => {
+			const mockIssue = createMockIssueWithLabels(["cursor"]);
+			mockLinearClient.issue.mockResolvedValue(mockIssue);
+
+			await (edgeWorker as any).handleAgentSessionCreatedWebhook(
+				createWebhook(),
+				[mockRepository],
+			);
+
+			expect(capturedRunnerType).toBe("cursor");
+			expect(CursorRunner).toHaveBeenCalled();
+			expect(ClaudeRunner).not.toHaveBeenCalled();
+			expect(capturedRunnerConfig.model).toBe("composer-2.5");
+		});
+
+		it("should select Cursor runner via the [agent=cursor] description tag", async () => {
+			const mockIssue = createMockIssueWithLabels(
+				[],
+				"Please refactor this [agent=cursor]",
+			);
+			mockLinearClient.issue.mockResolvedValue(mockIssue);
+
+			await (edgeWorker as any).handleAgentSessionCreatedWebhook(
+				createWebhook(),
+				[mockRepository],
+			);
+
+			expect(capturedRunnerType).toBe("cursor");
+			expect(CursorRunner).toHaveBeenCalled();
+		});
+
+		it("should select Cursor runner when a 'composer-*' model label is present", async () => {
+			const mockIssue = createMockIssueWithLabels(["composer-2.5"]);
+			mockLinearClient.issue.mockResolvedValue(mockIssue);
+
+			await (edgeWorker as any).handleAgentSessionCreatedWebhook(
+				createWebhook(),
+				[mockRepository],
+			);
+
+			expect(capturedRunnerType).toBe("cursor");
+			expect(CursorRunner).toHaveBeenCalled();
+			expect(capturedRunnerConfig.model).toBe("composer-2.5");
+		});
+	});
+
 	describe("Description Tag Selection", () => {
 		it("should select model from [model=...] description tag", async () => {
 			const mockIssue = createMockIssueWithLabels(
@@ -361,7 +426,7 @@ Issue: {{issue_identifier}}`;
 	});
 
 	describe("Runner Selection Service", () => {
-		it("should always resolve runnerType 'claude' with the model override", () => {
+		it("should resolve the Claude runner with the model override", () => {
 			const runnerSelection = (
 				edgeWorker as any
 			).runnerSelectionService.determineRunnerSelection(["opus"]);
@@ -378,6 +443,15 @@ Issue: {{issue_identifier}}`;
 
 			expect(runnerSelection.runnerType).toBe("claude");
 			expect(runnerSelection.modelOverride).toBe("opus");
+		});
+
+		it("should resolve the Cursor runner and default model for a 'cursor' label", () => {
+			const runnerSelection = (
+				edgeWorker as any
+			).runnerSelectionService.determineRunnerSelection(["cursor"]);
+
+			expect(runnerSelection.runnerType).toBe("cursor");
+			expect(runnerSelection.modelOverride).toBe("composer-2.5");
 		});
 	});
 
@@ -414,6 +488,41 @@ Issue: {{issue_identifier}}`;
 				"claude-session-existing",
 			);
 			expect(mockClaudeRunner.startStreaming).toHaveBeenCalled();
+		});
+
+		it("should keep the Cursor runner and resume cursorSessionId for cursor continuations", async () => {
+			// Even though the labels would select Claude, an existing cursorSessionId
+			// must keep the session on the Cursor runner and resume it.
+			const mockIssue = createMockIssueWithLabels(["claude"]);
+			vi.spyOn(edgeWorker as any, "fetchFullIssueDetails").mockResolvedValue(
+				mockIssue,
+			);
+			vi.spyOn(edgeWorker as any, "buildSessionPrompt").mockResolvedValue(
+				"Resume this session",
+			);
+			vi.spyOn(edgeWorker as any, "savePersistedState").mockResolvedValue(
+				undefined,
+			);
+
+			const session: any = {
+				issueId: "issue-123",
+				workspace: { path: "/test/workspaces/TEST-123" },
+				issue: { identifier: "TEST-123" },
+				cursorSessionId: "cursor-session-existing",
+			};
+
+			await (edgeWorker as any).resumeAgentSession(
+				session,
+				mockRepository,
+				"agent-session-123",
+				mockAgentSessionManager,
+				"follow-up prompt",
+			);
+
+			expect(capturedRunnerType).toBe("cursor");
+			expect(capturedRunnerConfig.resumeSessionId).toBe(
+				"cursor-session-existing",
+			);
 		});
 	});
 });

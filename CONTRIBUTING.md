@@ -46,19 +46,15 @@ cyrus/
 │   ├── cli/        # Main CLI application (the `cyrus-ai` npm package)
 │   └── f1/         # F1 testing framework for end-to-end test drives
 └── packages/
-    ├── core/                     # Shared types and session management
-    ├── edge-worker/              # Edge worker implementation
-    ├── claude-runner/            # Claude CLI execution wrapper
-    ├── codex-runner/             # Codex CLI execution wrapper
-    ├── cursor-runner/            # Cursor CLI execution wrapper
-    ├── gemini-runner/            # Gemini CLI execution wrapper
-    ├── simple-agent-runner/      # Simple agent runner
-    ├── config-updater/           # Configuration update utilities
+    ├── core/                     # Shared types, config schemas, issue-tracker interfaces
+    ├── edge-worker/              # Edge worker orchestrator
+    ├── claude-runner/            # Claude Code SDK wrapper
+    ├── cursor-runner/            # Cursor Agent SDK wrapper
+    ├── config-updater/           # Remote config push from CYHOST
     ├── cloudflare-tunnel-client/ # Cloudflare tunnel management
-    ├── mcp-tools/                # MCP tool definitions
-    ├── linear-event-transport/   # Linear webhook event handling
-    ├── github-event-transport/   # GitHub event handling
-    └── slack-event-transport/    # Slack event handling
+    ├── mcp-tools/                # cyrus-tools MCP server
+    ├── linear-event-transport/   # Linear webhook + issue tracker adapter
+    └── github-event-transport/   # GitHub webhook handling
 ```
 
 ## Pull Requests

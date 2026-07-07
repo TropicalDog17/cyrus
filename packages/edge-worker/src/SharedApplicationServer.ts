@@ -252,8 +252,8 @@ export class SharedApplicationServer {
 	/**
 	 * Register a webhook handler for a specific token (LEGACY - deprecated)
 	 * Supports two signatures:
-	 * 1. For ndjson-client: (token, secret, handler)
-	 * 2. For legacy direct registration: (token, handler) where handler takes (req, res)
+	 * 1. Legacy bearer-token handler: (token, secret, handler)
+	 * 2. Legacy direct registration: (token, handler) where handler takes (req, res)
 	 *
 	 * NOTE: New code should use LinearEventTransport which registers routes directly with Fastify
 	 */

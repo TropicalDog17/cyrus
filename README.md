@@ -9,7 +9,7 @@
 
 [![Discord](https://img.shields.io/discord/1443747721910685792?label=Discord&logo=discord&logoColor=white)](https://discord.gg/prrtADHYTt)
 
-Your (Claude Code|Codex|Cursor|Gemini) powered (Linear|GitHub|GitLab|Slack) agent. Cyrus monitors (Linear|GitHub|GitLab|Slack) issues assigned to it, creates isolated Git worktrees for each issue, runs (Claude Code|Codex|Cursor|Gemini) sessions to process them, and streams detailed agent activity updates back to (Linear|GitHub), along with rich interactions like dropdown selects and approvals.
+Your Claude Code and Cursor powered Linear and GitHub agent. Cyrus monitors issues assigned to it, creates isolated Git worktrees for each issue, runs Claude Code or Cursor sessions to process them, and streams detailed agent activity updates back to Linear, along with rich interactions like dropdown selects and approvals.
 
 **Note:** Cyrus is a BYOK platform (bring your keys / subscriptions) for tokens.
 
@@ -25,7 +25,7 @@ Zero cost option — host everything yourself with your own Linear OAuth app, Gi
 npx skills add ceedaragents/cyrus -g
 ```
 
-Then in any AI coding agent (Claude Code, Codex, Cursor, etc.):
+Then in any AI coding agent (Claude Code, Cursor, etc.):
 
 ```
 /cyrus-setup

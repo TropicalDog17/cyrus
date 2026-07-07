@@ -524,9 +524,15 @@
 		"claudeDefaultFallbackModel": {
 			"type": "string"
 		},
+		"cursorDefaultModel": {
+			"type": "string"
+		},
+		"cursorDefaultFallbackModel": {
+			"type": "string"
+		},
 		"defaultRunner": {
 			"type": "string",
-			"enum": ["claude"]
+			"enum": ["claude", "cursor"]
 		},
 		"defaultModel": {
 			"type": "string"
