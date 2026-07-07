@@ -1,0 +1,30 @@
+{
+	"name": "cyrus-cursor-runner",
+	"version": "0.2.66",
+	"description": "Cursor Agent CLI process wrapper for Cyrus",
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "tsc && node -e \"require('node:fs').copyFileSync('src/permission-check.mjs', 'dist/permission-check.mjs')\"",
+		"dev": "tsc --watch",
+		"test": "vitest",
+		"test:run": "vitest run --passWithNoTests",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@cursor/sdk": "^1.0.23",
+		"cyrus-core": "workspace:*"
+	},
+	"devDependencies": {
+		"@types/node": "^20.0.0",
+		"typescript": "^5.3.3",
+		"vitest": "^4.1.9"
+	},
+	"publishConfig": {
+		"access": "public"
+	}
+}

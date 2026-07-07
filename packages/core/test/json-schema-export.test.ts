@@ -41,6 +41,8 @@ describe("JSON Schema export", () => {
 				"linearWorkspaces",
 				"claudeDefaultModel",
 				"claudeDefaultFallbackModel",
+				"cursorDefaultModel",
+				"cursorDefaultFallbackModel",
 				"defaultRunner",
 				"defaultModel",
 				"defaultFallbackModel",
@@ -66,7 +68,10 @@ describe("JSON Schema export", () => {
 		});
 
 		it("represents defaultRunner as enum", () => {
-			expect(schema.properties.defaultRunner.enum).toEqual(["claude"]);
+			expect(schema.properties.defaultRunner.enum).toEqual([
+				"claude",
+				"cursor",
+			]);
 		});
 
 		it("represents userAccessControl as object with expected sub-fields", () => {

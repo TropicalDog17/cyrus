@@ -4,15 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Cyrus (Linear Claude Agent) is a monorepo JavaScript/TypeScript application that integrates Linear's issue tracking with Anthropic's Claude Code to automate software development tasks. The project is transitioning to an edge-proxy architecture that separates OAuth/webhook handling (proxy) from Claude processing (edge workers).
+Cyrus (Linear Claude Agent) is a monorepo JavaScript/TypeScript application that connects issue trackers (primarily Linear and GitHub) to AI coding agents (Claude Code and Cursor). The `cyrus` CLI runs an `EdgeWorker` locally: it receives webhooks on a local Fastify server, creates isolated git worktrees per issue, runs agent sessions, and posts activity back to the issue tracker. Paid deployments can use CYHOST (`app.atcyrus.com`) to push configuration to a self-hosted runtime.
 
 **Key capabilities:**
-- Monitors Linear issues assigned to a specific user
+- Monitors Linear issues (and GitHub PR events) assigned to Cyrus
 - Creates isolated Git worktrees for each issue
-- Runs Claude Code sessions to process issues
-- Posts responses back to Linear as comments
-- Maintains conversation continuity using the `--continue` flag
-- Supports edge worker mode for distributed processing
+- Runs Claude Code or Cursor sessions to process issues
+- Posts agent activities back to Linear (thoughts, actions, responses)
+- Maintains conversation continuity across follow-up prompts
+- Supports remote configuration via `cyrus-config-updater` (CYHOST / paid self-host)
 
 
 ## How Cyrus Works
@@ -117,7 +117,7 @@ Design rule:
 
 ## Checklist For New Agent CLI Harnesses
 
-When implementing a new runner/harness (for example Codex, Gemini, OpenCode, or other CLIs), use this checklist before shipping.
+When implementing a new runner/harness (for example Cursor, OpenCode, or other CLIs), use this checklist before shipping.
 
 ### 1) Session Lifecycle And Turn Limits
 
@@ -165,7 +165,7 @@ When implementing a new runner/harness (for example Codex, Gemini, OpenCode, or 
 
 ### 8) Runner Selection Via Labels And Description Selectors
 
-- Keep agent label and model label separate (example: `codex` and `gpt-5-codex`).
+- Keep agent label and model label separate (example: `cursor` and `composer-2.5`).
 - Support issue description selectors like `[agent=...]`, `[model=...]`, `[repo=...]`.
 - Add precedence tests for labels vs selectors vs repository defaults.
 
@@ -185,7 +185,7 @@ When implementing a new runner/harness (for example Codex, Gemini, OpenCode, or 
 
 ### 11) Config Schema And Backward Compatibility
 
-- Use provider-specific defaults (`claudeDefaultModel`, `geminiDefaultModel`, `codexDefaultModel`).
+- Use provider-specific defaults (`claudeDefaultModel`, `cursorDefaultModel`, and matching fallback fields).
 - Add config migration logic for renamed or legacy fields.
 - Keep docs/comments provider-specific and explicit.
 
@@ -199,9 +199,9 @@ When implementing a new runner/harness (for example Codex, Gemini, OpenCode, or 
   - visible tool/file-edit activities in session timeline
   - final response posting behavior
 
-### Codex Integration Lesson Learned
+### Harness Tool Lifecycle Lesson Learned
 
-Codex emitted tool activity at `item.started`/`item.completed` events, but those were initially not mapped to `tool_use`/`tool_result`. The result was missing action/file-edit visibility in Linear. For any new harness, treat tool lifecycle mapping as a first-class acceptance criterion, not a formatter-only concern.
+Some providers emit tool activity at provider-specific lifecycle events that do not map 1:1 to `tool_use`/`tool_result`. If those events are not mapped in the runner adapter, action/file-edit visibility in Linear is lost. For any new harness, treat tool lifecycle mapping as a first-class acceptance criterion, not a formatter-only concern.
 
 ### Cursor Integration Lesson Learned
 
@@ -236,18 +236,21 @@ The codebase follows a pnpm monorepo structure:
 ```
 cyrus/
 ├── apps/
-│   ├── cli/          # Main CLI application
-│   ├── electron/     # Future Electron GUI (in development)
-│   └── proxy/        # Edge proxy server for OAuth/webhooks
+│   ├── cli/                       # Main CLI (`cyrus-ai` npm package)
+│   └── f1/                        # End-to-end test framework (CLI platform mode)
 └── packages/
-    ├── core/         # Shared types and session management
-    ├── claude-parser/# Claude stdout parsing with jq
-    ├── claude-runner/# Claude CLI execution wrapper
-    ├── edge-worker/  # Edge worker client implementation
-    └── ndjson-client/# NDJSON streaming client
+    ├── core/                      # Shared types, config schemas, issue-tracker interfaces
+    ├── claude-runner/             # Claude Code SDK wrapper
+    ├── cursor-runner/             # Cursor Agent SDK wrapper
+    ├── edge-worker/               # Orchestrator (webhooks, sessions, routing, MCP)
+    ├── linear-event-transport/    # Linear webhooks + LinearIssueTrackerService
+    ├── github-event-transport/    # GitHub webhook handling
+    ├── cloudflare-tunnel-client/  # Optional tunnel for self-hosted webhook exposure
+    ├── config-updater/            # Remote config push from CYHOST
+    └── mcp-tools/                 # cyrus-tools MCP server
 ```
 
-For a detailed visual representation of how these components interact and map Claude Code sessions to Linear comment threads, see @architecture.md.
+**Runtime flow:** Linear/GitHub webhooks → event transport (`LinearEventTransport` / `GitHubEventTransport`) on `SharedApplicationServer` → `EdgeWorker` routes the issue to a repository → `GitService` creates a worktree → `RunnerSelectionService` picks Claude or Cursor → runner streams SDK messages → `AgentSessionManager` posts activities back via `LinearActivitySink`. F1 test drives use the same `EdgeWorker` with `platform: "cli"` and an in-memory issue tracker; see `spec/f1/ARCHITECTURE.md`.
 
 ## Testing Best Practices
 
@@ -340,28 +343,13 @@ pnpm install -g .            # Install local version globally
 pnpm link -g .               # Link local development version
 ```
 
-#### Electron App (`apps/electron/`)
+#### F1 Test Framework (`apps/f1/`)
 ```bash
-# Development mode
-pnpm dev
+# Start the F1 server (EdgeWorker in CLI platform mode)
+bun run apps/f1/server.ts
 
-# Build for production
-pnpm build:all
-
-# Run electron in dev mode
-pnpm electron:dev
-```
-
-#### Proxy App (`apps/proxy/`)
-```bash
-# Start proxy server
-pnpm start
-
-# Development mode with auto-restart
-pnpm dev
-
-# Run tests
-pnpm test
+# Run F1 CLI commands against the server
+./apps/f1/f1 --help
 ```
 
 ### Package Commands (all packages follow same pattern)
@@ -444,7 +432,7 @@ The agent automatically moves issues to the "started" state when assigned. Linea
 
    Symptom of forgetting this: the field appears in `~/.cyrus/config.json`, the cyrus process is restarted, but downstream code keeps seeing the default (or never picks up hot-reloads). This bit us with `slackAllowedTools` / `githubAllowedTools` / `slackMcpConfigs` / `linearMcpConfigs` / `githubMcpConfigs` during CYHOST-967.
 
-10. **Changing the `cyrus-tools` MCP server's exposed tools**: When you add or remove a tool from the inline `cyrus-tools` MCP server (the one served by `apps/proxy` / wired up in `McpConfigService.buildMcpConfig`), you **must also update the catalog `cyrus-hosted` keeps for the `/settings/tools` UI**. cyrus-hosted maintains a per-server tool list so its grid can render a row per tool (with the right per-platform toggle) without having to introspect a live MCP server. Today that catalog lives in `apps/app/src/lib/cyrus-config/builder.ts` under the `KNOWN_MCP_TOOLS` map (look for the `"mcp__cyrus-tools"` key); update that array in the same PR — the same constants are also imported by the platform-default lists in `packages/core/src/allowed-tools-defaults.ts` when a particular `cyrus-tools` tool is enabled by default, so reflect that there too if the new tool should be on out of the box.
+10. **Changing the `cyrus-tools` MCP server's exposed tools**: When you add or remove a tool from the inline `cyrus-tools` MCP server (defined in `cyrus-mcp-tools` and wired up in `McpConfigService.buildMcpConfig`), you **must also update the catalog `cyrus-hosted` keeps for the `/settings/tools` UI** when that tool should appear in the hosted settings grid. Today that catalog lives in `apps/app/src/lib/cyrus-config/builder.ts` under the `KNOWN_MCP_TOOLS` map (look for the `"mcp__cyrus-tools"` key); update that array in the same PR — the same constants are also imported by the platform-default lists in `packages/core/src/allowed-tools-defaults.ts` when a particular `cyrus-tools` tool is enabled by default, so reflect that there too if the new tool should be on out of the box.
 
    Symptom of forgetting this: the new tool is callable at runtime (the runtime knows about it via the live MCP server) but it never appears in the `/settings/tools` MCP Servers section — so operators can't see it, can't toggle it on/off per platform, and per-repo overrides treat it as unknown.
 
@@ -518,13 +506,13 @@ When working on this codebase, follow these practices:
 
 ## Key Code Paths
 
-- **Linear Integration**: `apps/cli/services/LinearIssueService.mjs`
-- **Claude Execution**: `packages/claude-runner/src/ClaudeRunner.ts`
-- **Session Management**: `packages/core/src/session/`
-- **Edge Worker**: `packages/edge-worker/src/EdgeWorker.ts`
-- **GitHub Token Resolution**: `EdgeWorker.resolveGitHubToken()` — three-tier fallback: proxy-forwarded installation token → self-minted GitHub App token (via `GitHubAppTokenProvider`) → `GITHUB_TOKEN` PAT. Self-hosted users with a GitHub App use the middle tier; cloud/proxy users get tokens forwarded; legacy users fall back to a PAT.
-- **GitHub App Token Minting**: `packages/github-event-transport/src/GitHubAppTokenProvider.ts` — signs JWTs with the App's private key and exchanges them for short-lived installation tokens. Caches tokens and refreshes 5 minutes before expiry.
-- **OAuth Flow**: `apps/proxy/src/services/OAuthService.mjs`
+- **Linear webhooks + API**: `packages/linear-event-transport/src/LinearEventTransport.ts`, `LinearIssueTrackerService.ts`
+- **Claude execution**: `packages/claude-runner/src/ClaudeRunner.ts`
+- **Cursor execution**: `packages/cursor-runner/src/CursorRunner.ts`
+- **Session + activity mapping**: `packages/edge-worker/src/AgentSessionManager.ts`
+- **Edge worker orchestration**: `packages/edge-worker/src/EdgeWorker.ts`
+- **GitHub token resolution**: `EdgeWorker.resolveGitHubToken()` — three-tier fallback: CYHOST-forwarded installation token → self-minted GitHub App token (via `GitHubAppTokenProvider`) → `GITHUB_TOKEN` PAT. Self-hosted users with a GitHub App use the middle tier; cloud/CYHOST users get tokens forwarded; legacy users fall back to a PAT.
+- **GitHub App token minting**: `packages/github-event-transport/src/GitHubAppTokenProvider.ts` — signs JWTs with the App's private key and exchanges them for short-lived installation tokens. Caches tokens and refreshes 5 minutes before expiry.
 
 ## Testing MCP Linear Integration
 
@@ -571,19 +559,3 @@ For publishing and release instructions, use the `/release` skill (within Claude
 ```
 
 
-## Gemini CLI for Testing
-
-The project uses Google's Gemini CLI for testing the GeminiRunner implementation. Install the specific version:
-
-```bash
-npm install -g @google/gemini-cli@0.17.0
-```
-
-This ensures consistency when running integration tests that interact with the Gemini API.
-
-### Gemini Configuration Reference
-
-For detailed information about Gemini CLI configuration options (settings.json structure, model aliases, previewFeatures, etc.), refer to:
-- **Official Documentation**: https://github.com/google-gemini/gemini-cli/blob/main/docs/get-started/configuration.md
-
-The GeminiRunner automatically generates a `~/.gemini/settings.json` file with single-turn model aliases and preview features enabled if one doesn't already exist.

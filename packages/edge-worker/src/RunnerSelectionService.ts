@@ -1,12 +1,23 @@
 import type { EdgeWorkerConfig, RunnerType } from "cyrus-core";
 
 /**
+ * Built-in default Cursor model when none is configured. Cursor's SDK resolves
+ * model ids server-side. "composer-2.5" selects Composer 2.5, whose default
+ * speed tier is "Fast" — there is no separate `composer-2.5-fast` slug. Override
+ * via `cursorDefaultModel` / `CYRUS_CURSOR_DEFAULT_MODEL` if your account exposes
+ * a different id (check `cursor-agent --list-models`).
+ */
+const CURSOR_DEFAULT_MODEL = "composer-2.5";
+
+/**
  * Resolves the runner type and model for a session.
  *
- * This fork runs Claude only, so `runnerType` is always "claude". The service
- * still resolves the Claude model (and fallback model) from labels and issue
- * description `[model=...]` tags, with the repository/global defaults as the
- * baseline.
+ * This fork supports two runners: Claude (default) and Cursor. The runner is
+ * chosen from an `[agent=...]` description tag, a `cursor`/`claude` label, or an
+ * explicit model whose family implies the runner; otherwise it falls back to
+ * the configured `defaultRunner` (or Claude). The service also resolves the
+ * model + fallback model from labels and the `[model=...]` description tag,
+ * with repository/global defaults as the baseline.
  */
 export class RunnerSelectionService {
 	private config: EdgeWorkerConfig;
@@ -23,27 +34,54 @@ export class RunnerSelectionService {
 	}
 
 	/**
-	 * Determine the default runner type. Always "claude" in this fork.
+	 * Determine the default runner type.
+	 *
+	 * Priority:
+	 * 1. Explicit `defaultRunner` in config
+	 * 2. Auto-detect from available API keys (only Cursor if its key is the sole
+	 *    one configured)
+	 * 3. Fall back to "claude"
 	 */
 	public getDefaultRunner(): RunnerType {
+		if (this.config.defaultRunner) {
+			return this.config.defaultRunner;
+		}
+
+		const hasClaude = Boolean(
+			process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY,
+		);
+		const hasCursor = Boolean(process.env.CURSOR_API_KEY);
+
+		// If Cursor is the only runner with credentials configured, default to it.
+		if (hasCursor && !hasClaude) {
+			return "cursor";
+		}
+
 		return "claude";
 	}
 
 	/**
-	 * Resolve the default Claude model from config with a sensible built-in default.
+	 * Resolve the default model for a runner from config with sensible built-in
+	 * defaults.
 	 */
-	public getDefaultModelForRunner(_runnerType: RunnerType = "claude"): string {
+	public getDefaultModelForRunner(runnerType: RunnerType = "claude"): string {
+		if (runnerType === "cursor") {
+			return this.config.cursorDefaultModel || CURSOR_DEFAULT_MODEL;
+		}
 		return this.config.claudeDefaultModel || this.config.defaultModel || "opus";
 	}
 
 	/**
-	 * Resolve the default Claude fallback model from config with a sensible
-	 * built-in default. Supports the legacy Claude fallback key for backwards
+	 * Resolve the default fallback model for a runner from config with sensible
+	 * built-in defaults. Supports the legacy Claude fallback key for backwards
 	 * compatibility.
 	 */
 	public getDefaultFallbackModelForRunner(
-		_runnerType: RunnerType = "claude",
+		runnerType: RunnerType = "claude",
 	): string {
+		if (runnerType === "cursor") {
+			return this.config.cursorDefaultFallbackModel || CURSOR_DEFAULT_MODEL;
+		}
 		return (
 			this.config.claudeDefaultFallbackModel ||
 			this.config.defaultFallbackModel ||
@@ -70,16 +108,18 @@ export class RunnerSelectionService {
 	}
 
 	/**
-	 * Determine the model (and fallback model) for a Claude session using
-	 * labels + issue description tags.
+	 * Determine the runner type, model, and fallback model using labels + issue
+	 * description tags.
 	 *
 	 * Supported description tags:
+	 * - [agent=claude|cursor]
 	 * - [model=<model-name>]
 	 *
 	 * Precedence:
-	 * 1. Description `[model=...]` tag overrides labels
-	 * 2. Model labels (fable/opus/sonnet/haiku or a `claude-*` name)
-	 * 3. Repository / global defaults
+	 * 1. Description tags override labels
+	 * 2. Agent (`cursor`/`claude`) labels override model labels
+	 * 3. Model labels can infer the agent type (e.g. `composer-*` → cursor)
+	 * 4. Falls back to the configured default runner
 	 */
 	public determineRunnerSelection(
 		labels: string[],
@@ -91,23 +131,42 @@ export class RunnerSelectionService {
 	} {
 		const normalizedLabels = (labels || []).map((label) => label.toLowerCase());
 		const normalizedDescription = issueDescription || "";
+		const descriptionAgentTagRaw = this.parseDescriptionTag(
+			normalizedDescription,
+			"agent",
+		);
 		const descriptionModelTagRaw = this.parseDescriptionTag(
 			normalizedDescription,
 			"model",
 		);
 
-		const resolveModelFromLabel = (
-			lowercaseLabels: string[],
-		): string | undefined => {
-			if (lowercaseLabels.includes("fable")) return "fable";
-			if (lowercaseLabels.includes("opus")) return "opus";
-			if (lowercaseLabels.includes("sonnet")) return "sonnet";
-			if (lowercaseLabels.includes("haiku")) return "haiku";
+		const isCursorModel = (model: string): boolean =>
+			/^composer[a-z0-9.-]*$/i.test(model);
+
+		const inferRunnerFromModel = (model?: string): RunnerType | undefined => {
+			if (!model) return undefined;
+			const normalizedModel = model.toLowerCase();
+			if (isCursorModel(normalizedModel)) return "cursor";
+			if (
+				normalizedModel === "fable" ||
+				normalizedModel === "opus" ||
+				normalizedModel === "sonnet" ||
+				normalizedModel === "haiku" ||
+				normalizedModel.startsWith("claude")
+			) {
+				return "claude";
+			}
 			return undefined;
 		};
 
-		const inferFallbackModel = (model: string): string | undefined => {
+		const inferFallbackModel = (
+			model: string,
+			runnerType: RunnerType,
+		): string | undefined => {
 			const normalizedModel = model.toLowerCase();
+			if (runnerType === "cursor") {
+				return this.getDefaultFallbackModelForRunner("cursor");
+			}
 			if (normalizedModel === "fable") return "opus";
 			if (normalizedModel === "opus") return "sonnet";
 			if (normalizedModel === "sonnet") return "haiku";
@@ -116,19 +175,66 @@ export class RunnerSelectionService {
 			return "sonnet";
 		};
 
+		const resolveAgentFromLabel = (
+			lowercaseLabels: string[],
+		): RunnerType | undefined => {
+			if (lowercaseLabels.includes("cursor")) return "cursor";
+			if (lowercaseLabels.includes("claude")) return "claude";
+			return undefined;
+		};
+
+		const resolveModelFromLabel = (
+			lowercaseLabels: string[],
+		): string | undefined => {
+			const cursorModelLabel = lowercaseLabels.find((label) =>
+				isCursorModel(label),
+			);
+			if (cursorModelLabel) return cursorModelLabel;
+
+			if (lowercaseLabels.includes("fable")) return "fable";
+			if (lowercaseLabels.includes("opus")) return "opus";
+			if (lowercaseLabels.includes("sonnet")) return "sonnet";
+			if (lowercaseLabels.includes("haiku")) return "haiku";
+
+			return undefined;
+		};
+
+		const agentFromDescription = descriptionAgentTagRaw?.toLowerCase();
+		const resolvedAgentFromDescription: RunnerType | undefined =
+			agentFromDescription === "cursor"
+				? "cursor"
+				: agentFromDescription === "claude"
+					? "claude"
+					: undefined;
+		const resolvedAgentFromLabels = resolveAgentFromLabel(normalizedLabels);
+
 		const modelFromDescription = descriptionModelTagRaw;
 		const modelFromLabels = resolveModelFromLabel(normalizedLabels);
 		const explicitModel = modelFromDescription || modelFromLabels;
 
+		const runnerType: RunnerType =
+			resolvedAgentFromDescription ||
+			resolvedAgentFromLabels ||
+			inferRunnerFromModel(explicitModel) ||
+			this.getDefaultRunner();
+
+		// If an explicit agent conflicts with the model's implied runner, keep the
+		// agent and drop the (mismatched) model so we fall back to the runner default.
+		const modelRunner = inferRunnerFromModel(explicitModel);
+		let modelOverride = explicitModel;
+		if (modelOverride && modelRunner && modelRunner !== runnerType) {
+			modelOverride = undefined;
+		}
+
 		const resolvedModelOverride =
-			explicitModel || this.getDefaultModelForRunner("claude");
+			modelOverride || this.getDefaultModelForRunner(runnerType);
 
 		const fallbackModelOverride =
-			inferFallbackModel(resolvedModelOverride) ||
-			this.getDefaultFallbackModelForRunner("claude");
+			inferFallbackModel(resolvedModelOverride, runnerType) ||
+			this.getDefaultFallbackModelForRunner(runnerType);
 
 		return {
-			runnerType: "claude",
+			runnerType,
 			modelOverride: resolvedModelOverride,
 			fallbackModelOverride,
 		};

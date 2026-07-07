@@ -9,6 +9,7 @@ onlyBuiltDependencies:
   - electron-winstaller
   - esbuild
   - sharp
+  - sqlite3
   - workerd
 
 overrides:

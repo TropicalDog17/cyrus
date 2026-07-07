@@ -1,6 +1,6 @@
 # @cyrus/edge-worker
 
-Unified edge worker for processing Linear issues with Claude. Handles webhook events, manages Claude sessions, and posts comments back to Linear.
+Unified edge worker for processing Linear (and GitHub) issues with Claude Code or Cursor. Handles webhook events on a local Fastify server, manages agent sessions, and posts activities back to Linear.
 
 ## Installation
 
@@ -21,13 +21,10 @@ The EdgeWorker supports multiple repository/Linear workspace pairs. Each reposit
 import { EdgeWorker } from '@cyrus/edge-worker'
 
 const edgeWorker = new EdgeWorker({
-  // Connection
-  proxyUrl: 'https://edge-proxy.example.com',
-  
-  // Claude
-  claudePath: '/usr/local/bin/claude',
-  defaultAllowedTools: ['bash', 'edit', 'read'],
-  
+  cyrusHome: '/home/user/.cyrus',
+  serverPort: 3456,
+  defaultRunner: 'claude',
+
   // Single repository configuration
   repositories: [{
     id: 'main-repo',
@@ -68,52 +65,29 @@ const edgeWorker = new EdgeWorker({
 await edgeWorker.start()
 ```
 
-### Multi-Repository Example (Electron)
+### Multi-Repository Example
 
 ```typescript
 import { EdgeWorker } from '@cyrus/edge-worker'
 
-// Load repository configurations from user settings
 const repositories = userSettings.repositories.map(repo => ({
   id: repo.id,
   name: repo.name,
   repositoryPath: repo.path,
   baseBranch: repo.branch || 'main',
   linearWorkspaceId: repo.linearWorkspaceId,
-  linearToken: repo.linearToken, // Each repo can have its own token
-  workspaceBaseDir: path.join(app.getPath('userData'), 'workspaces', repo.id),
+  linearToken: repo.linearToken,
+  workspaceBaseDir: path.join(cyrusHome, 'worktrees', repo.id),
   isActive: repo.enabled
 }))
 
 const edgeWorker = new EdgeWorker({
-  proxyUrl: config.proxyUrl,
-  claudePath: getClaudePath(),
-  
-  // Multiple repositories
+  cyrusHome,
+  serverPort: 3456,
   repositories,
   
-  // UI updates with repository context
   handlers: {
-    onClaudeEvent: (issueId, event, repositoryId) => {
-      // Update UI with Claude's progress
-      mainWindow.webContents.send('claude-event', { 
-        issueId, 
-        event,
-        repository: repositories.find(r => r.id === repositoryId)
-      })
-    },
-    
-    onSessionStart: (issueId, issue, repositoryId) => {
-      const repo = repositories.find(r => r.id === repositoryId)
-      // Show notification
-      new Notification({
-        title: `Processing Issue in ${repo.name}`,
-        body: `Working on ${issue.identifier}: ${issue.title}`
-      }).show()
-    },
-    
     createWorkspace: async (issue, repository) => {
-      // Create git worktree for the specific repository
       const worktreePath = await createWorktree(
         repository.repositoryPath,
         issue.identifier,
@@ -131,9 +105,9 @@ await edgeWorker.start()
 
 ### Required Config
 
-- `proxyUrl`: URL of the edge proxy server
-- `claudePath`: Path to Claude CLI executable
+- `cyrusHome`: Cyrus home directory (e.g. `~/.cyrus`)
 - `repositories`: Array of repository configurations
+- `serverPort` / `serverHost`: Local Fastify server bind (webhooks land here)
 
 ### Repository Configuration
 
@@ -169,38 +143,29 @@ All handlers are optional and now include repository context:
 
 ## Events
 
-The EdgeWorker extends EventEmitter and emits:
-
-- `connected`: Connected to proxy (token)
-- `disconnected`: Disconnected from proxy (token, reason)
-- `session:started`: Claude session started (issueId, issue, repositoryId)
-- `session:ended`: Claude session ended (issueId, exitCode, repositoryId)
-- `claude:event`: Any Claude event (issueId, event, repositoryId)
-- `claude:response`: Claude text response (issueId, text, repositoryId)
-- `claude:tool-use`: Claude used a tool (issueId, tool, input, repositoryId)
-- `error`: Error occurred (error, context)
+The EdgeWorker extends EventEmitter and emits session lifecycle events (for example `session:started`, `session:ended`, runner message events, and `error`). In production the CLI wires these internally; F1 exposes session output over RPC.
 
 ## Architecture
 
 ```
-Your App (CLI/Electron)
-    ↓ provides repository configs
+cyrus CLI (or F1 server)
+    ↓ starts
+SharedApplicationServer (Fastify, optional Cloudflare tunnel)
+    ↓ POST /linear-webhook, /github-webhook
+LinearEventTransport / GitHubEventTransport
+    ↓ normalized events
 EdgeWorker
-    ↓ manages multiple repositories
-    ├─→ Repository 1 (token A) ─→ Linear Workspace 1
-    ├─→ Repository 2 (token A) ─→ Linear Workspace 1  
-    └─→ Repository 3 (token B) ─→ Linear Workspace 2
-    ↓ connects to proxy (grouped by token)
-Edge Proxy
-    ↓ webhooks from all workspaces
-Linear
+    ↓ per issue
+    ├─→ RepositoryRouter → git worktree (GitService)
+    ├─→ RunnerSelectionService → ClaudeRunner | CursorRunner
+    └─→ AgentSessionManager → LinearActivitySink → Linear API
 ```
 
 Key features:
 - Multiple repositories can share the same Linear workspace/token
-- Repositories with different tokens connect separately to minimize connections
-- Each repository has its own workspace directory and configuration
-- OAuth tokens serve dual purpose: proxy auth and Linear API calls
+- Each repository has its own worktree base directory and configuration
+- Self-hosted runtimes receive webhooks directly (or via CYHOST forwarding + bearer auth)
+- OAuth tokens on repository/workspace config are used for Linear API calls
 
 ## Prompt Templates
 

@@ -5,121 +5,111 @@ This directory contains the core packages that make up the Cyrus monorepo. Each 
 ## Package Overview
 
 ### @cyrus/core
-**Scope**: Core domain models and business logic entities
+**Scope**: Core domain models, configuration schemas, and shared interfaces
 
 **Responsibilities**:
-- Define core business entities (Session, Issue, Workspace, Comment)
-- Manage session lifecycle and state
-- Provide shared TypeScript types and interfaces
-- Handle session persistence and retrieval
+- Define `EdgeWorkerConfig`, repository config, and runner types
+- Provide `IAgentRunner` and `IIssueTrackerService` interfaces
+- Issue-tracker types and CLI platform adapters (`CLIIssueTrackerService`)
+- Per-platform default allowed-tools lists
 
-**Key Exports**:
-- `Session` - Represents a Claude coding session
-- `SessionManager` - Manages multiple active sessions
-- `Issue` - Linear issue model
-- `Workspace` - Working directory model
-- `Comment` - Issue comment model
-
-### @cyrus/claude-parser
-**Scope**: Parse and interpret Claude's stdout/stderr output
-
-**Responsibilities**:
-- Parse Claude's JSON-formatted stdout messages
-- Handle streaming JSON parsing (incomplete messages)
-- Emit typed events for different message types
-- Extract content from assistant responses
-- Parse tool use events and errors
-
-**Key Exports**:
-- `StdoutParser` - Main parser class
-- `StreamProcessor` - Handles streaming data
-- `ClaudeEvent` - TypeScript types for all Claude events
-- Message type definitions
+**Key exports**: `EdgeWorkerConfig`, `IAgentRunner`, `IIssueTrackerService`, `CyrusAgentSession`, config schemas
 
 ### @cyrus/claude-runner
-**Scope**: Manage Claude CLI process lifecycle
+**Scope**: Claude Code SDK wrapper
 
 **Responsibilities**:
-- Spawn and manage Claude CLI processes
-- Handle process arguments and environment setup
-- Send prompts and input to Claude
-- Kill/restart processes as needed
-- Configure allowed tools and working directory
-- Handle --continue flag for session continuation
+- Spawn and manage Claude Code sessions via `@anthropic-ai/claude-agent-sdk`
+- Map SDK messages to shared runner message shapes
+- Configure tools, MCP, sandbox, and session continuation
 
-**Key Exports**:
-- `ClaudeRunner` - Main process manager
-- `getAllTools()` - List available Claude tools
-- Process configuration types
+**Key exports**: `ClaudeRunner`, `SDKMessage` types, sandbox helpers
 
-### @cyrus/ndjson-client
-**Scope**: NDJSON streaming communication with edge proxy
+### @cyrus/cursor-runner
+**Scope**: Cursor Agent SDK wrapper
 
 **Responsibilities**:
-- Establish persistent HTTP connections for NDJSON streaming
-- Handle authentication with OAuth tokens
-- Parse incoming NDJSON events (webhooks, heartbeats)
-- Send status updates back to proxy
-- Manage reconnection and error handling
-- Emit events for webhook data
+- Run Cursor sessions via `@cursor/sdk`
+- Translate Cyrus tool permissions to Cursor CLI config
+- Map Cursor stream events to shared runner message shapes
 
-**Key Exports**:
-- `NdjsonClient` - Main client class
-- `WebhookEvent` - Webhook event types
-- `StatusUpdate` - Status update types
-- Configuration interfaces
+**Key exports**: `CursorRunner`, permission and sandbox helpers
 
 ### @cyrus/edge-worker
-**Scope**: Orchestrate Linear webhooks, Claude processing, and API responses
+**Scope**: Orchestrate webhooks, agent sessions, git worktrees, and issue-tracker responses
 
 **Responsibilities**:
-- Connect to edge proxy via NDJSON streaming
-- Process Linear webhook events (issue assignment, comments)
-- Manage Claude sessions for each issue
-- Post responses back to Linear via API
-- Handle multiple repository/workspace configurations
-- Coordinate between all other packages
+- Host `SharedApplicationServer` (Fastify) for inbound webhooks and config updates
+- Route issues to repositories; manage `AgentSessionManager` and `GlobalSessionRegistry`
+- Build prompts, resolve tools/MCP, optional egress sandbox
+- Instantiate Claude or Cursor runners per session
 
-**Key Exports**:
-- `EdgeWorker` - Main orchestrator class
-- `RepositoryConfig` - Repository configuration
-- `EdgeWorkerConfig` - Full configuration interface
-- Event types and handlers
+**Key exports**: `EdgeWorker`, `GitService`, `RunnerConfigBuilder`, `AgentSessionManager`
+
+### @cyrus/linear-event-transport
+**Scope**: Linear webhook ingress and issue-tracker adapter
+
+**Responsibilities**:
+- Register `POST /linear-webhook` (and legacy `/webhook` alias)
+- Verify Linear signatures or bearer tokens (direct vs CYHOST-forwarded)
+- Implement `LinearIssueTrackerService` for Linear API operations
+
+**Key exports**: `LinearEventTransport`, `LinearIssueTrackerService`
+
+### @cyrus/github-event-transport
+**Scope**: GitHub webhook ingress (typically forwarded from CYHOST)
+
+**Responsibilities**:
+- Register `POST /github-webhook`
+- Verify GitHub HMAC or bearer tokens
+- Translate PR comment/review/push events for `EdgeWorker`
+
+**Key exports**: `GitHubEventTransport`, `GitHubAppTokenProvider`
+
+### @cyrus/cloudflare-tunnel-client
+**Scope**: Expose the local Fastify server via Cloudflare tunnel
+
+**Key exports**: `CloudflareTunnelClient`, `getCyrusAppUrl`
+
+### @cyrus/config-updater
+**Scope**: Authenticated HTTP routes for CYHOST to push config to a self-hosted runtime
+
+**Key exports**: `ConfigUpdater`
+
+### @cyrus/mcp-tools
+**Scope**: Runner-neutral MCP tool servers used by Cyrus sessions
+
+**Key exports**: `createCyrusToolsServer`, failure-mode logging tools
 
 ## Package Dependencies
 
 ```
 @cyrus/edge-worker
-  ├── @cyrus/core (Session, SessionManager)
-  ├── @cyrus/claude-parser (ClaudeEvent types)
-  ├── @cyrus/claude-runner (ClaudeRunner)
-  ├── @cyrus/ndjson-client (NdjsonClient)
-  └── @linear/sdk (Linear API)
+  ├── @cyrus/core
+  ├── @cyrus/claude-runner
+  ├── @cyrus/cursor-runner
+  ├── @cyrus/linear-event-transport
+  ├── @cyrus/github-event-transport
+  ├── @cyrus/cloudflare-tunnel-client
+  ├── @cyrus/config-updater
+  └── @cyrus/mcp-tools
 
-@cyrus/claude-runner
-  └── @cyrus/claude-parser (for event types)
-
-@cyrus/ndjson-client
-  └── (no internal dependencies)
-
-@cyrus/claude-parser
-  └── (no internal dependencies)
-
-@cyrus/core
-  └── (no internal dependencies)
+@cyrus/claude-runner ──► @cyrus/core
+@cyrus/cursor-runner ──► @cyrus/core
+@cyrus/linear-event-transport ──► @cyrus/core
+@cyrus/github-event-transport ──► @cyrus/core
 ```
 
 ## Design Principles
 
-1. **Single Responsibility**: Each package has one clear purpose
-2. **Minimal Dependencies**: Packages depend only on what they need
-3. **Type Safety**: All packages export TypeScript types
-4. **Event-Driven**: Packages communicate via events where appropriate
+1. **Single responsibility**: Each package has one clear purpose
+2. **Minimal dependencies**: Packages depend only on what they need
+3. **Type safety**: All packages export TypeScript types
+4. **Event-driven transports**: Webhook ingress is platform-specific; `EdgeWorker` consumes normalized events
 5. **Testable**: Each package can be tested in isolation
-6. **Reusable**: Packages can be used independently in different contexts
+6. **Reusable**: Packages can be used independently (F1 uses `edge-worker` + CLI issue tracker)
 
 ## Usage in Apps
 
-- **CLI App**: Uses all packages to provide a command-line interface
-- **Electron App**: Uses edge-worker package for the main functionality
-- **Future Apps**: Can pick and choose packages based on needs
+- **`apps/cli`**: Production entry point — starts `EdgeWorker` with Linear/GitHub transports
+- **`apps/f1`**: Test harness — `EdgeWorker` with `platform: "cli"` and in-memory issue tracker

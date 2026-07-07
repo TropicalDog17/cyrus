@@ -77,6 +77,7 @@ import {
 	resolvePath,
 	WebhookIpValidator,
 } from "cyrus-core";
+import { CursorRunner } from "cyrus-cursor-runner";
 import {
 	extractCommentAuthor,
 	extractCommentBody,
@@ -4540,7 +4541,7 @@ ${taskSection}`;
 	 * Instantiate the appropriate runner for the given type.
 	 */
 	private createRunnerForType(
-		runnerType: "claude",
+		runnerType: RunnerType,
 		config: AgentRunnerConfig,
 	): IAgentRunner {
 		switch (runnerType) {
@@ -4552,6 +4553,8 @@ ${taskSection}`;
 					: config;
 				return new ClaudeRunner(claudeConfig, this.isWarmSessionsEnabled());
 			}
+			case "cursor":
+				return new CursorRunner(config);
 			default:
 				throw new Error(`Unknown runner type: ${runnerType satisfies never}`);
 		}
@@ -5038,8 +5041,13 @@ ${taskSection}`;
 		const session = exact ?? prefix;
 		if (!session) return null;
 
-		const runnerType = session.claudeSessionId ? "claude" : null;
-		const runnerSessionId = session.claudeSessionId ?? null;
+		const runnerType: RunnerType | null = session.claudeSessionId
+			? "claude"
+			: session.cursorSessionId
+				? "cursor"
+				: null;
+		const runnerSessionId =
+			session.claudeSessionId ?? session.cursorSessionId ?? null;
 
 		const sessionSource = session.id.startsWith("github-")
 			? "github"
@@ -6464,9 +6472,13 @@ ${input.userComment}
 		// Fetch issue labels early to determine runner type
 		const labels = await this.fetchIssueLabels(fullIssue);
 
-		// Determine whether to resume based on the existing Claude session ID
-		const hasClaudeSession = !isNewSession && Boolean(session.claudeSessionId);
-		const needsNewSession = isNewSession || !hasClaudeSession;
+		// Determine whether to resume based on the existing runner session ID
+		// (Claude or Cursor — whichever originally created the session).
+		const existingRunnerSessionId =
+			session.claudeSessionId ?? session.cursorSessionId;
+		const hasExistingSession =
+			!isNewSession && Boolean(existingRunnerSessionId);
+		const needsNewSession = isNewSession || !hasExistingSession;
 
 		// Fetch system prompt based on labels
 
@@ -6503,7 +6515,7 @@ ${input.userComment}
 
 		const resumeSessionId = needsNewSession
 			? undefined
-			: session.claudeSessionId;
+			: existingRunnerSessionId;
 
 		console.log(
 			`[resumeAgentSession] needsNewSession=${needsNewSession}, resumeSessionId=${resumeSessionId ?? "none"}`,
