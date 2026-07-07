@@ -85,6 +85,9 @@ export const LINEAR_DEFAULT_ALLOWED_TOOLS = [
 	"mcp__linear",
 	"mcp__cyrus-tools",
 	"mcp__cyrus-docs",
+	// Atlassian MCP (Jira/Confluence) — read Jira ticket content for context.
+	// Injected only when configured (see AtlassianMcpConfig).
+	"mcp__atlassian",
 ] as const;
 
 /**
@@ -131,6 +134,9 @@ export const READONLY_DEFAULT_ALLOWED_TOOLS = [
 	"mcp__linear",
 	"mcp__cyrus-tools",
 	"mcp__cyrus-docs",
+	// Atlassian MCP (Jira/Confluence) — reading Jira ticket content for context
+	// is a read-only operation, so it belongs in the read-only preset too.
+	"mcp__atlassian",
 ] as const;
 
 /**
@@ -202,6 +208,9 @@ export const GITHUB_DEFAULT_ALLOWED_TOOLS = [
 	"mcp__linear",
 	"mcp__cyrus-tools",
 	"mcp__cyrus-docs",
+	// Atlassian MCP (Jira/Confluence) — read Jira ticket content for context.
+	// Injected only when configured (see AtlassianMcpConfig).
+	"mcp__atlassian",
 ] as const;
 
 /**

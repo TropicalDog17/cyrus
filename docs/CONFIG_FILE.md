@@ -140,6 +140,15 @@ Routes issues to different AI modes based on Linear labels and optionally config
 
 Note: Linear MCP tools (`mcp__linear`) are always included automatically. Slack MCP tools (`mcp__slack`) are included when the `SLACK_BOT_TOKEN` environment variable is set (Linear and Slack sessions only; excluded from GitHub sessions).
 
+### Atlassian MCP (Jira / Confluence)
+
+Cyrus can query Jira ticket (or Confluence page) content for context — for example, pulling in a Jira ticket referenced by a Linear issue. Atlassian MCP tools (`mcp__atlassian`) are included automatically when the integration is configured via environment variables:
+
+- **`ATLASSIAN_MCP_TOKEN`** — Bearer token used to authenticate with the Atlassian MCP server. For Atlassian's official [remote MCP server](https://www.atlassian.com/platform/remote-mcp-server) this is an OAuth access token; for a self-hosted/community Atlassian MCP server it may be an API token. Sent as `Authorization: Bearer <token>`.
+- **`ATLASSIAN_MCP_URL`** *(optional)* — Override the MCP endpoint. Defaults to `https://mcp.atlassian.com/v1/mcp` (the official streamable-HTTP endpoint). A URL whose path ends in `/sse` is treated as the SSE transport, so `https://mcp.atlassian.com/v1/sse` also works. Point this at a self-hosted server for Jira Data Center / Server.
+
+The server is injected only when `ATLASSIAN_MCP_TOKEN` or `ATLASSIAN_MCP_URL` is set; otherwise it is skipped entirely. Whether a session can call these tools is still gated by its allowed-tools list (`mcp__atlassian`), which is granted by default for Linear, GitHub, and read-only sessions.
+
 ---
 
 ## User Access Control

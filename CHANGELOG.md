@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Cyrus can now read Jira ticket (and Confluence page) content for context via the Atlassian MCP server — for example, pulling in a Jira ticket linked from a Linear issue. Enable it by setting the `ATLASSIAN_MCP_TOKEN` environment variable (and optionally `ATLASSIAN_MCP_URL` to point at a self-hosted server or the SSE endpoint); when unset, nothing changes. See [docs/CONFIG_FILE.md](docs/CONFIG_FILE.md#atlassian-mcp-jira--confluence). ([DEV-110](https://linear.app/devtrop/issue/DEV-110/integrate-jira-with-cyrus), [#7](https://github.com/TropicalDog17/cyrus/pull/7))
 - **Cursor is now supported as an agent executor.** Route an issue to Cursor by adding a `cursor` label, putting `[agent=cursor]` in the issue description, or setting `defaultRunner: "cursor"` (or `CYRUS_DEFAULT_RUNNER=cursor`). Cursor sessions run via the official `@cursor/sdk` and default to the `composer-2.5` model (Composer 2.5, whose default speed tier is Fast); override it with `cursorDefaultModel` in `config.json` or `CYRUS_CURSOR_DEFAULT_MODEL`. Requires a `CURSOR_API_KEY` in the environment.
 
 ### Removed

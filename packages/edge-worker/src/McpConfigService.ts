@@ -5,6 +5,7 @@ import {
 	type CyrusToolsOptions,
 	createCyrusToolsServer,
 } from "cyrus-mcp-tools";
+import { buildAtlassianMcpServerConfig } from "./AtlassianMcpConfig.js";
 
 type CyrusToolsMcpContextEntry = {
 	contextId: string;
@@ -139,6 +140,17 @@ export class McpConfigService {
 					SLACK_MCP_XOXB_TOKEN: slackBotToken,
 				},
 			};
+		}
+
+		// Inject the Atlassian MCP server (Jira/Confluence) when configured, so
+		// sessions can pull Jira ticket content for context — e.g. a Jira ticket
+		// referenced by a Linear issue. Gated on env config (ATLASSIAN_MCP_TOKEN /
+		// ATLASSIAN_MCP_URL); per-platform availability is enforced upstream by the
+		// allowed-tools array (`mcp__atlassian`).
+		// https://www.atlassian.com/platform/remote-mcp-server
+		const atlassianServer = buildAtlassianMcpServerConfig();
+		if (atlassianServer) {
+			mcpConfig.atlassian = atlassianServer;
 		}
 
 		return mcpConfig;

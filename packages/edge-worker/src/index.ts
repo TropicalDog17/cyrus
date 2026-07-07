@@ -16,6 +16,10 @@ export type {
 	AskUserQuestionHandlerDeps,
 } from "./AskUserQuestionHandler.js";
 export { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
+export {
+	buildAtlassianMcpServerConfig,
+	DEFAULT_ATLASSIAN_MCP_URL,
+} from "./AtlassianMcpConfig.js";
 export { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 export { EdgeWorker } from "./EdgeWorker.js";
 export { EgressProxy } from "./EgressProxy.js";
