@@ -11,6 +11,7 @@ import {
 	type WriteStream,
 	writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { cwd } from "node:process";
 import { fileURLToPath } from "node:url";
@@ -43,6 +44,7 @@ import type {
 	AgentUserMessage,
 	IAgentRunner,
 } from "cyrus-core";
+import { compute, nodeDirLister, toCursorPermissions } from "cyrus-core";
 import {
 	buildCyrusPermissionsConfig,
 	type CyrusPermissionsConfig,
@@ -727,6 +729,31 @@ export class CursorRunner extends EventEmitter implements IAgentRunner {
 			disallowedTools: this.config.disallowedTools,
 			mcpServers: sdkMcpServers,
 		});
+
+		// Derive the effective access policy so Cursor's UN-enforceable
+		// home-directory read denials are SURFACED, not silently dropped.
+		// Cursor's sandbox cannot enforce per-path denyRead under
+		// workspace_readwrite, so the policy's home-directory denials come back
+		// as warnings (logged below) rather than deny patterns that the
+		// fail-closed .cursor hook could trip over. Positive read allows (which
+		// can never fail-closed) are merged in as additive coverage.
+		const cursorPolicy = toCursorPermissions(
+			compute({
+				homeDir: homedir(),
+				dirLister: nodeDirLister,
+				cwd: workspace,
+				allowReadDirectories: this.config.allowedDirectories ?? [],
+				toolAllowExtra: this.config.allowedTools,
+				toolDisallow: this.config.disallowedTools,
+			}),
+		);
+		for (const warning of cursorPolicy.warnings) {
+			console.warn(`[CursorRunner] ${warning}`);
+		}
+		for (const allowPattern of cursorPolicy.allow) {
+			if (!cfg.allow.includes(allowPattern)) cfg.allow.push(allowPattern);
+		}
+
 		writeFileSync(
 			join(cursorDir, "cyrus-permissions.json"),
 			`${JSON.stringify(cfg, null, "\t")}\n`,

@@ -7,6 +7,7 @@ import {
 	type WriteStream,
 	writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
 	type BackgroundTaskSummary,
@@ -27,15 +28,17 @@ import type {
 	AskUserQuestionInput,
 } from "cyrus-core";
 import {
+	compute,
 	createLogger,
 	type IAgentRunner,
 	type ILogger,
 	LogLevel,
+	nodeDirLister,
 	StreamingPrompt,
+	toClaudeToolPatterns,
 } from "cyrus-core";
 import dotenv from "dotenv";
 import { toAgentMessage } from "./claude-message-projection.js";
-import { buildHomeDirectoryDisallowedTools } from "./home-directory-restrictions.js";
 import {
 	checkLinuxSandboxRequirements,
 	logSandboxRequirementFailures,
@@ -528,45 +531,33 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 				promptForQuery = this.streamingPrompt;
 			}
 
-			// Process allowed directories by adding Read patterns to allowedTools
-			let processedAllowedTools = this.config.allowedTools
-				? [...this.config.allowedTools]
-				: undefined;
-			if (
-				this.config.allowedDirectories &&
-				this.config.allowedDirectories.length > 0
-			) {
-				const directoryTools = this.config.allowedDirectories.map((dir) => {
-					// Add extra / prefix for absolute paths to ensure Claude Code recognizes them properly
-					// See: https://docs.anthropic.com/en/docs/claude-code/settings#read-%26-edit
-					const prefixedPath = dir.startsWith("/") ? `/${dir}` : dir;
-					return `Read(${prefixedPath}/**)`;
-				});
-				processedAllowedTools = processedAllowedTools
-					? [...processedAllowedTools, ...directoryTools]
-					: directoryTools;
-			}
-
-			// Build home directory restrictions: deny Read on everything in ~/
-			// that is not an ancestor of the working directory. This prevents
-			// Claude from reading SSH keys, credentials, etc. `Read(~/**)` does
-			// not work as a disallowedTools pattern — `~` is not expanded to the
-			// home directory path, so the pattern never matches.
-			const homeDisallowedTools = this.config.workingDirectory
-				? buildHomeDirectoryDisallowedTools(
-						this.config.workingDirectory,
-						this.config.allowedDirectories ?? [],
-					)
-				: [];
-
-			// Merge config-level denials with home directory denials, deduplicating in case
-			// any paths appear in both (e.g. an allowedDirectory that is also explicitly denied).
-			const processedDisallowedTools = [
-				...new Set([
-					...(this.config.disallowedTools ?? []),
-					...homeDisallowedTools,
-				]),
-			];
+			// Derive the effective access policy once and render it into Claude
+			// Code tool patterns. `compute()` folds together three things that
+			// used to be inline here:
+			//   - allowedDirectories → Read(dir/**) allow patterns
+			//   - the home-directory sibling-exclusion walk → Read(...) denials
+			//     (deny Read on everything in ~/ that is not an ancestor of the
+			//     working directory, preventing reads of SSH keys, credentials,
+			//     etc. — `Read(~/**)` does not work as a disallowedTools pattern
+			//     because `~` is never expanded, so each sibling is named
+			//     concretely via double-slash absolute paths)
+			//   - config-level allowed/disallowed tools, passed through verbatim
+			// This is the COLD path; the warm path (EdgeWorker.warmupSessions)
+			// and the OS sandbox layer call the identical compute() so all three
+			// enforcement layers agree.
+			const {
+				allowedTools: processedAllowedTools,
+				disallowedTools: processedDisallowedTools,
+			} = toClaudeToolPatterns(
+				compute({
+					homeDir: homedir(),
+					dirLister: nodeDirLister,
+					cwd: this.config.workingDirectory ?? "",
+					allowReadDirectories: this.config.allowedDirectories ?? [],
+					toolAllowExtra: this.config.allowedTools,
+					toolDisallow: this.config.disallowedTools,
+				}),
+			);
 
 			// Log disallowed tools if configured
 			if (processedDisallowedTools.length > 0) {
@@ -699,7 +690,9 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					...(this.config.additionalDirectories?.length && {
 						additionalDirectories: this.config.additionalDirectories,
 					}),
-					...(processedAllowedTools && { allowedTools: processedAllowedTools }),
+					...(processedAllowedTools.length > 0 && {
+						allowedTools: processedAllowedTools,
+					}),
 					...(processedDisallowedTools.length > 0 && {
 						disallowedTools: processedDisallowedTools,
 					}),

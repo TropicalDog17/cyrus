@@ -1,5 +1,24 @@
 // Logging
 
+// Access policy — single owner of effective read/write access
+export type {
+	AccessPolicyInput,
+	ClaudeToolPatterns,
+	CursorPermissions,
+	DirEntry,
+	DirLister,
+	EffectiveAccessPolicy,
+	PolicyPath,
+	SandboxFilesystem,
+} from "./access-policy/AccessPolicy.js";
+export {
+	compute,
+	nodeDirLister,
+	toClaudeToolPatterns,
+	toCursorPermissions,
+	toSandboxFilesystem,
+} from "./access-policy/AccessPolicy.js";
+
 // Error reporting
 export type {
 	ErrorReporter,

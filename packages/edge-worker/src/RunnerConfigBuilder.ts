@@ -1,4 +1,5 @@
 import { execSync } from "node:child_process";
+import { homedir } from "node:os";
 import type {
 	ClaudeRunnerConfig,
 	HookCallbackMatcher,
@@ -17,6 +18,7 @@ import type {
 	RepositoryConfig,
 	RunnerType,
 } from "cyrus-core";
+import { compute, nodeDirLister, toSandboxFilesystem } from "cyrus-core";
 import type { CursorRunnerConfig } from "cyrus-cursor-runner";
 
 /**
@@ -372,14 +374,25 @@ export class RunnerConfigBuilder {
 				enableWeakerNetworkIsolation: true,
 				filesystem: {
 					...input.sandboxSettings.filesystem,
-					// "." resolves to the cwd of the primary folder Claude is working in.
+					// Derive the OS-sandbox filesystem allow/deny from the SAME
+					// AccessPolicy.compute() the cold + warm Claude tool-permission
+					// paths use, guaranteeing the sandbox layer and the tool layer
+					// agree. "." resolves to the cwd of the primary folder Claude is
+					// working in; allowedDirectories contains the attachments dir,
+					// repo paths, and git metadata dirs — all of which need OS-level
+					// read access alongside the worktree. `denyRead` keeps the literal
+					// "~/" token, which bubblewrap / macOS sandbox honor as a true
+					// deny+whitelist root. Writes are restricted to the worktree.
 					// See: https://code.claude.com/docs/en/settings#sandbox-path-prefixes
-					// allowedDirectories contains the attachments dir, repo paths, and git
-					// metadata dirs — all of which need OS-level read access alongside the worktree.
-					allowRead: [".", ...input.allowedDirectories],
-					denyRead: ["~/"],
-					// Restrict subprocess writes to the session worktree only
-					allowWrite: [input.session.workspace.path],
+					...toSandboxFilesystem(
+						compute({
+							homeDir: homedir(),
+							dirLister: nodeDirLister,
+							cwd: input.session.workspace.path,
+							allowReadDirectories: input.allowedDirectories,
+							writeDirectories: [input.session.workspace.path],
+						}),
+					),
 				},
 			};
 		}

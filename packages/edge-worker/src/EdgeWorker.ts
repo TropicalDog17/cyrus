@@ -3,6 +3,7 @@ import { execSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { LinearClient } from "@linear/sdk";
 import type {
@@ -13,7 +14,6 @@ import type {
 } from "cyrus-claude-runner";
 import {
 	buildBaseSessionEnv,
-	buildHomeDirectoryDisallowedTools,
 	ClaudeRunner,
 	HttpSessionStore,
 	normalizeMcpHttpTransport,
@@ -55,6 +55,7 @@ import type {
 import {
 	CLIIssueTrackerService,
 	CLIRPCServer,
+	compute,
 	createLogger,
 	DEFAULT_PROXY_URL,
 	isAgentSessionCreatedWebhook,
@@ -73,9 +74,11 @@ import {
 	isStopSignalMessage,
 	isUnassignMessage,
 	isUserPromptMessage,
+	nodeDirLister,
 	normalizeConfigPaths,
 	PersistenceManager,
 	requireLinearWorkspaceId,
+	toClaudeToolPatterns,
 	WebhookIpValidator,
 } from "cyrus-core";
 import { CursorRunner } from "cyrus-cursor-runner";
@@ -6027,8 +6030,11 @@ ${input.userComment}
 					// computes at query time. Warm sessions run warmSession.query()
 					// directly and never see those query-time options, so without
 					// re-deriving them here a resumed session could read ~/.ssh, ~/.aws,
-					// etc. Mirror the live allowedDirectories composition so the
-					// attachments/repo/git dirs stay readable.
+					// etc. Use the SAME AccessPolicy.compute() + toClaudeToolPatterns the
+					// cold path (ClaudeRunner.start) uses so warm and cold derive
+					// disallowedTools identically — this is the drift-hole fix. Mirror the
+					// live allowedDirectories composition so the attachments/repo/git dirs
+					// stay readable.
 					const workspaceFolderName = basename(session.workspace.path);
 					const attachmentsDir = join(
 						this.cyrusHome,
@@ -6045,15 +6051,15 @@ ${input.userComment}
 							),
 						]),
 					];
-					const disallowedTools = [
-						...new Set([
-							...this.buildDisallowedTools(repo),
-							...buildHomeDirectoryDisallowedTools(
-								session.workspace.path,
-								allowedDirectories,
-							),
-						]),
-					];
+					const { disallowedTools } = toClaudeToolPatterns(
+						compute({
+							homeDir: homedir(),
+							dirLister: nodeDirLister,
+							cwd: session.workspace.path,
+							allowReadDirectories: allowedDirectories,
+							toolDisallow: this.buildDisallowedTools(repo),
+						}),
+					);
 
 					// Skills for this session's repo/worktree — mirrors the live
 					// resolveSkillsConfig() path so warm sessions have the same skill
