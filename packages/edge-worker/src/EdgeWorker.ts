@@ -134,51 +134,51 @@ export declare interface EdgeWorker {
 export class EdgeWorker extends EventEmitter {
 	private config: EdgeWorkerConfig;
 	private repositories: Map<string, RepositoryConfig> = new Map(); // repository 'id' (internal, stored in config.json) mapped to the full repo config
-	private agentSessionManager: AgentSessionManager; // Single instance managing all agent sessions across repositories
+	private agentSessionManager!: AgentSessionManager; // Single instance managing all agent sessions across repositories
 	private activitySinks: Map<string, IActivitySink> = new Map(); // Maps Linear workspace ID to activity sink (one per workspace, mirrors issueTrackers)
 	private sessionRepositories: Map<string, string> = new Map(); // Maps session ID to repository ID
 	private lastStopTimeBySession: Map<string, number> = new Map(); // Maps session ID to timestamp of last stop signal (for double-stop detection)
-	private warmPool: WarmSessionPool; // Pre-warmed Claude session subprocess pool
-	private parkedRegistry: ParkedSessionRegistry; // Sessions parked behind blocked-by dependencies
-	private sessionOrchestrator: SessionOrchestrator; // Runner creation + message wiring
+	private warmPool!: WarmSessionPool; // Pre-warmed Claude session subprocess pool
+	private parkedRegistry!: ParkedSessionRegistry; // Sessions parked behind blocked-by dependencies
+	private sessionOrchestrator!: SessionOrchestrator; // Runner creation + message wiring
 	private issueTrackers: Map<string, IIssueTrackerService> = new Map(); // one issue tracker per Linear workspace (keyed by linearWorkspaceId)
 	private linearEventTransport: LinearEventTransport | null = null; // Single event transport for webhook delivery
 	private gitHubEventTransport: GitHubEventTransport | null = null; // GitHub event transport for forwarded GitHub webhooks
 	private gitHubAppTokenProvider: GitHubAppTokenProvider | null = null; // Self-hosted GitHub App token minting
-	private gitHubCommentService: GitHubCommentService; // Service for posting comments back to GitHub PRs
+	private gitHubCommentService!: GitHubCommentService; // Service for posting comments back to GitHub PRs
 	private cliRPCServer: CLIRPCServer | null = null; // CLI RPC server for CLI platform mode
 	private configUpdater: ConfigUpdater | null = null; // Single config updater for configuration updates
-	private persistenceManager: PersistenceManager;
-	private sharedApplicationServer: SharedApplicationServer;
+	private persistenceManager!: PersistenceManager;
+	private sharedApplicationServer!: SharedApplicationServer;
 	private cyrusHome: string;
-	private globalSessionRegistry: GlobalSessionRegistry; // Centralized session storage across all repositories
+	private globalSessionRegistry!: GlobalSessionRegistry; // Centralized session storage across all repositories
 	private configPath?: string; // Path to config.json file
 	/** @internal - Exposed for testing only */
-	public repositoryRouter: RepositoryRouter; // Repository routing and selection
-	private webhookRouter: WebhookRouter; // Webhook/message dispatch + branch selection
-	private gitService: GitService;
+	public repositoryRouter!: RepositoryRouter; // Repository routing and selection
+	private webhookRouter!: WebhookRouter; // Webhook/message dispatch + branch selection
+	private gitService!: GitService;
 	private activeWebhookCount = 0; // Track number of webhooks currently being processed
 	/** Handler for AskUserQuestion tool invocations via Linear select signal */
-	private askUserQuestionHandler: AskUserQuestionHandler;
+	private askUserQuestionHandler!: AskUserQuestionHandler;
 	/** User access control for whitelisting/blacklisting Linear users */
-	private userAccessControl: UserAccessControl;
+	private userAccessControl!: UserAccessControl;
 	private logger: ILogger;
 	// Extracted service modules
-	private attachmentService: AttachmentService;
-	private runnerSelectionService: RunnerSelectionService;
-	private toolPermissionResolver: ToolPermissionResolver;
-	private mcpConfigService: McpConfigService;
-	private runnerConfigBuilder: RunnerConfigBuilder;
-	private activityPoster: ActivityPoster;
-	private configManager: ConfigManager;
-	private promptBuilder: PromptBuilder;
-	private gitHubUsernameResolver: GitHubUsernameResolver;
-	private promptAssembler: PromptAssembler;
-	private defaultSkillsDeployer: DefaultSkillsDeployer;
-	private skillsPluginResolver: SkillsPluginResolver;
-	private cyrusToolsHost: CyrusToolsHost;
+	private attachmentService!: AttachmentService;
+	private runnerSelectionService!: RunnerSelectionService;
+	private toolPermissionResolver!: ToolPermissionResolver;
+	private mcpConfigService!: McpConfigService;
+	private runnerConfigBuilder!: RunnerConfigBuilder;
+	private activityPoster!: ActivityPoster;
+	private configManager!: ConfigManager;
+	private promptBuilder!: PromptBuilder;
+	private gitHubUsernameResolver!: GitHubUsernameResolver;
+	private promptAssembler!: PromptAssembler;
+	private defaultSkillsDeployer!: DefaultSkillsDeployer;
+	private skillsPluginResolver!: SkillsPluginResolver;
+	private cyrusToolsHost!: CyrusToolsHost;
 	/** Validates webhook source IPs against known provider allowlists */
-	private webhookIpValidator: WebhookIpValidator;
+	private webhookIpValidator!: WebhookIpValidator;
 	/** Egress proxy for sandbox network traffic filtering and header injection */
 	private egressProxy: EgressProxy | null = null;
 	/** Base SDK sandbox settings to pass to ClaudeRunner sessions (set when proxy starts) */
@@ -201,12 +201,44 @@ export class EdgeWorker extends EventEmitter {
 	 * Key format: `${createdAt}:${issueId}`
 	 */
 	private processedIssueUpdateKeys = new Set<string>();
+	/** Guards buildCollaborators() against double-construction. */
+	private collaboratorsBuilt = false;
 
 	constructor(config: EdgeWorkerConfig) {
 		super();
 		this.config = normalizeConfigPaths(config);
 		this.cyrusHome = config.cyrusHome;
 		this.logger = createLogger({ component: "EdgeWorker" });
+		// Collaborators are constructed + wired by buildCollaborators(), driven
+		// by the composeEdgeWorker() composition root — NOT here. The constructor
+		// sets only primitive state, so there is no `new Collaborator()` in the
+		// constructor body (Frozen decision #6). A worker built via
+		// `new EdgeWorker(config)` alone is intentionally incomplete; always
+		// construct through composeEdgeWorker().
+	}
+
+	/**
+	 * Construct and wire every collaborator onto this worker — the composition
+	 * root's build step.
+	 *
+	 * This is the second half of a two-phase construction: the constructor sets
+	 * primitive state (config / cyrusHome / logger + the field-initialized state
+	 * maps), then `composeEdgeWorker()` calls this to build the collaborator
+	 * graph. Collaborators bind to this worker instance — their dependency
+	 * closures read `this.<method>` / `this.<stateMap>` lazily — so they must be
+	 * built *after* the instance exists. That is why construction is two-phase
+	 * rather than a constructor that accepts a prebuilt collaborator bag.
+	 *
+	 * @internal Exposed for the composeEdgeWorker() composition root only.
+	 *
+	 * @param config the raw (un-normalized) config; the body reads it directly
+	 *   for the fields that were historically consumed pre-normalization
+	 *   (serverPort, linearWorkspaces, repositories, userAccessControl), while
+	 *   `this.config` holds the path-normalized copy.
+	 */
+	buildCollaborators(config: EdgeWorkerConfig): void {
+		if (this.collaboratorsBuilt) return;
+		this.collaboratorsBuilt = true;
 		this.persistenceManager = new PersistenceManager(
 			join(this.cyrusHome, "state"),
 		);
@@ -2314,7 +2346,7 @@ ${taskSection}`;
 					for (const session of activeSessions) {
 						try {
 							this.logger.debug(
-								`  🛑 Stopping session for issue ${session.issueId}`,
+								`  🛑 Stopping session for issue ${session.issue?.id}`,
 							);
 
 							// Get the agent runner for this session
@@ -5187,4 +5219,24 @@ ${taskSection}`;
 			this.logger.error("Failed to save OAuth tokens:", error);
 		}
 	}
+}
+
+/**
+ * Composition root for the edge worker.
+ *
+ * Constructs the `EdgeWorker` and wires its collaborator graph. This is the
+ * single blessed way to create a worker: the constructor sets only primitive
+ * state and does not `new` any collaborator (Frozen decision #6), so a worker
+ * produced by `new EdgeWorker(config)` alone is intentionally incomplete —
+ * always go through `composeEdgeWorker()`.
+ *
+ * Construction is two-phase because collaborators bind to the worker instance
+ * (their dependency closures read `this.<method>` / `this.<stateMap>` lazily):
+ * the instance is created first, then `buildCollaborators(config)` wires the
+ * graph against it.
+ */
+export function composeEdgeWorker(config: EdgeWorkerConfig): EdgeWorker {
+	const worker = new EdgeWorker(config);
+	worker.buildCollaborators(config);
+	return worker;
 }

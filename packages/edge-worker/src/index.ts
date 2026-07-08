@@ -25,7 +25,7 @@ export {
 	normalizeTool,
 } from "./activity/index.js";
 export { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
-export { EdgeWorker } from "./EdgeWorker.js";
+export { composeEdgeWorker, EdgeWorker } from "./EdgeWorker.js";
 export { EgressProxy } from "./EgressProxy.js";
 export type { CreateGitWorktreeOptions } from "./GitService.js";
 export { GitService } from "./GitService.js";

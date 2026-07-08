@@ -4,7 +4,7 @@ import type {
 	LinearIssue,
 } from "@linear/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { EdgeWorker } from "../src/EdgeWorker";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker";
 import type { EdgeWorkerConfig } from "../src/types";
 import { TEST_CYRUS_HOME } from "./test-dirs.js";
 
@@ -49,7 +49,7 @@ describe("EdgeWorker - Native Attachments", () => {
 			},
 		};
 
-		edgeWorker = new EdgeWorker(mockConfig);
+		edgeWorker = composeEdgeWorker(mockConfig);
 		mockFetch.mockReset();
 	});
 

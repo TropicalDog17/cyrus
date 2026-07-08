@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { EdgeWorker } from "../src/EdgeWorker";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker";
 import type { EdgeWorkerConfig } from "../src/types";
 import { TEST_CYRUS_HOME } from "./test-dirs.js";
 
@@ -46,7 +46,7 @@ describe("EdgeWorker.resolveSkillRepoPaths", () => {
 				"test-workspace": { linearToken: "test-token" },
 			},
 		} as unknown as EdgeWorkerConfig;
-		edgeWorker = new EdgeWorker(config);
+		edgeWorker = composeEdgeWorker(config);
 	});
 
 	it("uses the session worktree (SDK cwd), not the stale base clone, for single-repo sessions", () => {

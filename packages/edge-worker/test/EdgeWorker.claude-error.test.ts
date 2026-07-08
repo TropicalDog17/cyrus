@@ -2,7 +2,7 @@ import { LinearClient } from "@linear/sdk";
 import { LinearEventTransport } from "cyrus-linear-event-transport";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
-import { EdgeWorker } from "../src/EdgeWorker.js";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker.js";
 import { SharedApplicationServer } from "../src/SharedApplicationServer.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
 import { TEST_CYRUS_HOME } from "./test-dirs.js";
@@ -93,7 +93,7 @@ describe("EdgeWorker - handleClaudeError (runner-crash surfacing)", () => {
 			},
 		} as EdgeWorkerConfig;
 
-		edgeWorker = new EdgeWorker(mockConfig);
+		edgeWorker = composeEdgeWorker(mockConfig);
 		(edgeWorker as any).agentSessionManager = mockAgentSessionManager;
 	});
 
