@@ -534,6 +534,12 @@
 			"type": "string",
 			"enum": ["claude", "cursor"]
 		},
+		"autoInferRepository": {
+			"type": "boolean"
+		},
+		"autoInferRepositoryModel": {
+			"type": "string"
+		},
 		"defaultModel": {
 			"type": "string"
 		},

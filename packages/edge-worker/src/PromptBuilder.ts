@@ -662,7 +662,9 @@ The system evaluates routing methods in this strict priority order. The FIRST ma
 3. **Project Assignment (Priority 3)**: Add the issue to a project that routes to the target repository.
 4. **Team Selection (Priority 4 - Lowest)**: Create the issue in a Linear team that routes to the target repository.
 
-For reliable cross-repository routing, prefer Description Tags as they are explicit and unambiguous.
+If none of the above match, the system may auto-infer the best-fit repository from the issue title/description using an AI model, and only asks the user to pick a repository when it cannot infer one confidently.
+
+For reliable cross-repository routing, prefer Description Tags as they are explicit and unambiguous — auto-inference is a best-effort fallback, not a substitute for explicit routing.
 </description>
 
 <available_repositories>

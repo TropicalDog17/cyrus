@@ -134,6 +134,7 @@ import type {
 	PromptComponent,
 	PromptType,
 } from "./prompt-assembly/types.js";
+import { RepositoryClassifier } from "./RepositoryClassifier.js";
 import {
 	RepositoryRouter,
 	type RepositoryRouterDeps,
@@ -197,6 +198,7 @@ export class EdgeWorker extends EventEmitter {
 	private configPath?: string; // Path to config.json file
 	/** @internal - Exposed for testing only */
 	public repositoryRouter: RepositoryRouter; // Repository routing and selection
+	private repositoryClassifier: RepositoryClassifier; // AI-based repository inference
 	private gitService: GitService;
 	private activeWebhookCount = 0; // Track number of webhooks currently being processed
 	/** Handler for AskUserQuestion tool invocations via Linear select signal */
@@ -332,6 +334,11 @@ export class EdgeWorker extends EventEmitter {
 		// Initialize global session registry (centralized session storage)
 		this.globalSessionRegistry = new GlobalSessionRegistry();
 
+		// Initialize AI-based repository classifier (used as a routing fallback)
+		this.repositoryClassifier = new RepositoryClassifier({
+			logger: this.logger,
+		});
+
 		// Initialize repository router with dependencies
 		const repositoryRouterDeps: RepositoryRouterDeps = {
 			fetchIssueLabels: async (issueId: string, linearWorkspaceId: string) => {
@@ -370,6 +377,8 @@ export class EdgeWorker extends EventEmitter {
 			getIssueTracker: (linearWorkspaceId: string) => {
 				return this.getIssueTrackerForWorkspace(linearWorkspaceId);
 			},
+			inferRepository: (webhook, workspaceRepos) =>
+				this.inferRepositoryForWebhook(webhook, workspaceRepos),
 		};
 		this.repositoryRouter = new RepositoryRouter(repositoryRouterDeps);
 		this.gitService = new GitService({ cyrusHome: this.cyrusHome });
@@ -3398,6 +3407,43 @@ ${taskSection}`;
 			allowedTools,
 			disallowedTools,
 		};
+	}
+
+	/**
+	 * AI-based repository inference used as a routing fallback when no explicit
+	 * routing rule (description tag, label, project, team, catch-all) matched.
+	 *
+	 * Best-effort by design: returns `null` — which makes the router fall back
+	 * to asking the user to pick a repository — when auto-inference is disabled,
+	 * the issue is missing, or the model is unavailable/unsure. Never throws.
+	 */
+	private async inferRepositoryForWebhook(
+		webhook: AgentSessionCreatedWebhook | AgentSessionPromptedWebhook,
+		workspaceRepos: RepositoryConfig[],
+	): Promise<RepositoryConfig | null> {
+		// Enabled by default; only an explicit `false` opts out.
+		if (this.config.autoInferRepository === false) {
+			return null;
+		}
+
+		const issue = webhook.agentSession?.issue;
+		if (!issue?.id) {
+			return null;
+		}
+
+		// Default to a fast model inside the classifier; only override when the
+		// operator explicitly configured a classifier model.
+		const model = this.config.autoInferRepositoryModel || undefined;
+
+		const result = await this.repositoryClassifier.classifyRepository({
+			issueIdentifier: issue.identifier,
+			issueTitle: issue.title,
+			issueDescription: issue.description ?? undefined,
+			repositories: workspaceRepos,
+			model,
+		});
+
+		return result?.repository ?? null;
 	}
 
 	/**

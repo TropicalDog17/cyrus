@@ -221,6 +221,27 @@ class RoutingTestEnvironment {
 	}
 
 	/**
+	 * Configure AI repository inference to return a specific repository (or null).
+	 * Rebuilds the router so the new dependency takes effect.
+	 */
+	inferenceReturns(repo: RepositoryConfig | null): this {
+		this.mockDeps.inferRepository = vi.fn().mockResolvedValue(repo);
+		this.router = new RepositoryRouter(this.mockDeps);
+		return this;
+	}
+
+	/**
+	 * Configure AI repository inference to reject. Rebuilds the router.
+	 */
+	inferenceThrows(): this {
+		this.mockDeps.inferRepository = vi
+			.fn()
+			.mockRejectedValue(new Error("model unavailable"));
+		this.router = new RepositoryRouter(this.mockDeps);
+		return this;
+	}
+
+	/**
 	 * Create a repository builder
 	 */
 	repository(id: string, name: string): RepositoryBuilder {
@@ -1332,6 +1353,147 @@ describe("RepositoryRouter", () => {
 
 				// Then: Should select first catch-all repository
 				expectRouting(result).shouldSelectRepositoryVia(catchAll1, "catch-all");
+			});
+		});
+	});
+
+	// ========================================================================
+	// Priority 6: AI-Inferred Routing (fallback before user selection)
+	// ========================================================================
+
+	describe("Priority 6: AI-Inferred Routing", () => {
+		describe("when no explicit routing rule matches and inference is available", () => {
+			it("should select the inferred repository via ai-inferred when the model picks one", async () => {
+				const repo1 = env
+					.repository("repo-1", "Repo 1")
+					.withTeams("TEAM1")
+					.build();
+				const repo2 = env
+					.repository("repo-2", "Repo 2")
+					.withTeams("TEAM2")
+					.build();
+
+				env.inferenceReturns(repo2);
+
+				const webhook = env
+					.webhook()
+					.forIssue("issue-1", "OTHER-123")
+					.inTeam("OTHER")
+					.build();
+
+				const result = await env.router.determineRepositoryForWebhook(webhook, [
+					repo1,
+					repo2,
+				]);
+
+				expectRouting(result).shouldSelectRepositoryVia(repo2, "ai-inferred");
+				expect(env.mockDeps.inferRepository).toHaveBeenCalledTimes(1);
+			});
+
+			it("should fall back to user selection when the model returns null", async () => {
+				const repo1 = env
+					.repository("repo-1", "Repo 1")
+					.withTeams("TEAM1")
+					.build();
+				const repo2 = env
+					.repository("repo-2", "Repo 2")
+					.withTeams("TEAM2")
+					.build();
+
+				env.inferenceReturns(null);
+
+				const webhook = env
+					.webhook()
+					.forIssue("issue-1", "OTHER-123")
+					.inTeam("OTHER")
+					.build();
+
+				const result = await env.router.determineRepositoryForWebhook(webhook, [
+					repo1,
+					repo2,
+				]);
+
+				expectRouting(result).shouldNeedSelectionWithRepos(2);
+				expect(env.mockDeps.inferRepository).toHaveBeenCalledTimes(1);
+			});
+
+			it("should fall back to user selection when inference throws", async () => {
+				const repo1 = env
+					.repository("repo-1", "Repo 1")
+					.withTeams("TEAM1")
+					.build();
+				const repo2 = env
+					.repository("repo-2", "Repo 2")
+					.withTeams("TEAM2")
+					.build();
+
+				env.inferenceThrows();
+
+				const webhook = env
+					.webhook()
+					.forIssue("issue-1", "OTHER-123")
+					.inTeam("OTHER")
+					.build();
+
+				const result = await env.router.determineRepositoryForWebhook(webhook, [
+					repo1,
+					repo2,
+				]);
+
+				expectRouting(result).shouldNeedSelectionWithRepos(2);
+			});
+
+			it("should not invoke inference when an explicit routing rule matches", async () => {
+				const repo1 = env
+					.repository("repo-1", "Repo 1")
+					.withTeams("TEAM1")
+					.build();
+				const repo2 = env
+					.repository("repo-2", "Repo 2")
+					.withTeams("TEAM2")
+					.build();
+
+				env.inferenceReturns(repo2);
+
+				const webhook = env
+					.webhook()
+					.forIssue("issue-1", "TEAM1-1")
+					.inTeam("TEAM1")
+					.build();
+
+				const result = await env.router.determineRepositoryForWebhook(webhook, [
+					repo1,
+					repo2,
+				]);
+
+				expectRouting(result).shouldSelectRepositoryVia(repo1, "team-based");
+				expect(env.mockDeps.inferRepository).not.toHaveBeenCalled();
+			});
+		});
+
+		describe("when inference is not configured", () => {
+			it("should request user selection (backward compatible)", async () => {
+				const repo1 = env
+					.repository("repo-1", "Repo 1")
+					.withTeams("TEAM1")
+					.build();
+				const repo2 = env
+					.repository("repo-2", "Repo 2")
+					.withTeams("TEAM2")
+					.build();
+
+				const webhook = env
+					.webhook()
+					.forIssue("issue-1", "OTHER-123")
+					.inTeam("OTHER")
+					.build();
+
+				const result = await env.router.determineRepositoryForWebhook(webhook, [
+					repo1,
+					repo2,
+				]);
+
+				expectRouting(result).shouldNeedSelectionWithRepos(2);
 			});
 		});
 	});

@@ -221,6 +221,13 @@ export class ConfigManager extends EventEmitter {
 					parsedConfig.cursorDefaultFallbackModel ||
 					this.config.cursorDefaultFallbackModel,
 				defaultRunner: parsedConfig.defaultRunner || this.config.defaultRunner,
+				// Repository auto-inference: `false` is meaningful (opt out), so
+				// use `??` rather than `||` to preserve an explicit disable.
+				autoInferRepository:
+					parsedConfig.autoInferRepository ?? this.config.autoInferRepository,
+				autoInferRepositoryModel:
+					parsedConfig.autoInferRepositoryModel ||
+					this.config.autoInferRepositoryModel,
 				promptDefaults:
 					parsedConfig.promptDefaults || this.config.promptDefaults,
 				// Preserve legacy fields while rolling out new config keys.
@@ -326,6 +333,8 @@ export class ConfigManager extends EventEmitter {
 	private detectGlobalConfigChanges(newConfig: EdgeWorkerConfig): boolean {
 		const globalKeys: Array<keyof EdgeWorkerConfig> = [
 			"defaultRunner",
+			"autoInferRepository",
+			"autoInferRepositoryModel",
 			"claudeDefaultModel",
 			"claudeDefaultFallbackModel",
 			"cursorDefaultModel",

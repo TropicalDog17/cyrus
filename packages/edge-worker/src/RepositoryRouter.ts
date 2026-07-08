@@ -25,6 +25,7 @@ export type RepositoryRoutingResult =
 				| "team-based"
 				| "team-prefix"
 				| "catch-all"
+				| "ai-inferred"
 				| "workspace-fallback";
 	  }
 	| { type: "needs_selection"; workspaceRepos: RepositoryConfig[] }
@@ -56,6 +57,17 @@ export interface RepositoryRouterDeps {
 
 	/** Get issue tracker service for a workspace */
 	getIssueTracker: (workspaceId: string) => IIssueTrackerService | undefined;
+
+	/**
+	 * Optionally infer the best repository via an AI model when no explicit
+	 * routing rule matched. Returns the chosen repository, or `null` to fall
+	 * back to user selection. Should never throw. When omitted, the router
+	 * skips inference and goes straight to user selection.
+	 */
+	inferRepository?: (
+		webhook: AgentSessionCreatedWebhook | AgentSessionPromptedWebhook,
+		workspaceRepos: RepositoryConfig[],
+	) => Promise<RepositoryConfig | null>;
 }
 
 /**
@@ -317,6 +329,33 @@ export class RepositoryRouter {
 				repositories: [catchAllRepo],
 				routingMethod: "catch-all",
 			};
+		}
+
+		// Priority 6: AI-inferred routing — when no explicit rule matched, let a
+		// model pick the best-fit repository before falling back to asking the
+		// user. Best-effort: any failure/uncertainty resolves to user selection.
+		if (this.deps.inferRepository) {
+			try {
+				const inferred = await this.deps.inferRepository(
+					webhook,
+					workspaceRepos,
+				);
+				if (inferred) {
+					this.logger.info(
+						`Repository selected: ${inferred.name} (AI-inferred routing)`,
+					);
+					return {
+						type: "selected",
+						repositories: [inferred],
+						routingMethod: "ai-inferred",
+					};
+				}
+			} catch (error) {
+				this.logger.error(
+					`AI repository inference failed, falling back to user selection:`,
+					error,
+				);
+			}
 		}
 
 		// No routing match - request user selection (no default assignment)

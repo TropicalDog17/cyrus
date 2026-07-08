@@ -362,6 +362,21 @@ export const EdgeConfigSchema = z.object({
 	defaultRunner: RunnerTypeSchema.optional(),
 
 	/**
+	 * When an issue matches no explicit routing rule (description tag, label,
+	 * project, team, or catch-all), use an AI model to auto-infer the best
+	 * repository from the issue title/description instead of immediately asking
+	 * the user to pick one. Falls back to user selection when the model is
+	 * unavailable or unsure. Enabled by default; set to `false` to always ask.
+	 */
+	autoInferRepository: z.boolean().optional(),
+
+	/**
+	 * Model alias or ID used for repository auto-inference (see
+	 * `autoInferRepository`). Defaults to a fast model ("haiku") when omitted.
+	 */
+	autoInferRepositoryModel: z.string().optional(),
+
+	/**
 	 * @deprecated Use claudeDefaultModel instead.
 	 * Legacy field retained for backwards compatibility and migrated on load.
 	 */

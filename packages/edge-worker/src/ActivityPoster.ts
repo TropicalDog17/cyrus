@@ -129,6 +129,7 @@ export class ActivityPoster {
 			"team-based": "Team routing",
 			"team-prefix": "Team prefix routing",
 			"catch-all": "Catch-all",
+			"ai-inferred": "AI-inferred",
 			"workspace-fallback": "Workspace fallback",
 		};
 		const methodDisplay = routingMethod
