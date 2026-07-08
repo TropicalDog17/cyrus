@@ -196,7 +196,14 @@ describe("exportTranscriptToLangfuse", () => {
 		).toMatchObject({
 			name: "assistant-turn",
 			model: "claude-opus-4-8",
-			usage: { input: 150, output: 20, total: 170, unit: "TOKENS" },
+			// Input is broken down by cache tier so Langfuse can price cache
+			// reads separately from fresh (uncached) input.
+			usageDetails: {
+				input: 100,
+				cache_read_input_tokens: 50,
+				cache_creation_input_tokens: 0,
+				output: 20,
+			},
 		});
 
 		expect(spans).toHaveLength(1);
@@ -244,7 +251,102 @@ describe("exportTranscriptToLangfuse", () => {
 			(c) => (c as { kind: string }).kind === "generation",
 		);
 		expect((trace as { body: { id: string } }).body.id).toBe("cyrus-sess-xyz");
-		expect((gen as { body: { id: string } }).body.id).toBe("gen-a1");
+		// Keyed by the assistant message id, not the per-record uuid.
+		expect((gen as { body: { id: string } }).body.id).toBe("gen-msg-1");
+	});
+
+	it("emits one generation for a message split across multiple JSONL records", async () => {
+		// Claude Code writes one assistant message as several records (one per
+		// content block: thinking / text / each tool_use), all repeating the
+		// same cumulative usage. We must collapse them into a single turn so the
+		// token usage — and thus cost — is not counted once per block.
+		const { client, calls } = makeFakeClient();
+		const usage = {
+			input_tokens: 200,
+			cache_read_input_tokens: 1000,
+			cache_creation_input_tokens: 300,
+			output_tokens: 40,
+		};
+		const transcriptPath = writeTempTranscript(
+			transcript([
+				JSON.stringify({
+					type: "user",
+					uuid: "u1",
+					timestamp: "2026-07-08T10:00:00.000Z",
+					message: { role: "user", content: "do the thing" },
+				}),
+				// Three records, same message.id, distinct uuids, identical usage.
+				JSON.stringify({
+					type: "assistant",
+					uuid: "a1",
+					timestamp: "2026-07-08T10:00:01.000Z",
+					message: {
+						id: "msg-split",
+						role: "assistant",
+						model: "claude-opus-4-8",
+						content: [{ type: "thinking", thinking: "hmm" }],
+						usage,
+					},
+				}),
+				JSON.stringify({
+					type: "assistant",
+					uuid: "a2",
+					timestamp: "2026-07-08T10:00:01.500Z",
+					message: {
+						id: "msg-split",
+						role: "assistant",
+						model: "claude-opus-4-8",
+						content: [{ type: "text", text: "Working on it." }],
+						usage,
+					},
+				}),
+				JSON.stringify({
+					type: "assistant",
+					uuid: "a3",
+					timestamp: "2026-07-08T10:00:02.000Z",
+					message: {
+						id: "msg-split",
+						role: "assistant",
+						model: "claude-opus-4-8",
+						content: [
+							{
+								type: "tool_use",
+								id: "tu-9",
+								name: "Bash",
+								input: { command: "ls" },
+							},
+						],
+						usage,
+					},
+				}),
+			]),
+		);
+
+		const result = await exportTranscriptToLangfuse({
+			transcriptPath,
+			sessionId: "sess-split",
+			config: CONFIG,
+			clientFactory: () => client,
+		});
+
+		// One turn, one tool span — NOT three generations.
+		expect(result).toEqual({ generations: 1, toolSpans: 1 });
+		const generations = calls.filter(
+			(c) => (c as { kind: string }).kind === "generation",
+		);
+		expect(generations).toHaveLength(1);
+		expect(
+			(generations[0] as { body: Record<string, unknown> }).body,
+		).toMatchObject({
+			id: "gen-msg-split",
+			output: "Working on it.",
+			usageDetails: {
+				input: 200,
+				cache_read_input_tokens: 1000,
+				cache_creation_input_tokens: 300,
+				output: 40,
+			},
+		});
 	});
 
 	it("skips corrupt JSONL lines without failing", async () => {

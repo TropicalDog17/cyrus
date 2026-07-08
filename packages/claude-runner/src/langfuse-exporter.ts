@@ -27,8 +27,12 @@
  *   - one child `span` per tool call (input + matched tool_result output).
  *
  * All Langfuse object IDs are derived deterministically from stable transcript
- * IDs (session id, assistant message uuid, tool_use id), so a re-export upserts
+ * IDs (session id, assistant message id, tool_use id), so a re-export upserts
  * the same objects instead of duplicating them — safe to call more than once.
+ * Crucially, a generation is keyed by the assistant `message.id`, not the
+ * per-block record `uuid`: one message spans several JSONL records that each
+ * repeat the full `message.usage`, so keying on `uuid` would emit a generation
+ * per block and multiply the turn's cost by the number of blocks.
  *
  * Reference: https://langfuse.com/integrations/other/claude-code
  */
@@ -101,6 +105,22 @@ interface ContentBlock {
 	input?: unknown;
 	tool_use_id?: string;
 	content?: unknown;
+}
+
+/**
+ * One assistant turn, aggregated from the several JSONL records Claude Code
+ * writes per message (one per content block — thinking / text / each tool_use),
+ * all of which repeat the same cumulative `message.usage`.
+ */
+interface AssistantTurn {
+	id: string;
+	model?: string;
+	inputText: string;
+	outputParts: string[];
+	toolUses: ContentBlock[];
+	usage: Record<string, unknown>;
+	stopReason?: string;
+	startTime?: Date;
 }
 
 /** Coerce a message `content` field into an array of blocks. */
@@ -236,9 +256,14 @@ export async function exportTranscriptToLangfuse(
 		metadata: { source: "cyrus", claudeSessionId: sessionId, ...metadata },
 	});
 
+	// A single assistant message is written to the transcript as several JSONL
+	// records — one per content block — and every one repeats the same
+	// cumulative `message.usage`. Keying an observation off the per-record
+	// `uuid` therefore emits N generations for one turn, each stamped with the
+	// full token usage, so Langfuse multiplies the turn's cost by N. Aggregate
+	// by `message.id` and emit exactly one generation per assistant turn.
+	const turns = new Map<string, AssistantTurn>();
 	let lastUserText = "";
-	let generations = 0;
-	let toolSpans = 0;
 
 	for (const rec of records) {
 		if (rec.type === "user") {
@@ -250,41 +275,72 @@ export async function exportTranscriptToLangfuse(
 		if (rec.type !== "assistant" || !rec.message) continue;
 
 		const msg = rec.message;
-		const blocks = asBlocks(msg.content);
-		const usage = msg.usage ?? {};
-		const inputTokens =
-			num(usage.input_tokens) +
-			num(usage.cache_creation_input_tokens) +
-			num(usage.cache_read_input_tokens);
+		const key = msg.id ?? rec.uuid ?? `idx-${turns.size}`;
+		let turn = turns.get(key);
+		if (!turn) {
+			turn = {
+				id: key,
+				model: msg.model,
+				inputText: lastUserText,
+				outputParts: [],
+				toolUses: [],
+				usage: {},
+				stopReason: msg.stop_reason ?? undefined,
+				startTime: toDate(rec.timestamp),
+			};
+			turns.set(key, turn);
+		}
+		// Records for one message repeat identical usage; keep the populated one.
+		if (msg.usage && Object.keys(msg.usage).length > 0) turn.usage = msg.usage;
+		if (msg.model && !turn.model) turn.model = msg.model;
+		const text = textOf(msg.content);
+		if (text) turn.outputParts.push(text);
+		for (const block of asBlocks(msg.content)) {
+			if (block.type === "tool_use") turn.toolUses.push(block);
+		}
+	}
+
+	let generations = 0;
+	let toolSpans = 0;
+
+	for (const turn of turns.values()) {
+		const usage = turn.usage;
+		const freshInput = num(usage.input_tokens);
+		const cacheRead = num(usage.cache_read_input_tokens);
+		const cacheCreation = num(usage.cache_creation_input_tokens);
+		const inputTokens = freshInput + cacheRead + cacheCreation;
 		const outputTokens = num(usage.output_tokens);
-		const startTime = toDate(rec.timestamp);
+		const { startTime } = turn;
 
 		trace.generation({
-			id: `gen-${rec.uuid ?? msg.id ?? generations}`,
+			id: `gen-${turn.id}`,
 			name: "assistant-turn",
-			model: msg.model,
-			input: lastUserText || undefined,
-			output: textOf(msg.content) || undefined,
-			usage: {
-				input: inputTokens,
+			model: turn.model,
+			input: turn.inputText || undefined,
+			output: turn.outputParts.join("\n") || undefined,
+			// Break the input down by cache tier so Langfuse prices cache reads
+			// and writes at their (much cheaper) rates instead of charging every
+			// input token at the full uncached rate. Langfuse derives `total`.
+			usageDetails: {
+				input: freshInput,
+				cache_read_input_tokens: cacheRead,
+				cache_creation_input_tokens: cacheCreation,
 				output: outputTokens,
-				total: inputTokens + outputTokens,
-				unit: "TOKENS",
 			},
 			startTime,
 			endTime: startTime,
 			metadata: {
-				stopReason: msg.stop_reason ?? undefined,
+				stopReason: turn.stopReason,
 				rawUsage: usage,
+				totalInputTokens: inputTokens,
 			},
 		});
 		generations++;
 
 		// One span per tool call, with its matched result as output.
-		for (const block of blocks) {
-			if (block.type !== "tool_use") continue;
+		for (const block of turn.toolUses) {
 			trace.span({
-				id: `tool-${block.id ?? `${rec.uuid}-${toolSpans}`}`,
+				id: `tool-${block.id ?? `${turn.id}-${toolSpans}`}`,
 				name: `tool:${block.name ?? "unknown"}`,
 				input: block.input,
 				output: block.id ? toolResults.get(block.id) : undefined,
