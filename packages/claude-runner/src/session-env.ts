@@ -5,8 +5,6 @@
  * ClaudeRunner (query options) and EdgeWorker (warmup / startup).
  */
 
-import { buildLangfuseTelemetryEnv } from "./telemetry-env.js";
-
 /**
  * Auth-related env vars forwarded from the parent process.
  * The SDK subprocess needs these for API calls.
@@ -70,11 +68,9 @@ export function buildBaseSessionEnv(
 	return {
 		...env,
 		...CYRUS_SESSION_ENV,
-		// LLMOps: when Langfuse credentials are present, enable the SDK's
-		// built-in OpenTelemetry export and point it at Langfuse. No-op when
-		// unconfigured, so this is safe to apply to every session. See
-		// telemetry-env.ts. Placed before `extra` so per-call overrides still win.
-		...buildLangfuseTelemetryEnv(),
+		// LLMOps is handled by a SessionEnd hook in ClaudeRunner (see
+		// langfuse-exporter.ts), not by env-var-driven OTLP — Claude Code's
+		// OTLP output is logs/metrics only, which Langfuse can't ingest.
 		...extra,
 	};
 }

@@ -19,6 +19,7 @@ import {
 	type SDKMessage,
 	type SDKUserMessage,
 	type SessionCronSummary,
+	type SessionEndHookInput,
 	type StopHookInput,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentPendingWork, AskUserQuestionInput } from "cyrus-core";
@@ -32,6 +33,10 @@ import {
 import dotenv from "dotenv";
 import { ClaudeMessageFormatter, type IMessageFormatter } from "./formatter.js";
 import { buildHomeDirectoryDisallowedTools } from "./home-directory-restrictions.js";
+import {
+	exportTranscriptToLangfuse,
+	resolveLangfuseConfig,
+} from "./langfuse-exporter.js";
 import {
 	checkLinuxSandboxRequirements,
 	logSandboxRequirementFailures,
@@ -1066,11 +1071,63 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 				},
 			],
 		};
+		// LLMOps: export the full session transcript to Langfuse when the
+		// session terminates. The SessionEnd hook fires once the transcript is
+		// complete (after the final result), so a single parse captures the
+		// whole session. Export is fire-and-forget: we never block session
+		// teardown, and any failure is logged and swallowed. No-op (config is
+		// null) when Langfuse keys are absent or telemetry is disabled.
+		const langfuseExporter: HookCallbackMatcher = {
+			matcher: ".*",
+			hooks: [
+				async (input) => {
+					const endInput = input as SessionEndHookInput;
+					const config = resolveLangfuseConfig();
+					if (!config) return {};
+					this.exportToLangfuse(
+						endInput.session_id,
+						endInput.transcript_path,
+					).catch((err) =>
+						this.logger.event("langfuse_export_failed", {
+							claudeSessionId: this.sessionInfo?.sessionId,
+							error: String(err),
+						}),
+					);
+					return {};
+				},
+			],
+		};
 		const configHooks = this.config.hooks ?? {};
 		return {
 			...configHooks,
 			Stop: [...(configHooks.Stop ?? []), recorder],
+			SessionEnd: [...(configHooks.SessionEnd ?? []), langfuseExporter],
 		};
+	}
+
+	/**
+	 * Export the completed session transcript to Langfuse. Enriches the trace
+	 * with the Cyrus workspace name + cwd so each trace is identifiable in the
+	 * Langfuse UI. Resolving config + the call itself live in
+	 * `langfuse-exporter.ts`; this thin wrapper supplies runner context.
+	 */
+	private async exportToLangfuse(
+		sessionId: string,
+		transcriptPath: string,
+	): Promise<void> {
+		const config = resolveLangfuseConfig();
+		if (!config) return;
+		await exportTranscriptToLangfuse({
+			transcriptPath,
+			sessionId,
+			config,
+			traceName: this.config.workspaceName,
+			metadata: {
+				workspaceName: this.config.workspaceName,
+				cwd: this.config.workingDirectory,
+			},
+			logger: this.logger,
+		});
 	}
 
 	/**
