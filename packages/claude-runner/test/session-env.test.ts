@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildBaseSessionEnv } from "../src/session-env";
 
-describe("buildBaseSessionEnv — Langfuse telemetry wiring", () => {
+describe("buildBaseSessionEnv", () => {
 	let originalEnv: NodeJS.ProcessEnv;
 
 	beforeEach(() => {
@@ -16,31 +16,27 @@ describe("buildBaseSessionEnv — Langfuse telemetry wiring", () => {
 		process.env = originalEnv;
 	});
 
-	it("omits telemetry vars when Langfuse keys are absent", () => {
+	it("injects the shared Cyrus session flags", () => {
+		const env = buildBaseSessionEnv();
+		expect(env.CLAUDE_CODE_ENABLE_TASKS).toBe("true");
+		expect(env.MCP_CONNECTION_NONBLOCKING).toBe("true");
+	});
+
+	it("never injects OTLP/telemetry vars (LLMOps is hook-driven now)", () => {
+		// Even with Langfuse keys present, the session env must not set the
+		// broken OTLP-exporter path — telemetry is emitted by a SessionEnd hook
+		// via langfuse-exporter.ts, not by Claude Code's OTLP instrumentation.
+		process.env.LANGFUSE_PUBLIC_KEY = "pk-lf-abc";
+		process.env.LANGFUSE_SECRET_KEY = "sk-lf-def";
+
 		const env = buildBaseSessionEnv();
 		expect(env.CLAUDE_CODE_ENABLE_TELEMETRY).toBeUndefined();
 		expect(env.OTEL_EXPORTER_OTLP_ENDPOINT).toBeUndefined();
+		expect(env.OTEL_EXPORTER_OTLP_HEADERS).toBeUndefined();
 	});
 
-	it("injects telemetry vars into every session env when keys are present", () => {
-		process.env.LANGFUSE_PUBLIC_KEY = "pk-lf-abc";
-		process.env.LANGFUSE_SECRET_KEY = "sk-lf-def";
-
-		const env = buildBaseSessionEnv();
-		expect(env.CLAUDE_CODE_ENABLE_TELEMETRY).toBe("1");
-		expect(env.OTEL_EXPORTER_OTLP_ENDPOINT).toBe(
-			"https://cloud.langfuse.com/api/public/otel",
-		);
-		expect(env.OTEL_EXPORTER_OTLP_HEADERS).toBe(
-			`Authorization=Basic ${Buffer.from("pk-lf-abc:sk-lf-def").toString("base64")}`,
-		);
-	});
-
-	it("lets caller-provided extra env override telemetry defaults", () => {
-		process.env.LANGFUSE_PUBLIC_KEY = "pk-lf-abc";
-		process.env.LANGFUSE_SECRET_KEY = "sk-lf-def";
-
-		const env = buildBaseSessionEnv({ CLAUDE_CODE_ENABLE_TELEMETRY: "0" });
-		expect(env.CLAUDE_CODE_ENABLE_TELEMETRY).toBe("0");
+	it("lets caller-provided extra env override defaults", () => {
+		const env = buildBaseSessionEnv({ CLAUDE_CODE_ENABLE_TASKS: "false" });
+		expect(env.CLAUDE_CODE_ENABLE_TASKS).toBe("false");
 	});
 });

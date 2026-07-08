@@ -22,6 +22,7 @@
 		"cyrus-core": "workspace:*",
 		"dotenv": "^16.4.5",
 		"fs-extra": "^11.3.2",
+		"langfuse": "^3.38.0",
 		"zod": "^4.3.6"
 	},
 	"devDependencies": {

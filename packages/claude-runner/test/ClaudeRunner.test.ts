@@ -137,7 +137,10 @@ describe("ClaudeRunner", () => {
 					strictMcpConfig: true,
 					// Internal pending-work recorder Stop hook is always registered
 					// (CYPACK-1310)
-					hooks: { Stop: [expect.objectContaining({ matcher: ".*" })] },
+					hooks: {
+						Stop: [expect.objectContaining({ matcher: ".*" })],
+						SessionEnd: [expect.objectContaining({ matcher: ".*" })],
+					},
 				},
 			});
 		});
@@ -176,7 +179,10 @@ describe("ClaudeRunner", () => {
 					strictMcpConfig: true,
 					// Internal pending-work recorder Stop hook is always registered
 					// (CYPACK-1310)
-					hooks: { Stop: [expect.objectContaining({ matcher: ".*" })] },
+					hooks: {
+						Stop: [expect.objectContaining({ matcher: ".*" })],
+						SessionEnd: [expect.objectContaining({ matcher: ".*" })],
+					},
 				},
 			});
 		});
@@ -215,7 +221,10 @@ describe("ClaudeRunner", () => {
 					strictMcpConfig: true,
 					// Internal pending-work recorder Stop hook is always registered
 					// (CYPACK-1310)
-					hooks: { Stop: [expect.objectContaining({ matcher: ".*" })] },
+					hooks: {
+						Stop: [expect.objectContaining({ matcher: ".*" })],
+						SessionEnd: [expect.objectContaining({ matcher: ".*" })],
+					},
 				},
 			});
 		});

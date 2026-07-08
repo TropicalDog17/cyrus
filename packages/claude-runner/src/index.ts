@@ -30,6 +30,12 @@ export {
 } from "./HttpSessionStore.js";
 export { buildHomeDirectoryDisallowedTools } from "./home-directory-restrictions.js";
 export {
+	type ExportResult,
+	exportTranscriptToLangfuse,
+	type LangfuseConfig,
+	resolveLangfuseConfig,
+} from "./langfuse-exporter.js";
+export {
 	checkLinuxSandboxRequirements,
 	logSandboxRequirementFailures,
 	resetSandboxRequirementsCacheForTesting,
@@ -41,7 +47,6 @@ export {
 	CYRUS_SESSION_ENV,
 	normalizeMcpHttpTransport,
 } from "./session-env.js";
-export { buildLangfuseTelemetryEnv } from "./telemetry-env.js";
 export type {
 	APIAssistantMessage,
 	APIUserMessage,
