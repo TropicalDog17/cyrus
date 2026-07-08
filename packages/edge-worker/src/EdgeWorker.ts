@@ -1,4 +1,3 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { execSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
@@ -26,7 +25,6 @@ import type {
 	IssueUnassignedWebhook,
 	IssueUpdateWebhook,
 	RepositoryConfig,
-	RunnerType,
 	SerializableEdgeWorkerState,
 	Webhook,
 	WebhookIssue,
@@ -73,14 +71,6 @@ import {
 	LinearIssueTrackerService,
 	type LinearOAuthConfig,
 } from "cyrus-linear-event-transport";
-import {
-	type CyrusToolsOptions,
-	createCyrusToolsServer,
-	createFetchFailureModesClient,
-	type FailureModesHttpClient,
-	type ResolvedSession,
-} from "cyrus-mcp-tools";
-import { Sessions, streamableHttp } from "fastify-mcp";
 import { ActivityPoster } from "./ActivityPoster.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
@@ -92,6 +82,7 @@ import {
 	formatRoutingThought,
 } from "./activity/index.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
+import { CyrusToolsHost } from "./CyrusToolsHost.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
 import { GitHubUsernameResolver } from "./GitHubUsernameResolver.js";
@@ -133,10 +124,6 @@ export declare interface EdgeWorker {
 		...args: Parameters<EdgeWorkerEvents[K]>
 	): boolean;
 }
-
-type CyrusToolsMcpContext = {
-	contextId?: string;
-};
 
 /**
  * Unified edge worker that **orchestrates**
@@ -189,11 +176,7 @@ export class EdgeWorker extends EventEmitter {
 	private promptAssembler: PromptAssembler;
 	private defaultSkillsDeployer: DefaultSkillsDeployer;
 	private skillsPluginResolver: SkillsPluginResolver;
-	private readonly cyrusToolsMcpEndpoint = "/mcp/cyrus-tools";
-	private cyrusToolsMcpRegistered = false;
-	private cyrusToolsMcpRequestContext =
-		new AsyncLocalStorage<CyrusToolsMcpContext>();
-	private cyrusToolsMcpSessions = new Sessions<any>();
+	private cyrusToolsHost: CyrusToolsHost;
 	/** Validates webhook source IPs against known provider allowlists */
 	private webhookIpValidator: WebhookIpValidator;
 	/** Egress proxy for sandbox network traffic filtering and header injection */
@@ -516,9 +499,36 @@ export class EdgeWorker extends EventEmitter {
 							getClient?: () => import("@linear/sdk").LinearClient;
 					  })
 					| undefined,
-			getCyrusToolsMcpUrl: () => this.getCyrusToolsMcpUrl(),
+			getCyrusToolsMcpUrl: () => this.cyrusToolsHost.getUrl(),
 			createCyrusToolsOptions: (parentSessionId) =>
-				this.createCyrusToolsOptions(parentSessionId),
+				this.cyrusToolsHost.createToolsOptions(parentSessionId),
+		});
+		// The in-process cyrus-tools MCP host. Constructed after McpConfigService
+		// so it can consume it for context lookup + auth validation. The
+		// getCyrusToolsMcpUrl/createCyrusToolsOptions lambdas above are lazy, so
+		// the forward reference here is safe (both directions resolve at
+		// request/build time, never during construction).
+		// (In Phase G this construction + those two lambdas move into
+		// composeEdgeWorker.)
+		this.cyrusToolsHost = new CyrusToolsHost({
+			getFastifyInstance: () =>
+				this.sharedApplicationServer.getFastifyInstance(),
+			getPort: () => {
+				const s = this.sharedApplicationServer as {
+					getPort?: () => number;
+				};
+				return typeof s.getPort === "function"
+					? s.getPort()
+					: this.config.serverPort || this.config.webhookPort || 3456;
+			},
+			mcpConfigService: this.mcpConfigService,
+			getAllKnownSessions: () => this.getAllKnownSessions(),
+			onChildSessionCreated: (childSessionId, parentSessionId) =>
+				this.handleChildSessionMapping(childSessionId, parentSessionId),
+			onFeedbackDelivery: (childSessionId, message) =>
+				this.handleFeedbackDeliveryToChildSession(childSessionId, message),
+			getFailureModesApiKey: () => process.env.CYRUS_API_KEY,
+			getFailureModesBaseUrl: () => getCyrusAppUrl(),
 		});
 		this.runnerConfigBuilder = new RunnerConfigBuilder(
 			this.mcpConfigService,
@@ -914,7 +924,7 @@ export class EdgeWorker extends EventEmitter {
 		);
 
 		// 3. Register MCP endpoint for cyrus-tools on the same Fastify server/port
-		await this.registerCyrusToolsMcpEndpoint();
+		await this.cyrusToolsHost.mount();
 		// 4. Register /status endpoint for process activity monitoring
 		this.registerStatusEndpoint();
 
@@ -1894,8 +1904,7 @@ ${taskSection}`;
 		this.linearEventTransport = null;
 		this.configUpdater = null;
 		this.mcpConfigService.clearAllContexts();
-		this.cyrusToolsMcpSessions.removeAllListeners();
-		this.cyrusToolsMcpRegistered = false;
+		this.cyrusToolsHost.stop();
 
 		// Stop egress proxy
 		if (this.egressProxy) {
@@ -4296,247 +4305,17 @@ ${taskSection}`;
 		return this.attachmentService.generateNewAttachmentManifest(result);
 	}
 
-	private async registerCyrusToolsMcpEndpoint(): Promise<void> {
-		if (this.cyrusToolsMcpRegistered) {
-			return;
-		}
-
-		const fastify = this.sharedApplicationServer.getFastifyInstance() as any;
-		if (
-			typeof fastify.register !== "function" ||
-			typeof fastify.addHook !== "function"
-		) {
-			console.warn(
-				"[EdgeWorker] Skipping cyrus-tools MCP endpoint registration: Fastify instance does not support register/addHook",
-			);
-			return;
-		}
-
-		fastify.addHook("onRequest", (request: any, _reply: any, done: any) => {
-			const rawUrl =
-				typeof request?.raw?.url === "string"
-					? request.raw.url
-					: typeof request?.url === "string"
-						? request.url
-						: "";
-			const requestPath = rawUrl.split("?")[0];
-
-			if (requestPath !== this.cyrusToolsMcpEndpoint) {
-				done();
-				return;
-			}
-
-			if (
-				!this.mcpConfigService.isAuthorizationValid(
-					request.headers?.authorization,
-				)
-			) {
-				_reply.code(401).send({
-					error: "Unauthorized cyrus-tools MCP request",
-				});
-				done();
-				return;
-			}
-
-			const rawContextHeader = request.headers?.["x-cyrus-mcp-context-id"];
-			const contextId = Array.isArray(rawContextHeader)
-				? rawContextHeader[0]
-				: rawContextHeader;
-
-			this.cyrusToolsMcpRequestContext.run({ contextId }, () => {
-				done();
-			});
-		});
-
-		this.cyrusToolsMcpSessions.on("connected", (sessionId) => {
-			console.log(
-				`[EdgeWorker] cyrus-tools MCP session connected: ${sessionId}`,
-			);
-		});
-
-		this.cyrusToolsMcpSessions.on("terminated", (sessionId) => {
-			console.log(
-				`[EdgeWorker] cyrus-tools MCP session terminated: ${sessionId}`,
-			);
-		});
-
-		this.cyrusToolsMcpSessions.on("error", (error) => {
-			console.error("[EdgeWorker] cyrus-tools MCP session error:", error);
-		});
-
-		await fastify.register(streamableHttp, {
-			stateful: true,
-			mcpEndpoint: this.cyrusToolsMcpEndpoint,
-			sessions: this.cyrusToolsMcpSessions,
-			createServer: async () => {
-				const contextId =
-					this.cyrusToolsMcpRequestContext.getStore()?.contextId;
-				if (!contextId) {
-					throw new Error(
-						"Missing x-cyrus-mcp-context-id header for cyrus-tools MCP request",
-					);
-				}
-
-				const context = this.mcpConfigService.getContext(contextId);
-				if (!context) {
-					throw new Error(
-						`Unknown cyrus-tools MCP context '${contextId}'. Build MCP config before connecting.`,
-					);
-				}
-
-				const sdkServer =
-					context.prebuiltServer ||
-					createCyrusToolsServer(
-						context.linearClient,
-						this.createCyrusToolsOptions(context.parentSessionId),
-					);
-				this.mcpConfigService.clearPrebuiltServer(contextId);
-
-				return sdkServer.server;
-			},
-		});
-
-		this.cyrusToolsMcpRegistered = true;
-		console.log(
-			`✅ Cyrus tools MCP endpoint registered at ${this.cyrusToolsMcpEndpoint}`,
-		);
-	}
-
-	private failureModesClient: FailureModesHttpClient | null = null;
-
-	/**
-	 * Lazily build the HTTP client used by `log_failure_mode` to POST to
-	 * cyrus-hosted. Uses `CYRUS_APP_URL` (the same env var the remote
-	 * session-store client reads, see top of this file) so preview
-	 * environments and prod share a single way to point at a control
-	 * plane. Returns null when either the URL or the `CYRUS_API_KEY` are
-	 * missing — in that mode the tool is simply not registered, so
-	 * customer-mode CLI users without a control plane don't see a broken
-	 * tool.
-	 */
-	private getFailureModesClient(): FailureModesHttpClient | null {
-		if (this.failureModesClient) return this.failureModesClient;
-		const apiKey = process.env.CYRUS_API_KEY?.trim();
-		if (!apiKey) return null;
-		const baseUrl = getCyrusAppUrl();
-		this.failureModesClient = createFetchFailureModesClient({
-			baseUrl,
-			apiKey,
-		});
-		return this.failureModesClient;
-	}
-
-	/**
-	 * Resolve a working-directory string to the agent session id that owns
-	 * that workspace. The `log_failure_mode` MCP tool calls this with the
-	 * agent's reported `cwd`. We normalize and compare against each known
-	 * session's `workspace.path` (and any sub-repo paths the session opens).
-	 */
-	/**
-	 * Resolve a working-directory string to the rich session bundle a
-	 * Cyrus team member needs to triage a failure-mode report: the
-	 * internal session id (for dedup), the runner session id + runner
-	 * type (so triage can pull the Claude transcript),
-	 * the Linear AgentSession + source-issue identifiers (so triage can
-	 * jump to the customer thread), and the workspace path (for repro).
-	 *
-	 * Returns null only when no session matches. We prefer an exact
-	 * workspace-path or sub-repo-path match; if neither hits, we fall
-	 * back to a prefix match for nested cwds (e.g. shells in a subdir).
-	 */
 	/**
 	 * Aggregator over every place active sessions live in this process.
 	 * Today: the primary AgentSessionManager (issue sessions). New session
-	 * origins should be added here so downstream consumers (currently just
-	 * resolveSessionFromCwd) keep working without modification — single open
-	 * extension point (OCP), single responsibility (SRP: this method's only
-	 * job is "where do sessions live?", separate from "how do we match one by
-	 * cwd?").
+	 * origins should be added here so downstream consumers (currently
+	 * CyrusToolsHost.resolveSessionFromCwd, injected via the getAllKnownSessions
+	 * callback) keep working without modification — single open extension point
+	 * (OCP), single responsibility (SRP: this method's only job is "where do
+	 * sessions live?", separate from "how do we match one by cwd?").
 	 */
 	private getAllKnownSessions(): CyrusAgentSession[] {
 		return [...this.agentSessionManager.getAllSessions()];
-	}
-
-	private resolveSessionFromCwd(cwd: string): ResolvedSession | null {
-		if (!cwd) return null;
-		const normalize = (p: string) => p.replace(/\/+$/, "");
-		const target = normalize(cwd);
-
-		const sessions = this.getAllKnownSessions();
-
-		const exact = sessions.find((session) => {
-			if (normalize(session.workspace?.path ?? "") === target) return true;
-			const repoPaths = session.workspace?.repoPaths;
-			if (repoPaths) {
-				for (const p of Object.values(repoPaths)) {
-					if (typeof p === "string" && normalize(p) === target) return true;
-				}
-			}
-			return false;
-		});
-
-		const prefix = exact
-			? undefined
-			: sessions.find((session) => {
-					const root = normalize(session.workspace?.path ?? "");
-					return root && target.startsWith(`${root}/`);
-				});
-
-		const session = exact ?? prefix;
-		if (!session) return null;
-
-		const runnerType: RunnerType | null = session.claudeSessionId
-			? "claude"
-			: session.cursorSessionId
-				? "cursor"
-				: null;
-		const runnerSessionId =
-			session.claudeSessionId ?? session.cursorSessionId ?? null;
-
-		const sessionSource = session.id.startsWith("github-")
-			? "github"
-			: (session.issueContext?.trackerId ?? "linear");
-
-		// For Linear-source sessions, `session.id` is already the Linear
-		// AgentSession id (they're literally the same UUID — the v3 rename
-		// from `linearAgentActivitySessionId` to `id` kept the value). So we
-		// don't surface a separate `linearAgentSessionId` — the server keys
-		// dedup on `session_id` and that *is* the Linear AgentSession id when
-		// `session_source === 'linear'`.
-		return {
-			sessionId: session.id,
-			runnerSessionId,
-			runnerType,
-			sourceIssueIdentifier:
-				session.issueContext?.issueIdentifier ??
-				session.issue?.identifier ??
-				null,
-			workspacePath: session.workspace?.path ?? null,
-			sessionSource,
-		};
-	}
-
-	private createCyrusToolsOptions(parentSessionId?: string): CyrusToolsOptions {
-		const failureModesClient = this.getFailureModesClient();
-		const options: CyrusToolsOptions = {
-			parentSessionId,
-			onSessionCreated: (childSessionId: string, parentId: string) => {
-				this.handleChildSessionMapping(childSessionId, parentId);
-			},
-			onFeedbackDelivery: async (childSessionId: string, message: string) => {
-				return this.handleFeedbackDeliveryToChildSession(
-					childSessionId,
-					message,
-				);
-			},
-		};
-		if (failureModesClient) {
-			options.failureModes = {
-				resolveSessionFromCwd: (cwd: string) => this.resolveSessionFromCwd(cwd),
-				httpClient: failureModesClient,
-			};
-		}
-		return options;
 	}
 
 	private handleChildSessionMapping(
@@ -4664,17 +4443,6 @@ ${taskSection}`;
 			`[EdgeWorker] Feedback delivered successfully to child session ${childSessionId}`,
 		);
 		return true;
-	}
-
-	private getCyrusToolsMcpUrl(): string {
-		const server = this.sharedApplicationServer as {
-			getPort?: () => number;
-		};
-		const port =
-			typeof server.getPort === "function"
-				? server.getPort()
-				: this.config.serverPort || this.config.webhookPort || 3456;
-		return `http://127.0.0.1:${port}${this.cyrusToolsMcpEndpoint}`;
 	}
 
 	/**
