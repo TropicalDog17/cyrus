@@ -96,14 +96,20 @@ export const LINEAR_DEFAULT_ALLOWED_TOOLS = [
  * This is the tool set resolved by the `readOnly` tool preset (used by
  * label-based prompt restrictions). It grants read-only access to repository
  * sources (so Cyrus can answer "look at the code in repo X" questions) plus
- * the standard planning/task tools, but no Edit/Write/general Bash. The single
- * Bash pattern allowed is `git -C * pull` so a session can refresh a repo
- * before grepping it.
+ * the standard planning/task tools, but no Edit/Write/general Bash. The only
+ * Bash patterns allowed are `git -C * pull` (to refresh a repo) and the
+ * non-mutating source-search commands `grep`/`rg` — Cyrus exposes no native
+ * Grep/Glob tool, so code search must flow through Bash for this preset to
+ * fulfil its "grep the repo" purpose (DEV-125).
  */
 export const READONLY_DEFAULT_ALLOWED_TOOLS = [
 	// Read access to configured repository paths
 	"Read",
 	"Bash(git -C * pull)",
+	// Source search — read-only, no side effects. Required so read-only
+	// sessions can actually grep repository sources (see DEV-125).
+	"Bash(grep:*)",
+	"Bash(rg:*)",
 
 	// Web
 	"WebFetch",
