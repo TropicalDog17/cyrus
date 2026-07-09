@@ -7,7 +7,7 @@
  * - File-based configuration
  */
 
-import { EdgeWorker } from "cyrus-edge-worker";
+import { composeEdgeWorker } from "cyrus-edge-worker";
 import { FSWorkspaceService } from "../cli/adapters/FSWorkspaceService";
 import { OAuthHelper } from "../cli/utils/OAuthHelper";
 
@@ -27,7 +27,7 @@ export async function createCLIEdgeWorker(config: any) {
 	);
 
 	// Create EdgeWorker with CLI-specific configuration
-	const edgeWorker = new EdgeWorker({
+	const edgeWorker = composeEdgeWorker({
 		// Use OAuth token for both proxy and Linear API
 		proxyUrl: config.edge.proxyUrl,
 		linearToken: linearToken,

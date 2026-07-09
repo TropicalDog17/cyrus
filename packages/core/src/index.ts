@@ -1,5 +1,24 @@
 // Logging
 
+// Access policy — single owner of effective read/write access
+export type {
+	AccessPolicyInput,
+	ClaudeToolPatterns,
+	CursorPermissions,
+	DirEntry,
+	DirLister,
+	EffectiveAccessPolicy,
+	PolicyPath,
+	SandboxFilesystem,
+} from "./access-policy/AccessPolicy.js";
+export {
+	compute,
+	nodeDirLister,
+	toClaudeToolPatterns,
+	toCursorPermissions,
+	toSandboxFilesystem,
+} from "./access-policy/AccessPolicy.js";
+
 // Error reporting
 export type {
 	ErrorReporter,
@@ -29,10 +48,25 @@ export { createLogger, LogLevel } from "./logging/index.js";
 
 // Agent Runner types
 export type {
+	AgentAssistantContentBlock,
+	AgentAssistantMessage,
 	AgentMessage,
 	AgentPendingWork,
+	AgentRateLimitInfo,
+	AgentRateLimitMessage,
+	AgentResultErrorMessage,
+	AgentResultMessage,
+	AgentResultSuccessMessage,
 	AgentRunnerConfig,
 	AgentSessionInfo,
+	AgentStatusMessage,
+	AgentSystemInitMessage,
+	AgentTextBlock,
+	AgentThinkingBlock,
+	AgentToolResultBlock,
+	AgentToolUseBlock,
+	AgentUsage,
+	AgentUserContentBlock,
 	AgentUserMessage,
 	AskUserQuestion,
 	AskUserQuestionAnswers,
@@ -43,7 +77,6 @@ export type {
 	HookCallbackMatcher,
 	HookEvent,
 	IAgentRunner,
-	IMessageFormatter,
 	McpServerConfig,
 	OnAskUserQuestion,
 	SDKAssistantMessage,
@@ -79,6 +112,7 @@ export type {
 	LinearWorkspaceConfig,
 	NetworkPolicy,
 	OAuthCallbackHandler,
+	PathFieldMeta,
 	RepoSetupHookEvent,
 	RepoSetupHookEventHandler,
 	RepoSetupHookStatus,
@@ -96,6 +130,8 @@ export {
 	LinearWorkspaceConfigSchema,
 	migrateEdgeConfig,
 	NetworkPolicySchema,
+	normalizeConfigPaths,
+	pathRegistry,
 	RepositoryConfigPayloadSchema,
 	RepositoryConfigSchema,
 	RunnerTypeSchema,

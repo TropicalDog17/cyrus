@@ -136,7 +136,7 @@ import {
 } from "cyrus-core";
 import { LinearEventTransport } from "cyrus-linear-event-transport";
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
-import { EdgeWorker } from "../src/EdgeWorker.js";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker.js";
 import { SharedApplicationServer } from "../src/SharedApplicationServer.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
 
@@ -231,7 +231,7 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			};
 		} as any);
 
-		edgeWorker = new EdgeWorker(mockConfig);
+		edgeWorker = composeEdgeWorker(mockConfig);
 	});
 
 	afterEach(() => {
@@ -345,7 +345,7 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 				...mockConfig,
 				linearAllowedTools: undefined,
 			};
-			const ew = new EdgeWorker(configNoDefaults);
+			const ew = composeEdgeWorker(configNoDefaults);
 			const buildAllowedTools = getBuildAllowedTools(ew);
 			const tools = buildAllowedTools([]);
 
@@ -471,7 +471,7 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 				...mockConfig,
 				defaultDisallowedTools: ["Bash", "DangerousTool"],
 			};
-			const ew = new EdgeWorker(configWithDefaults);
+			const ew = composeEdgeWorker(configWithDefaults);
 			const buildDisallowedTools = getBuildDisallowedTools(ew);
 			const tools = buildDisallowedTools([]);
 

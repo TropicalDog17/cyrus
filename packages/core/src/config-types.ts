@@ -4,6 +4,12 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { Workspace } from "./CyrusAgentSession.js";
 // Import types for use in this file
 import type { EdgeConfig, RepositoryConfig } from "./config-schemas.js";
+// Value imports for the registry-driven path normalizer below.
+import {
+	EdgeConfigSchema,
+	pathRegistry,
+	RepositoryConfigSchema,
+} from "./config-schemas.js";
 import type { Issue } from "./issue-tracker/types.js";
 
 // Re-export schemas and types from config-schemas
@@ -17,6 +23,8 @@ export {
 	migrateEdgeConfig,
 	type NetworkPolicy,
 	NetworkPolicySchema,
+	type PathFieldMeta,
+	pathRegistry,
 	type RepositoryConfig,
 	type RepositoryConfigPayload,
 	RepositoryConfigPayloadSchema,
@@ -51,6 +59,62 @@ export function resolvePath(path: string): string {
 		return resolve(homedir(), path.slice(2));
 	}
 	return resolve(path);
+}
+
+/**
+ * Resolve a single path-bearing value: a string is tilde-expanded/resolved,
+ * a string[] is mapped element-wise, anything else passes through untouched.
+ */
+function normalizePathValue(value: unknown): unknown {
+	if (typeof value === "string") {
+		return resolvePath(value);
+	}
+	if (Array.isArray(value)) {
+		return value.map((v) => (typeof v === "string" ? resolvePath(v) : v));
+	}
+	return value;
+}
+
+/**
+ * Normalize every path-bearing field (tagged via `pathRegistry`) in an
+ * EdgeWorkerConfig — both at the top level and per-repository — expanding
+ * `~/` prefixes and resolving to absolute paths.
+ *
+ * This is the single, registry-driven owner of config path normalization: a
+ * new path field cannot bypass it as long as it is tagged in the schema.
+ * Pure — returns a shallow-cloned config; does not mutate the input.
+ */
+export function normalizeConfigPaths(
+	config: EdgeWorkerConfig,
+): EdgeWorkerConfig {
+	const normalized: EdgeWorkerConfig = { ...config };
+
+	for (const [field, schema] of Object.entries(EdgeConfigSchema.shape)) {
+		if (field === "repositories") continue;
+		if (pathRegistry.has(schema)) {
+			const key = field as keyof EdgeWorkerConfig;
+			(normalized as unknown as Record<string, unknown>)[key] =
+				normalizePathValue(config[key]);
+		}
+	}
+
+	if (Array.isArray(config.repositories)) {
+		normalized.repositories = config.repositories.map((repo) => {
+			const clonedRepo: RepositoryConfig = { ...repo };
+			for (const [field, schema] of Object.entries(
+				RepositoryConfigSchema.shape,
+			)) {
+				if (pathRegistry.has(schema)) {
+					const key = field as keyof RepositoryConfig;
+					(clonedRepo as unknown as Record<string, unknown>)[key] =
+						normalizePathValue(repo[key]);
+				}
+			}
+			return clonedRepo;
+		});
+	}
+
+	return normalized;
 }
 
 /**

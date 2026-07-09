@@ -6,7 +6,7 @@ import type {
 	RepositoryConfig,
 } from "cyrus-core";
 import type { GitService } from "cyrus-edge-worker";
-import { EdgeWorker } from "cyrus-edge-worker";
+import { composeEdgeWorker, type EdgeWorker } from "cyrus-edge-worker";
 import { DEFAULT_SERVER_PORT, parsePort } from "../config/constants.js";
 import type { Workspace } from "../config/types.js";
 import type { ConfigService } from "./ConfigService.js";
@@ -235,7 +235,7 @@ export class WorkerService {
 		};
 
 		// Create and start EdgeWorker
-		this.edgeWorker = new EdgeWorker(config);
+		this.edgeWorker = composeEdgeWorker(config);
 
 		// Set config path for dynamic reloading
 		const configPath = this.configService.getConfigPath();

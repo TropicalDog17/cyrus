@@ -7,6 +7,7 @@ import {
 	type WriteStream,
 	writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
 	type BackgroundTaskSummary,
@@ -21,17 +22,23 @@ import {
 	type SessionCronSummary,
 	type StopHookInput,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentPendingWork, AskUserQuestionInput } from "cyrus-core";
+import type {
+	AgentMessage,
+	AgentPendingWork,
+	AskUserQuestionInput,
+} from "cyrus-core";
 import {
+	compute,
 	createLogger,
 	type IAgentRunner,
 	type ILogger,
 	LogLevel,
+	nodeDirLister,
 	StreamingPrompt,
+	toClaudeToolPatterns,
 } from "cyrus-core";
 import dotenv from "dotenv";
-import { ClaudeMessageFormatter, type IMessageFormatter } from "./formatter.js";
-import { buildHomeDirectoryDisallowedTools } from "./home-directory-restrictions.js";
+import { toAgentMessage } from "./claude-message-projection.js";
 import {
 	exportTranscriptToLangfuse,
 	resolveLangfuseConfig,
@@ -263,18 +270,20 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 	 */
 	readonly supportsStreamingInput = true;
 
+	/** Provider dispatch tag (see IAgentRunner.provider). */
+	readonly provider = "claude" as const;
+
 	private config: ClaudeRunnerConfig;
 	private logger: ILogger;
 	private abortController: AbortController | null = null;
 	private sessionInfo: ClaudeSessionInfo | null = null;
 	private logStream: WriteStream | null = null;
 	private readableLogStream: WriteStream | null = null;
-	private messages: SDKMessage[] = [];
+	private messages: AgentMessage[] = [];
 	private streamingPrompt: StreamingPrompt | null = null;
 	private activeQuery: Query | null = null;
 	private cyrusHome: string;
-	private formatter: IMessageFormatter;
-	private pendingResultMessage: SDKMessage | null = null;
+	private pendingResultMessage: AgentMessage | null = null;
 	private canUseToolCallback: CanUseTool | undefined;
 	private repositoryEnv: Record<string, string> = {};
 	private keepSessionWarm: boolean;
@@ -287,7 +296,6 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 		this.keepSessionWarm = keepSessionWarm;
 		this.logger = config.logger ?? createLogger({ component: "ClaudeRunner" });
 		this.cyrusHome = config.cyrusHome;
-		this.formatter = new ClaudeMessageFormatter();
 
 		// Create canUseTool callback if onAskUserQuestion is provided
 		if (config.onAskUserQuestion) {
@@ -527,45 +535,33 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 				promptForQuery = this.streamingPrompt;
 			}
 
-			// Process allowed directories by adding Read patterns to allowedTools
-			let processedAllowedTools = this.config.allowedTools
-				? [...this.config.allowedTools]
-				: undefined;
-			if (
-				this.config.allowedDirectories &&
-				this.config.allowedDirectories.length > 0
-			) {
-				const directoryTools = this.config.allowedDirectories.map((dir) => {
-					// Add extra / prefix for absolute paths to ensure Claude Code recognizes them properly
-					// See: https://docs.anthropic.com/en/docs/claude-code/settings#read-%26-edit
-					const prefixedPath = dir.startsWith("/") ? `/${dir}` : dir;
-					return `Read(${prefixedPath}/**)`;
-				});
-				processedAllowedTools = processedAllowedTools
-					? [...processedAllowedTools, ...directoryTools]
-					: directoryTools;
-			}
-
-			// Build home directory restrictions: deny Read on everything in ~/
-			// that is not an ancestor of the working directory. This prevents
-			// Claude from reading SSH keys, credentials, etc. `Read(~/**)` does
-			// not work as a disallowedTools pattern — `~` is not expanded to the
-			// home directory path, so the pattern never matches.
-			const homeDisallowedTools = this.config.workingDirectory
-				? buildHomeDirectoryDisallowedTools(
-						this.config.workingDirectory,
-						this.config.allowedDirectories ?? [],
-					)
-				: [];
-
-			// Merge config-level denials with home directory denials, deduplicating in case
-			// any paths appear in both (e.g. an allowedDirectory that is also explicitly denied).
-			const processedDisallowedTools = [
-				...new Set([
-					...(this.config.disallowedTools ?? []),
-					...homeDisallowedTools,
-				]),
-			];
+			// Derive the effective access policy once and render it into Claude
+			// Code tool patterns. `compute()` folds together three things that
+			// used to be inline here:
+			//   - allowedDirectories → Read(dir/**) allow patterns
+			//   - the home-directory sibling-exclusion walk → Read(...) denials
+			//     (deny Read on everything in ~/ that is not an ancestor of the
+			//     working directory, preventing reads of SSH keys, credentials,
+			//     etc. — `Read(~/**)` does not work as a disallowedTools pattern
+			//     because `~` is never expanded, so each sibling is named
+			//     concretely via double-slash absolute paths)
+			//   - config-level allowed/disallowed tools, passed through verbatim
+			// This is the COLD path; the warm path (EdgeWorker.warmupSessions)
+			// and the OS sandbox layer call the identical compute() so all three
+			// enforcement layers agree.
+			const {
+				allowedTools: processedAllowedTools,
+				disallowedTools: processedDisallowedTools,
+			} = toClaudeToolPatterns(
+				compute({
+					homeDir: homedir(),
+					dirLister: nodeDirLister,
+					cwd: this.config.workingDirectory ?? "",
+					allowReadDirectories: this.config.allowedDirectories ?? [],
+					toolAllowExtra: this.config.allowedTools,
+					toolDisallow: this.config.disallowedTools,
+				}),
+			);
 
 			// Log disallowed tools if configured
 			if (processedDisallowedTools.length > 0) {
@@ -698,7 +694,9 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					...(this.config.additionalDirectories?.length && {
 						additionalDirectories: this.config.additionalDirectories,
 					}),
-					...(processedAllowedTools && { allowedTools: processedAllowedTools }),
+					...(processedAllowedTools.length > 0 && {
+						allowedTools: processedAllowedTools,
+					}),
 					...(processedDisallowedTools.length > 0 && {
 						disallowedTools: processedDisallowedTools,
 					}),
@@ -799,9 +797,7 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					this.setupLogging();
 				}
 
-				this.messages.push(message);
-
-				// Log to detailed JSON log
+				// Log to detailed JSON log (raw SDK shape, for replay/debugging)
 				if (this.logStream) {
 					const logEntry = {
 						type: "sdk-message",
@@ -811,21 +807,31 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					this.logStream.write(`${JSON.stringify(logEntry)}\n`);
 				}
 
-				// Log to human-readable log
+				// Log to human-readable log (raw SDK shape)
 				if (this.readableLogStream) {
 					this.writeReadableLogEntry(message);
 				}
 
-				// Emit all messages (including result) immediately in-loop.
+				// Project the raw SDK message into the neutral AgentMessage
+				// contract. Informational SDK frames (stream_event, tool_progress,
+				// auth_status, tool_use_summary, prompt_suggestion, …) project to
+				// null and are dropped instead of being surfaced to consumers.
+				// Emit neutral messages (including result) immediately in-loop.
 				// When keepSessionWarm is true, the streamingPrompt stays open for
 				// follow-up messages so the SDK session can be reused. Otherwise we
 				// complete the streaming prompt on result so the for-await loop exits
 				// and the subprocess can shut down (pre-warm-sessions behavior).
-				this.logger.event("message_emitted", {
-					messageType: message.type,
-					claudeSessionId: this.sessionInfo?.sessionId,
-				});
-				this.emit("message", message);
+				const neutral = toAgentMessage(message);
+				if (neutral) {
+					this.messages.push(neutral);
+					this.logger.event("message_emitted", {
+						messageType: neutral.type,
+						claudeSessionId: this.sessionInfo?.sessionId,
+					});
+					this.emit("message", neutral);
+				}
+				// processMessage reads the raw SDK shape to emit text/assistant/
+				// tool-use convenience events.
 				this.processMessage(message);
 				if (
 					message.type === "result" &&
@@ -864,10 +870,10 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 			});
 			this.sessionInfo.isRunning = false;
 
-			// Emit deferred result message after marking isRunning = false
+			// Emit deferred result message after marking isRunning = false.
+			// (Already projected to a neutral AgentMessage.)
 			if (this.pendingResultMessage) {
 				this.emit("message", this.pendingResultMessage);
-				this.processMessage(this.pendingResultMessage);
 				this.pendingResultMessage = null;
 			}
 
@@ -1185,15 +1191,8 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 	/**
 	 * Get all messages from current session
 	 */
-	getMessages(): SDKMessage[] {
+	getMessages(): AgentMessage[] {
 		return [...this.messages];
-	}
-
-	/**
-	 * Get the message formatter for this runner
-	 */
-	getFormatter(): IMessageFormatter {
-		return this.formatter;
 	}
 
 	/**

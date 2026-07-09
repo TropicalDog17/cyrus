@@ -1,7 +1,15 @@
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import { watch as chokidarWatch, type FSWatcher } from "chokidar";
-import type { EdgeWorkerConfig, ILogger, RepositoryConfig } from "cyrus-core";
+import {
+	type EdgeConfig,
+	EdgeConfigSchema,
+	type EdgeWorkerConfig,
+	type ILogger,
+	migrateEdgeConfig,
+	normalizeConfigPaths,
+	type RepositoryConfig,
+} from "cyrus-core";
 
 /**
  * Describes the set of repository-level changes detected after a config
@@ -13,6 +21,12 @@ export interface RepositoryChanges {
 	removed: RepositoryConfig[];
 	/** The fully-merged new config (caller should replace its reference). */
 	newConfig: EdgeWorkerConfig;
+	/**
+	 * The set of top-level (non-repository) config keys whose value changed
+	 * between the previous and reconciled config. Additive to the payload;
+	 * lets downstream consumers dispatch selectively instead of broadcasting.
+	 */
+	changedKeys: Set<keyof EdgeConfig>;
 }
 
 /**
@@ -42,6 +56,19 @@ export interface ConfigManagerEvents {
  * ```
  */
 export class ConfigManager extends EventEmitter {
+	/**
+	 * Legacy → canonical field renames applied during reconciliation. Each
+	 * pair copies the legacy value forward to the canonical field when the
+	 * canonical field is absent (nullish). The `defaultAllowedTools` →
+	 * `linearAllowedTools` fold is handled separately by `migrateEdgeConfig`.
+	 */
+	private static readonly LEGACY_RENAMES: Array<
+		[keyof EdgeConfig, keyof EdgeConfig]
+	> = [
+		["defaultModel", "claudeDefaultModel"],
+		["defaultFallbackModel", "claudeDefaultFallbackModel"],
+	];
+
 	private config: EdgeWorkerConfig;
 	private readonly logger: ILogger;
 	private configPath?: string;
@@ -133,149 +160,160 @@ export class ConfigManager extends EventEmitter {
 		this.configPath = configPath;
 	}
 
+	/**
+	 * Reconcile a raw config read from disk against the previous in-memory
+	 * config. This is the single owner of the merge / migration / path
+	 * normalization / diff pipeline that used to be split across
+	 * `loadConfigSafely` + `detectGlobalConfigChanges`.
+	 *
+	 * Pipeline:
+	 * 1. `migrateEdgeConfig` — folds `defaultAllowedTools` → `linearAllowedTools`
+	 *    and the legacy per-repo Linear token format forward (idempotent).
+	 * 2. Legacy field renames (`defaultModel` → `claudeDefaultModel`, etc.)
+	 *    copied forward when the canonical field is absent.
+	 * 3. Validate `repositories` (falling back to `prev` when omitted) — throws
+	 *    on a malformed repositories array or a repo missing required fields.
+	 * 4. Uniform nullish merge over every `EdgeConfigSchema` key:
+	 *    `merged[k] = disk[k] ?? prev[k]`. Runtime-only fields on `prev`
+	 *    (handlers, cyrusHome, …) are preserved via the `{ ...prev }` base.
+	 * 5. Path normalization via `normalizeConfigPaths` (registry-driven).
+	 * 6. Generic diff → `changedKeys` (apples-to-apples: both sides are
+	 *    post-normalize) + repository add/modify/remove diff.
+	 *
+	 * NOTE: nullish (`??`) merge is a real behavior change vs the old `||` —
+	 * disk values of `false`, `0`, `""`, and `[]` are now honored instead of
+	 * falling back to the previous in-memory value.
+	 */
+	reconcile(
+		prev: EdgeWorkerConfig,
+		disk: unknown,
+	): {
+		merged: EdgeWorkerConfig;
+		changedKeys: Set<keyof EdgeConfig>;
+		repositoryChanges: {
+			added: RepositoryConfig[];
+			modified: RepositoryConfig[];
+			removed: RepositoryConfig[];
+		};
+	} {
+		// (1) migrate legacy shapes forward (idempotent).
+		const migrated = migrateEdgeConfig((disk ?? {}) as Record<string, unknown>);
+
+		// (2) apply legacy field renames when the canonical value is absent.
+		for (const [legacy, canonical] of ConfigManager.LEGACY_RENAMES) {
+			if (migrated[canonical] == null && migrated[legacy] != null) {
+				migrated[canonical] = migrated[legacy];
+			}
+		}
+
+		// (3) validate repositories (fall back to prev when omitted entirely).
+		const diskRepos = migrated.repositories;
+		if (diskRepos !== undefined && !Array.isArray(diskRepos)) {
+			throw new Error("Invalid config: repositories must be an array");
+		}
+		const effectiveRepos = (
+			Array.isArray(diskRepos) ? diskRepos : prev.repositories
+		) as RepositoryConfig[];
+		for (const repo of effectiveRepos) {
+			if (!repo.id || !repo.name || !repo.repositoryPath || !repo.baseBranch) {
+				throw new Error(
+					"Invalid repository config: missing required fields (id, name, repositoryPath, baseBranch)",
+				);
+			}
+		}
+
+		// (4) uniform nullish merge, preserving runtime-only fields from prev.
+		const merged: EdgeWorkerConfig = { ...prev };
+		const mergedRecord = merged as unknown as Record<string, unknown>;
+		const prevRecord = prev as unknown as Record<string, unknown>;
+		const migratedRecord = migrated as Record<string, unknown>;
+		for (const key of Object.keys(EdgeConfigSchema.shape)) {
+			const diskValue = migratedRecord[key];
+			mergedRecord[key] = diskValue ?? prevRecord[key];
+		}
+
+		// (5) path normalization (registry-driven, top-level + per-repo).
+		const normalized = normalizeConfigPaths(merged);
+
+		// (6a) generic diff → changedKeys (both sides post-normalize).
+		const changedKeys = new Set<keyof EdgeConfig>();
+		const normalizedRecord = normalized as unknown as Record<string, unknown>;
+		for (const key of Object.keys(EdgeConfigSchema.shape)) {
+			if (key === "repositories") continue;
+			if (!this.deepEqual(prevRecord[key], normalizedRecord[key])) {
+				changedKeys.add(key as keyof EdgeConfig);
+			}
+		}
+
+		// (6b) repository add/modify/remove diff against the live map.
+		const repositoryChanges = this.detectRepositoryChanges(normalized);
+
+		return { merged: normalized, changedKeys, repositoryChanges };
+	}
+
 	// ------------------------------------------------------------------
 	// Internal helpers
 	// ------------------------------------------------------------------
 
 	/**
-	 * Handle a config file change event: load, validate, diff, and emit.
+	 * Handle a config file change event: read, reconcile, and emit.
 	 */
 	private async handleConfigChange(): Promise<void> {
 		try {
-			const newConfig = await this.loadConfigSafely();
-			if (!newConfig) {
+			if (!this.configPath) {
+				this.logger.error("❌ No config path set");
 				return;
 			}
 
-			const changes = this.detectRepositoryChanges(newConfig);
+			let raw: unknown;
+			try {
+				const configContent = await readFile(this.configPath, "utf-8");
+				raw = JSON.parse(configContent);
+			} catch (error) {
+				this.logger.error("❌ Failed to load config file:", error);
+				return;
+			}
 
+			let result: ReturnType<ConfigManager["reconcile"]>;
+			try {
+				result = this.reconcile(this.config, raw);
+			} catch (error) {
+				this.logger.error("❌ Failed to reload configuration:", error);
+				return;
+			}
+
+			const { changedKeys, repositoryChanges } = result;
 			const hasRepoChanges =
-				changes.added.length > 0 ||
-				changes.modified.length > 0 ||
-				changes.removed.length > 0;
+				repositoryChanges.added.length > 0 ||
+				repositoryChanges.modified.length > 0 ||
+				repositoryChanges.removed.length > 0;
 
-			// Detect non-repository (global) config changes
-			const hasGlobalChanges = this.detectGlobalConfigChanges(newConfig);
-
-			if (!hasRepoChanges && !hasGlobalChanges) {
+			if (changedKeys.size === 0 && !hasRepoChanges) {
 				this.logger.info("ℹ️  No config changes detected");
 				return;
 			}
 
 			if (hasRepoChanges) {
 				this.logger.info(
-					`📊 Repository changes detected: ${changes.added.length} added, ${changes.modified.length} modified, ${changes.removed.length} removed`,
+					`📊 Repository changes detected: ${repositoryChanges.added.length} added, ${repositoryChanges.modified.length} modified, ${repositoryChanges.removed.length} removed`,
 				);
 			}
-			if (hasGlobalChanges) {
-				this.logger.info("📊 Global config changes detected");
+			if (changedKeys.size > 0) {
+				this.logger.info(
+					`📊 Global config changes detected: ${[...changedKeys].join(", ")}`,
+				);
 			}
 
 			// Emit the diff so EdgeWorker can orchestrate the mutations.
 			this.emit("configChanged", {
-				added: changes.added,
-				modified: changes.modified,
-				removed: changes.removed,
-				newConfig,
+				added: repositoryChanges.added,
+				modified: repositoryChanges.modified,
+				removed: repositoryChanges.removed,
+				newConfig: result.merged,
+				changedKeys,
 			} satisfies RepositoryChanges);
 		} catch (error) {
 			this.logger.error("❌ Failed to reload configuration:", error);
-		}
-	}
-
-	/**
-	 * Safely load configuration from the file, merging with the current
-	 * in-memory config for fields that are not present in the file.
-	 */
-	private async loadConfigSafely(): Promise<EdgeWorkerConfig | null> {
-		try {
-			if (!this.configPath) {
-				this.logger.error("❌ No config path set");
-				return null;
-			}
-
-			const configContent = await readFile(this.configPath, "utf-8");
-			const parsedConfig = JSON.parse(configContent);
-
-			// Merge with current EdgeWorker config structure
-			const newConfig: EdgeWorkerConfig = {
-				...this.config,
-				repositories: parsedConfig.repositories || [],
-				ngrokAuthToken:
-					parsedConfig.ngrokAuthToken || this.config.ngrokAuthToken,
-				linearWorkspaces:
-					parsedConfig.linearWorkspaces || this.config.linearWorkspaces,
-				claudeDefaultModel:
-					parsedConfig.claudeDefaultModel ||
-					parsedConfig.defaultModel ||
-					this.config.claudeDefaultModel ||
-					this.config.defaultModel,
-				claudeDefaultFallbackModel:
-					parsedConfig.claudeDefaultFallbackModel ||
-					parsedConfig.defaultFallbackModel ||
-					this.config.claudeDefaultFallbackModel ||
-					this.config.defaultFallbackModel,
-				cursorDefaultModel:
-					parsedConfig.cursorDefaultModel || this.config.cursorDefaultModel,
-				cursorDefaultFallbackModel:
-					parsedConfig.cursorDefaultFallbackModel ||
-					this.config.cursorDefaultFallbackModel,
-				defaultRunner: parsedConfig.defaultRunner || this.config.defaultRunner,
-				promptDefaults:
-					parsedConfig.promptDefaults || this.config.promptDefaults,
-				// Preserve legacy fields while rolling out new config keys.
-				defaultModel: parsedConfig.defaultModel || this.config.defaultModel,
-				defaultFallbackModel:
-					parsedConfig.defaultFallbackModel || this.config.defaultFallbackModel,
-				linearAllowedTools:
-					parsedConfig.linearAllowedTools || this.config.linearAllowedTools,
-				githubAllowedTools:
-					parsedConfig.githubAllowedTools || this.config.githubAllowedTools,
-				linearMcpConfigs:
-					parsedConfig.linearMcpConfigs || this.config.linearMcpConfigs,
-				githubMcpConfigs:
-					parsedConfig.githubMcpConfigs || this.config.githubMcpConfigs,
-				defaultDisallowedTools:
-					parsedConfig.defaultDisallowedTools ||
-					this.config.defaultDisallowedTools,
-				// Issue update trigger: use parsed value if explicitly set,
-				// otherwise keep current or default to true
-				issueUpdateTrigger:
-					parsedConfig.issueUpdateTrigger ?? this.config.issueUpdateTrigger,
-				// PR review trigger: use parsed value if explicitly set,
-				// otherwise keep current or default to true
-				prReviewTrigger:
-					parsedConfig.prReviewTrigger ?? this.config.prReviewTrigger,
-				// Sandbox / egress proxy config
-				sandbox: parsedConfig.sandbox ?? this.config.sandbox,
-			};
-
-			// Basic validation
-			if (!Array.isArray(newConfig.repositories)) {
-				this.logger.error("❌ Invalid config: repositories must be an array");
-				return null;
-			}
-
-			// Validate each repository has required fields
-			for (const repo of newConfig.repositories) {
-				if (
-					!repo.id ||
-					!repo.name ||
-					!repo.repositoryPath ||
-					!repo.baseBranch
-				) {
-					this.logger.error(
-						`❌ Invalid repository config: missing required fields (id, name, repositoryPath, baseBranch)`,
-						repo,
-					);
-					return null;
-				}
-			}
-
-			return newConfig;
-		} catch (error) {
-			this.logger.error("❌ Failed to load config file:", error);
-			return null;
 		}
 	}
 
@@ -317,40 +355,6 @@ export class ConfigManager extends EventEmitter {
 		}
 
 		return { added, modified, removed };
-	}
-
-	/**
-	 * Detect changes to non-repository (global) config fields such as
-	 * `defaultRunner`, `claudeDefaultModel`, `promptDefaults`, etc.
-	 */
-	private detectGlobalConfigChanges(newConfig: EdgeWorkerConfig): boolean {
-		const globalKeys: Array<keyof EdgeWorkerConfig> = [
-			"defaultRunner",
-			"claudeDefaultModel",
-			"claudeDefaultFallbackModel",
-			"cursorDefaultModel",
-			"cursorDefaultFallbackModel",
-			"defaultModel",
-			"defaultFallbackModel",
-			"linearAllowedTools",
-			"githubAllowedTools",
-			"linearMcpConfigs",
-			"githubMcpConfigs",
-			"defaultDisallowedTools",
-			"promptDefaults",
-			"issueUpdateTrigger",
-			"prReviewTrigger",
-			"linearWorkspaces",
-			"userAccessControl",
-			"sandbox",
-		];
-
-		for (const key of globalKeys) {
-			if (!this.deepEqual(this.config[key], newConfig[key])) {
-				return true;
-			}
-		}
-		return false;
 	}
 
 	/**

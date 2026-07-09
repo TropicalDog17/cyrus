@@ -2,13 +2,9 @@
  * Unit tests for LinearActivitySink
  */
 
-import {
-	type AgentActivityContent,
-	AgentActivitySignal,
-	type IIssueTrackerService,
-} from "cyrus-core";
+import type { IIssueTrackerService } from "cyrus-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ActivityPostOptions } from "../src/sinks/IActivitySink.js";
+import type { Activity } from "../src/sinks/IActivitySink.js";
 import { LinearActivitySink } from "../src/sinks/LinearActivitySink.js";
 
 describe("LinearActivitySink", () => {
@@ -40,9 +36,9 @@ describe("LinearActivitySink", () => {
 		});
 	});
 
-	describe("postActivity()", () => {
+	describe("post()", () => {
 		it("should post a thought activity and return activityId", async () => {
-			const activity: AgentActivityContent = {
+			const activity: Activity = {
 				type: "thought",
 				body: "Analyzing the codebase...",
 			};
@@ -52,7 +48,7 @@ describe("LinearActivitySink", () => {
 				agentActivity: Promise.resolve({ id: "activity-1" }),
 			} as any);
 
-			const result = await sink.postActivity(mockSessionId, activity);
+			const result = await sink.post(mockSessionId, activity);
 
 			expect(result).toEqual({ activityId: "activity-1" });
 			expect(mockIssueTracker.createAgentActivity).toHaveBeenCalledWith({
@@ -62,7 +58,7 @@ describe("LinearActivitySink", () => {
 		});
 
 		it("should post an action activity", async () => {
-			const activity: AgentActivityContent = {
+			const activity: Activity = {
 				type: "action",
 				action: "read_file",
 				parameter: "src/index.ts",
@@ -74,7 +70,7 @@ describe("LinearActivitySink", () => {
 				agentActivity: Promise.resolve({ id: "activity-2" }),
 			} as any);
 
-			const result = await sink.postActivity(mockSessionId, activity);
+			const result = await sink.post(mockSessionId, activity);
 
 			expect(result).toEqual({ activityId: "activity-2" });
 			expect(mockIssueTracker.createAgentActivity).toHaveBeenCalledWith({
@@ -84,7 +80,7 @@ describe("LinearActivitySink", () => {
 		});
 
 		it("should post a response activity", async () => {
-			const activity: AgentActivityContent = {
+			const activity: Activity = {
 				type: "response",
 				body: "I've completed the task successfully.",
 			};
@@ -94,13 +90,13 @@ describe("LinearActivitySink", () => {
 				agentActivity: Promise.resolve({ id: "activity-3" }),
 			} as any);
 
-			const result = await sink.postActivity(mockSessionId, activity);
+			const result = await sink.post(mockSessionId, activity);
 
 			expect(result).toEqual({ activityId: "activity-3" });
 		});
 
 		it("should post an error activity", async () => {
-			const activity: AgentActivityContent = {
+			const activity: Activity = {
 				type: "error",
 				body: "Failed to read file: Permission denied",
 			};
@@ -110,13 +106,13 @@ describe("LinearActivitySink", () => {
 				agentActivity: Promise.resolve({ id: "activity-4" }),
 			} as any);
 
-			const result = await sink.postActivity(mockSessionId, activity);
+			const result = await sink.post(mockSessionId, activity);
 
 			expect(result).toEqual({ activityId: "activity-4" });
 		});
 
 		it("should post an elicitation activity", async () => {
-			const activity: AgentActivityContent = {
+			const activity: Activity = {
 				type: "elicitation",
 				body: "Which API endpoint should I use?",
 			};
@@ -126,13 +122,13 @@ describe("LinearActivitySink", () => {
 				agentActivity: Promise.resolve({ id: "activity-5" }),
 			} as any);
 
-			const result = await sink.postActivity(mockSessionId, activity);
+			const result = await sink.post(mockSessionId, activity);
 
 			expect(result).toEqual({ activityId: "activity-5" });
 		});
 
 		it("should handle activity posting errors", async () => {
-			const activity: AgentActivityContent = {
+			const activity: Activity = {
 				type: "thought",
 				body: "Test",
 			};
@@ -140,13 +136,13 @@ describe("LinearActivitySink", () => {
 			const error = new Error("Network error");
 			vi.mocked(mockIssueTracker.createAgentActivity).mockRejectedValue(error);
 
-			await expect(sink.postActivity(mockSessionId, activity)).rejects.toThrow(
+			await expect(sink.post(mockSessionId, activity)).rejects.toThrow(
 				"Network error",
 			);
 		});
 
 		it("should return empty result when success but no agentActivity", async () => {
-			const activity: AgentActivityContent = {
+			const activity: Activity = {
 				type: "thought",
 				body: "Test",
 			};
@@ -156,13 +152,13 @@ describe("LinearActivitySink", () => {
 				agentActivity: undefined,
 			} as any);
 
-			const result = await sink.postActivity(mockSessionId, activity);
+			const result = await sink.post(mockSessionId, activity);
 
 			expect(result).toEqual({});
 		});
 
 		it("should return empty result when success is false", async () => {
-			const activity: AgentActivityContent = {
+			const activity: Activity = {
 				type: "thought",
 				body: "Test",
 			};
@@ -171,13 +167,13 @@ describe("LinearActivitySink", () => {
 				success: false,
 			} as any);
 
-			const result = await sink.postActivity(mockSessionId, activity);
+			const result = await sink.post(mockSessionId, activity);
 
 			expect(result).toEqual({});
 		});
 
 		it("should call createAgentActivity exactly once per post", async () => {
-			const activity: AgentActivityContent = {
+			const activity: Activity = {
 				type: "thought",
 				body: "Test",
 			};
@@ -187,161 +183,9 @@ describe("LinearActivitySink", () => {
 				agentActivity: Promise.resolve({ id: "activity-1" }),
 			} as any);
 
-			await sink.postActivity(mockSessionId, activity);
+			await sink.post(mockSessionId, activity);
 
 			expect(mockIssueTracker.createAgentActivity).toHaveBeenCalledTimes(1);
-		});
-
-		it("should pass ephemeral option through to createAgentActivity", async () => {
-			const activity: AgentActivityContent = {
-				type: "thought",
-				body: "Ephemeral thought",
-			};
-			const options: ActivityPostOptions = { ephemeral: true };
-
-			vi.mocked(mockIssueTracker.createAgentActivity).mockResolvedValue({
-				success: true,
-				agentActivity: Promise.resolve({ id: "activity-eph" }),
-			} as any);
-
-			await sink.postActivity(mockSessionId, activity, options);
-
-			expect(mockIssueTracker.createAgentActivity).toHaveBeenCalledWith({
-				agentSessionId: mockSessionId,
-				content: activity,
-				ephemeral: true,
-			});
-		});
-
-		it("should map 'auth' signal to AgentActivitySignal.Auth", async () => {
-			const activity: AgentActivityContent = {
-				type: "elicitation",
-				body: "Please approve",
-			};
-			const options: ActivityPostOptions = {
-				signal: "auth",
-				signalMetadata: { url: "https://example.com/approve" },
-			};
-
-			vi.mocked(mockIssueTracker.createAgentActivity).mockResolvedValue({
-				success: true,
-				agentActivity: Promise.resolve({ id: "activity-sig" }),
-			} as any);
-
-			await sink.postActivity(mockSessionId, activity, options);
-
-			expect(mockIssueTracker.createAgentActivity).toHaveBeenCalledWith({
-				agentSessionId: mockSessionId,
-				content: activity,
-				signal: AgentActivitySignal.Auth,
-				signalMetadata: { url: "https://example.com/approve" },
-			});
-		});
-
-		it("should map 'select' signal to AgentActivitySignal.Select", async () => {
-			const activity: AgentActivityContent = {
-				type: "elicitation",
-				body: "Choose a repo",
-			};
-
-			vi.mocked(mockIssueTracker.createAgentActivity).mockResolvedValue({
-				success: true,
-				agentActivity: Promise.resolve({ id: "activity-sel" }),
-			} as any);
-
-			await sink.postActivity(mockSessionId, activity, { signal: "select" });
-
-			expect(mockIssueTracker.createAgentActivity).toHaveBeenCalledWith({
-				agentSessionId: mockSessionId,
-				content: activity,
-				signal: AgentActivitySignal.Select,
-			});
-		});
-
-		it("should map 'stop' signal to AgentActivitySignal.Stop", async () => {
-			const activity: AgentActivityContent = {
-				type: "response",
-				body: "Stopping",
-			};
-
-			vi.mocked(mockIssueTracker.createAgentActivity).mockResolvedValue({
-				success: true,
-				agentActivity: Promise.resolve({ id: "activity-stop" }),
-			} as any);
-
-			await sink.postActivity(mockSessionId, activity, { signal: "stop" });
-
-			expect(mockIssueTracker.createAgentActivity).toHaveBeenCalledWith({
-				agentSessionId: mockSessionId,
-				content: activity,
-				signal: AgentActivitySignal.Stop,
-			});
-		});
-
-		it("should map 'continue' signal to AgentActivitySignal.Continue", async () => {
-			const activity: AgentActivityContent = {
-				type: "response",
-				body: "Continuing",
-			};
-
-			vi.mocked(mockIssueTracker.createAgentActivity).mockResolvedValue({
-				success: true,
-				agentActivity: Promise.resolve({ id: "activity-cont" }),
-			} as any);
-
-			await sink.postActivity(mockSessionId, activity, {
-				signal: "continue",
-			});
-
-			expect(mockIssueTracker.createAgentActivity).toHaveBeenCalledWith({
-				agentSessionId: mockSessionId,
-				content: activity,
-				signal: AgentActivitySignal.Continue,
-			});
-		});
-
-		it("should pass signalMetadata through to createAgentActivity", async () => {
-			const activity: AgentActivityContent = {
-				type: "elicitation",
-				body: "Select",
-			};
-			const metadata = { options: ["repo-a", "repo-b"], defaultIndex: 0 };
-
-			vi.mocked(mockIssueTracker.createAgentActivity).mockResolvedValue({
-				success: true,
-				agentActivity: Promise.resolve({ id: "activity-meta" }),
-			} as any);
-
-			await sink.postActivity(mockSessionId, activity, {
-				signal: "select",
-				signalMetadata: metadata,
-			});
-
-			expect(mockIssueTracker.createAgentActivity).toHaveBeenCalledWith({
-				agentSessionId: mockSessionId,
-				content: activity,
-				signal: AgentActivitySignal.Select,
-				signalMetadata: metadata,
-			});
-		});
-
-		it("should not include ephemeral when option is undefined", async () => {
-			const activity: AgentActivityContent = {
-				type: "thought",
-				body: "No ephemeral",
-			};
-
-			vi.mocked(mockIssueTracker.createAgentActivity).mockResolvedValue({
-				success: true,
-				agentActivity: Promise.resolve({ id: "activity-no-eph" }),
-			} as any);
-
-			await sink.postActivity(mockSessionId, activity, {});
-
-			expect(mockIssueTracker.createAgentActivity).toHaveBeenCalledWith({
-				agentSessionId: mockSessionId,
-				content: activity,
-			});
 		});
 	});
 
@@ -418,16 +262,16 @@ describe("LinearActivitySink", () => {
 				agentActivity: Promise.resolve({ id: "activity-1" }),
 			} as any);
 
-			await sink.postActivity(mockSessionId, {
+			await sink.post(mockSessionId, {
 				type: "thought",
 				body: "First thought",
 			});
-			await sink.postActivity(mockSessionId, {
+			await sink.post(mockSessionId, {
 				type: "action",
 				action: "read_file",
 				parameter: "test.ts",
 			});
-			await sink.postActivity(mockSessionId, {
+			await sink.post(mockSessionId, {
 				type: "response",
 				body: "Done",
 			});
@@ -477,7 +321,7 @@ describe("LinearActivitySink", () => {
 				agentActivity: Promise.resolve({ id: "activity-1" }),
 			} as any);
 
-			await sink.postActivity(mockSessionId, {
+			await sink.post(mockSessionId, {
 				type: "thought",
 				body: "Test",
 			});
@@ -488,7 +332,7 @@ describe("LinearActivitySink", () => {
 
 	describe("Edge Cases", () => {
 		it("should handle empty activity body", async () => {
-			const activity: AgentActivityContent = {
+			const activity: Activity = {
 				type: "thought",
 				body: "",
 			};
@@ -498,7 +342,7 @@ describe("LinearActivitySink", () => {
 				agentActivity: Promise.resolve({ id: "activity-1" }),
 			} as any);
 
-			await sink.postActivity(mockSessionId, activity);
+			await sink.post(mockSessionId, activity);
 
 			expect(mockIssueTracker.createAgentActivity).toHaveBeenCalledWith({
 				agentSessionId: mockSessionId,
@@ -507,7 +351,7 @@ describe("LinearActivitySink", () => {
 		});
 
 		it("should handle activity with minimal fields", async () => {
-			const activity: AgentActivityContent = {
+			const activity: Activity = {
 				type: "action",
 				action: "test",
 			};
@@ -517,7 +361,7 @@ describe("LinearActivitySink", () => {
 				agentActivity: Promise.resolve({ id: "activity-1" }),
 			} as any);
 
-			await sink.postActivity(mockSessionId, activity);
+			await sink.post(mockSessionId, activity);
 
 			expect(mockIssueTracker.createAgentActivity).toHaveBeenCalledWith({
 				agentSessionId: mockSessionId,
@@ -527,7 +371,7 @@ describe("LinearActivitySink", () => {
 
 		it("should handle very long activity content", async () => {
 			const longBody = "x".repeat(10000);
-			const activity: AgentActivityContent = {
+			const activity: Activity = {
 				type: "thought",
 				body: longBody,
 			};
@@ -537,7 +381,7 @@ describe("LinearActivitySink", () => {
 				agentActivity: Promise.resolve({ id: "activity-1" }),
 			} as any);
 
-			await sink.postActivity(mockSessionId, activity);
+			await sink.post(mockSessionId, activity);
 
 			expect(mockIssueTracker.createAgentActivity).toHaveBeenCalledWith({
 				agentSessionId: mockSessionId,

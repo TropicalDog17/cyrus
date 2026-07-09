@@ -22,7 +22,8 @@ import type {
 	IIssueTrackerService,
 	ILogger,
 } from "cyrus-core";
-import { AgentActivitySignal, createLogger } from "cyrus-core";
+import { createLogger } from "cyrus-core";
+import { LinearActivitySink } from "./sinks/LinearActivitySink.js";
 
 /**
  * Pending question data stored while awaiting user response
@@ -196,17 +197,17 @@ export class AskUserQuestionHandler {
 
 		const elicitationBody = `${question.question}\n\n${optionsText}\n\n_Select an option above, or reply with your own answer._`;
 
-		// Post elicitation to Linear
+		// Post elicitation to Linear through the single sink post path
 		try {
-			await issueTracker.createAgentActivity({
-				agentSessionId: linearAgentSessionId,
-				content: {
+			await new LinearActivitySink(issueTracker, organizationId).post(
+				linearAgentSessionId,
+				{
 					type: "elicitation",
 					body: elicitationBody,
+					signal: "select",
+					signalMetadata: { options },
 				},
-				signal: AgentActivitySignal.Select,
-				signalMetadata: { options },
-			});
+			);
 
 			this.logger.debug(
 				`Posted elicitation with ${options.length} options for session ${linearAgentSessionId}`,
