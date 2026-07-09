@@ -103,6 +103,59 @@ describe("EgressProxy", () => {
 			await proxy.start(); // Should not throw
 			await proxy.stop();
 		});
+
+		// Regression for DEV-125: an open CONNECT tunnel (or an upstream socket
+		// stuck mid-connect to an unreachable host in a no-egress sandbox) must
+		// not wedge stop(). server.close() waits for in-flight sockets, so stop()
+		// has to force them closed itself.
+		it("completes promptly with an open CONNECT tunnel", async () => {
+			// A local upstream that accepts connections and holds them open,
+			// standing in for a remote the proxy has tunneled to.
+			const upstreamSockets: net.Socket[] = [];
+			const upstream = net.createServer((sock) => {
+				upstreamSockets.push(sock);
+			});
+			await new Promise<void>((resolve) =>
+				upstream.listen(0, "127.0.0.1", () => resolve()),
+			);
+			const upstreamPort = (upstream.address() as { port: number }).port;
+
+			proxy = new EgressProxy(
+				createConfig({
+					httpProxyPort: httpPort,
+					socksProxyPort: socksPort,
+					networkPolicy: { allow: { "127.0.0.1": [{}] } },
+				}),
+				TEST_CYRUS_HOME,
+			);
+			await proxy.start();
+
+			// Establish a CONNECT tunnel to the allowed local upstream. The proxy
+			// hijacks the client socket and pipes it to the upstream; these open
+			// sockets are what server.close() would otherwise block on.
+			const req = http.request({
+				hostname: "127.0.0.1",
+				port: proxy.getHttpProxyPort(),
+				method: "CONNECT",
+				path: `127.0.0.1:${upstreamPort}`,
+			});
+			await new Promise<void>((resolve, reject) => {
+				req.on("connect", () => resolve());
+				req.on("error", reject);
+				req.setTimeout(3000, () => reject(new Error("tunnel setup timed out")));
+				req.end();
+			});
+
+			// With the tunnel open, stop() must force the sockets closed and
+			// return quickly — not wait out the OS TCP timeout.
+			const startedAt = Date.now();
+			await proxy.stop();
+			expect(Date.now() - startedAt).toBeLessThan(5000);
+
+			req.destroy();
+			for (const sock of upstreamSockets) sock.destroy();
+			await new Promise<void>((resolve) => upstream.close(() => resolve()));
+		}, 15000);
 	});
 
 	describe("domain matching", () => {

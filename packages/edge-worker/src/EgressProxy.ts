@@ -82,6 +82,16 @@ export class EgressProxy {
 	/** Set of allowed domain patterns (if policy specifies allow rules) */
 	private allowedDomains = new Set<string>();
 
+	/**
+	 * All live sockets — inbound client sockets accepted by the HTTP/SOCKS
+	 * servers plus outbound upstream sockets opened for tunnels. Tracked so
+	 * stop() can force-destroy any still in-flight: a socket stuck mid-connect
+	 * to an unreachable host (e.g. in a no-egress sandbox) would otherwise keep
+	 * server.close() from ever completing, wedging shutdown for the full OS TCP
+	 * timeout. See DEV-125.
+	 */
+	private readonly activeSockets = new Set<Socket>();
+
 	private isRunning = false;
 
 	constructor(config: SandboxConfig, cyrusHome: string, logger?: ILogger) {
@@ -201,10 +211,31 @@ export class EgressProxy {
 	}
 
 	/**
+	 * Register a socket so stop() can force it closed, auto-deregistering when
+	 * it closes on its own. Returns the socket for call-site convenience.
+	 */
+	private trackSocket(socket: Socket): Socket {
+		this.activeSockets.add(socket);
+		socket.once("close", () => {
+			this.activeSockets.delete(socket);
+		});
+		return socket;
+	}
+
+	/**
 	 * Stop the egress proxy servers.
 	 */
 	async stop(): Promise<void> {
 		if (!this.isRunning) return;
+
+		// Force-destroy every live socket before closing the servers. A CONNECT
+		// tunnel whose upstream socket is stuck mid-connect (e.g. an unreachable
+		// host in a no-egress sandbox) would otherwise keep server.close() from
+		// ever calling back, wedging shutdown for the full OS TCP timeout. See DEV-125.
+		for (const socket of [...this.activeSockets]) {
+			socket.destroy();
+		}
+		this.activeSockets.clear();
 
 		const stops: Promise<void>[] = [];
 
@@ -504,6 +535,12 @@ export class EgressProxy {
 			this.handleHttpRequest(req, res);
 		});
 
+		// Track every accepted socket so stop() can force it closed. Hijacked
+		// CONNECT sockets in particular are not released by server.close() alone.
+		this.httpServer.on("connection", (socket: Socket) => {
+			this.trackSocket(socket);
+		});
+
 		// Handle CONNECT method for HTTPS tunneling
 		this.httpServer.on("connect", (req, clientSocket: Socket, head) => {
 			this.handleConnect(req, clientSocket, head);
@@ -652,6 +689,7 @@ export class EgressProxy {
 			serverSocket.pipe(clientSocket);
 			clientSocket.pipe(serverSocket);
 		});
+		this.trackSocket(serverSocket);
 
 		serverSocket.on("error", (err) => {
 			this.logger.error(
@@ -662,6 +700,12 @@ export class EgressProxy {
 		});
 
 		clientSocket.on("error", () => {
+			serverSocket.destroy();
+		});
+		// Tear down the upstream socket when the client goes away cleanly too,
+		// not just on error — otherwise an upstream still connecting to an
+		// unreachable host lingers until the OS TCP timeout. See DEV-125.
+		clientSocket.on("close", () => {
 			serverSocket.destroy();
 		});
 	}
@@ -759,6 +803,7 @@ export class EgressProxy {
 				bridge.pipe(clientSocket);
 				clientSocket.pipe(bridge);
 			});
+			this.trackSocket(bridge);
 
 			bridge.on("error", () => clientSocket.destroy());
 			clientSocket.on("error", () => bridge.destroy());
@@ -780,6 +825,7 @@ export class EgressProxy {
 
 	private async startSocksProxy(): Promise<void> {
 		this.socksServer = createNetServer((socket) => {
+			this.trackSocket(socket);
 			this.handleSocksConnection(socket);
 		});
 
@@ -887,6 +933,7 @@ export class EgressProxy {
 					target.pipe(socket);
 					socket.pipe(target);
 				});
+				this.trackSocket(target);
 
 				target.on("error", (err) => {
 					this.logger.error(
