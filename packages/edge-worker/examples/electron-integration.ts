@@ -7,7 +7,7 @@
  * - System notifications
  */
 
-import { EdgeWorker } from "cyrus-edge-worker";
+import { composeEdgeWorker } from "cyrus-edge-worker";
 import { app, type BrowserWindow, ipcMain, Notification } from "electron";
 
 export async function createElectronEdgeWorker(
@@ -24,7 +24,7 @@ export async function createElectronEdgeWorker(
 				: "/usr/local/bin/claude";
 
 	// Create EdgeWorker with Electron-specific configuration
-	const edgeWorker = new EdgeWorker({
+	const edgeWorker = composeEdgeWorker({
 		// Simple config - token from user OAuth flow
 		proxyUrl: proxyUrl,
 		linearToken: userToken,

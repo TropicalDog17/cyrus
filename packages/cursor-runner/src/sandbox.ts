@@ -123,6 +123,10 @@ export function buildCursorSandboxJson(
 	// Cursor's sandbox.json doesn't support denyRead/denyWrite under
 	// workspace_readwrite. Documented limitation. (Hook-based per-path
 	// reads can compensate when needed via `.cursor/hooks.json`.)
+	// This function stays the raw SandboxSettings -> sandbox.json mapper;
+	// cyrus-core's `toCursorPermissions` (wrapped by CursorRunner) is the
+	// single place that now SURFACES the un-enforceable-denyRead as a warning
+	// instead of silently dropping it.
 
 	const network = sandboxSettings.network;
 	if (network?.allowedDomains)

@@ -2,6 +2,7 @@ import { AgentSessionStatus } from "cyrus-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager";
 import type { IActivitySink } from "../src/sinks/IActivitySink";
+import { resultError, resultSuccess } from "./agent-message-builders";
 
 describe("AgentSessionManager stop-session behavior", () => {
 	let manager: AgentSessionManager;
@@ -13,11 +14,11 @@ describe("AgentSessionManager stop-session behavior", () => {
 	beforeEach(() => {
 		mockActivitySink = {
 			id: "test-workspace",
-			postActivity: vi.fn().mockResolvedValue({ activityId: "activity-1" }),
+			post: vi.fn().mockResolvedValue({ activityId: "activity-1" }),
 			createAgentSession: vi.fn().mockResolvedValue("session-1"),
 		};
 
-		postActivitySpy = vi.spyOn(mockActivitySink, "postActivity");
+		postActivitySpy = vi.spyOn(mockActivitySink, "post");
 
 		manager = new AgentSessionManager();
 
@@ -42,28 +43,12 @@ describe("AgentSessionManager stop-session behavior", () => {
 	it("marks session as error when a session stop is requested", async () => {
 		manager.requestSessionStop(sessionId);
 
-		await manager.completeSession(sessionId, {
-			type: "result",
-			subtype: "success",
-			duration_ms: 1,
-			duration_api_ms: 1,
-			is_error: false,
-			num_turns: 1,
-			result: "Stopped run should not continue",
-			stop_reason: null,
-			total_cost_usd: 0,
-			usage: {
-				input_tokens: 1,
-				output_tokens: 1,
-				cache_creation_input_tokens: 0,
-				cache_read_input_tokens: 0,
-				cache_creation: null,
-			},
-			modelUsage: {},
-			permission_denials: [],
-			uuid: "result-1",
-			session_id: "sdk-session",
-		} as any);
+		await manager.completeSession(
+			sessionId,
+			resultSuccess("Stopped run should not continue", {
+				sessionId: "sdk-session",
+			}),
+		);
 
 		expect(manager.getSession(sessionId)?.status).toBe(
 			AgentSessionStatus.Error,
@@ -71,28 +56,10 @@ describe("AgentSessionManager stop-session behavior", () => {
 	});
 
 	it("handles non max-turn execution errors gracefully", async () => {
-		await manager.completeSession(sessionId, {
-			type: "result",
-			subtype: "error_during_execution",
-			duration_ms: 1,
-			duration_api_ms: 1,
-			is_error: true,
-			num_turns: 1,
-			errors: ["aborted by user"],
-			stop_reason: null,
-			total_cost_usd: 0,
-			usage: {
-				input_tokens: 1,
-				output_tokens: 1,
-				cache_creation_input_tokens: 0,
-				cache_read_input_tokens: 0,
-				cache_creation: null,
-			},
-			modelUsage: {},
-			permission_denials: [],
-			uuid: "result-2",
-			session_id: "sdk-session",
-		} as any);
+		await manager.completeSession(
+			sessionId,
+			resultError(["aborted by user"], { sessionId: "sdk-session" }),
+		);
 
 		// Session should be marked as error for execution errors
 		expect(manager.getSession(sessionId)?.status).toBe(
@@ -104,28 +71,10 @@ describe("AgentSessionManager stop-session behavior", () => {
 		const usageLimitError =
 			"You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Feb 16th, 2026 8:09 PM.";
 
-		await manager.completeSession(sessionId, {
-			type: "result",
-			subtype: "error_during_execution",
-			duration_ms: 1,
-			duration_api_ms: 1,
-			is_error: true,
-			num_turns: 1,
-			errors: [usageLimitError],
-			stop_reason: null,
-			total_cost_usd: 0,
-			usage: {
-				input_tokens: 1,
-				output_tokens: 1,
-				cache_creation_input_tokens: 0,
-				cache_read_input_tokens: 0,
-				cache_creation: null,
-			},
-			modelUsage: {},
-			permission_denials: [],
-			uuid: "result-3",
-			session_id: "sdk-session",
-		} as any);
+		await manager.completeSession(
+			sessionId,
+			resultError([usageLimitError], { sessionId: "sdk-session" }),
+		);
 
 		const postActivityCalls = postActivitySpy.mock.calls;
 		const errorActivity = postActivityCalls.find(

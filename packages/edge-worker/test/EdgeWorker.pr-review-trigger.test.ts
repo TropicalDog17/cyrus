@@ -5,7 +5,7 @@ import { LinearEventTransport } from "cyrus-linear-event-transport";
 import { createCyrusToolsServer } from "cyrus-mcp-tools";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
-import { EdgeWorker } from "../src/EdgeWorker.js";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker.js";
 import { SharedApplicationServer } from "../src/SharedApplicationServer.js";
 import { TEST_CYRUS_HOME } from "./test-dirs.js";
 
@@ -111,7 +111,7 @@ describe("EdgeWorker - PR review trigger gate (CYPACK-1273)", () => {
 	}
 
 	function createWorker(prReviewTrigger: boolean | undefined): EdgeWorker {
-		const worker = new EdgeWorker(buildConfig(prReviewTrigger));
+		const worker = composeEdgeWorker(buildConfig(prReviewTrigger));
 		(worker as any).agentSessionManager = mockAgentSessionManager;
 		(worker as any).gitHubCommentService = mockGitHubCommentService;
 		// Token resolution succeeds so the (enabled) ack path can post.

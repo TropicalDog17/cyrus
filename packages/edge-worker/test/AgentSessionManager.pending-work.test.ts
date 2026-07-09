@@ -1,8 +1,3 @@
-import type {
-	SDKAssistantMessage,
-	SDKResultMessage,
-} from "@anthropic-ai/claude-agent-sdk";
-import { ClaudeMessageFormatter } from "cyrus-claude-runner";
 import type { AgentPendingWork } from "cyrus-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager";
@@ -12,6 +7,7 @@ import {
 	tryParseScheduleWakeupInput,
 } from "../src/PendingWorkFormatter";
 import type { IActivitySink } from "../src/sinks/IActivitySink";
+import { assistantToolUse, resultSuccess } from "./agent-message-builders";
 
 /**
  * CYPACK-1310: when a turn ends with a scheduled wakeup pending, the Linear
@@ -108,10 +104,10 @@ describe("AgentSessionManager pending-work activities", () => {
 	function setup(pendingWork: AgentPendingWork | null) {
 		const mockActivitySink: IActivitySink = {
 			id: "test-workspace",
-			postActivity: vi.fn().mockResolvedValue({ activityId: "activity-1" }),
+			post: vi.fn().mockResolvedValue({ activityId: "activity-1" }),
 			createAgentSession: vi.fn().mockResolvedValue("ext-session-1"),
 		};
-		postActivitySpy = mockActivitySink.postActivity as ReturnType<typeof vi.fn>;
+		postActivitySpy = mockActivitySink.post as ReturnType<typeof vi.fn>;
 
 		manager = new AgentSessionManager();
 		manager.createCyrusAgentSession(
@@ -128,56 +124,19 @@ describe("AgentSessionManager pending-work activities", () => {
 		);
 		manager.setActivitySink(sessionId, mockActivitySink);
 
-		const formatter = new ClaudeMessageFormatter();
 		const runnerStub = {
-			getFormatter: () => formatter,
 			...(pendingWork && { getPendingWork: () => pendingWork }),
-			constructor: { name: "ClaudeRunner" },
+			provider: "claude",
 		} as unknown as Parameters<typeof manager.addAgentRunner>[1];
 		manager.addAgentRunner(sessionId, runnerStub);
 	}
 
-	function buildScheduleWakeupToolUseMessage(): SDKAssistantMessage {
-		return {
-			type: "assistant",
-			session_id: "claude-session",
-			parent_tool_use_id: null,
-			uuid: "uuid-wakeup-tool",
-			message: {
-				id: "msg_wakeup",
-				type: "message",
-				role: "assistant",
-				model: "claude",
-				stop_reason: "tool_use",
-				stop_sequence: null,
-				usage: {
-					input_tokens: 0,
-					output_tokens: 0,
-					cache_creation_input_tokens: 0,
-					cache_read_input_tokens: 0,
-				},
-				content: [
-					{
-						type: "tool_use",
-						id: "toolu_wakeup",
-						name: "ScheduleWakeup",
-						input: WAKEUP_INPUT,
-					},
-				],
-			},
-		} as unknown as SDKAssistantMessage;
+	function buildScheduleWakeupToolUseMessage() {
+		return assistantToolUse("toolu_wakeup", "ScheduleWakeup", WAKEUP_INPUT);
 	}
 
-	function buildSuccessResult(text: string): SDKResultMessage {
-		return {
-			type: "result",
-			subtype: "success",
-			is_error: false,
-			result: text,
-			session_id: "claude-session",
-			duration_ms: 1000,
-			num_turns: 2,
-		} as unknown as SDKResultMessage;
+	function buildSuccessResult(text: string) {
+		return resultSuccess(text, { durationMs: 1000 });
 	}
 
 	beforeEach(() => {
@@ -258,37 +217,10 @@ describe("AgentSessionManager pending-work activities", () => {
 		// response activity must be skipped entirely rather than dumping JSON.
 		setup(null);
 
-		const bashToolUse = {
-			type: "assistant",
-			session_id: "claude-session",
-			parent_tool_use_id: null,
-			uuid: "uuid-bash-tool",
-			message: {
-				id: "msg_bash",
-				type: "message",
-				role: "assistant",
-				model: "claude",
-				stop_reason: "tool_use",
-				stop_sequence: null,
-				usage: {
-					input_tokens: 0,
-					output_tokens: 0,
-					cache_creation_input_tokens: 0,
-					cache_read_input_tokens: 0,
-				},
-				content: [
-					{
-						type: "tool_use",
-						id: "toolu_bash",
-						name: "Bash",
-						input: {
-							command: "echo 'waiting for repo...'",
-							description: "idle",
-						},
-					},
-				],
-			},
-		} as unknown as SDKAssistantMessage;
+		const bashToolUse = assistantToolUse("toolu_bash", "Bash", {
+			command: "echo 'waiting for repo...'",
+			description: "idle",
+		});
 
 		await manager.handleClaudeMessage(sessionId, bashToolUse);
 		// Result with empty result text (turn ended on the tool call).

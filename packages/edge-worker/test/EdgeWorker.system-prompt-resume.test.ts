@@ -12,7 +12,7 @@ import {
 import { LinearEventTransport } from "cyrus-linear-event-transport";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
-import { EdgeWorker } from "../src/EdgeWorker.js";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker.js";
 import { SharedApplicationServer } from "../src/SharedApplicationServer.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
 import { TEST_CYRUS_HOME } from "./test-dirs.js";
@@ -216,7 +216,7 @@ Issue: {{issue_identifier}}`;
 			},
 		};
 
-		edgeWorker = new EdgeWorker(mockConfig);
+		edgeWorker = composeEdgeWorker(mockConfig);
 
 		// Inject mock issue tracker for the test repository
 		const mockIssueTracker = {

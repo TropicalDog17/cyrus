@@ -83,20 +83,26 @@ export class ToolPermissionResolver {
 	public buildAllowedTools(
 		repositories: RepositoryConfig | RepositoryConfig[],
 		promptType?: PromptType,
+		platformDefault?: string[],
 	): string[] {
 		const repoArray = Array.isArray(repositories)
 			? repositories
 			: [repositories];
 
+		// The workspace-level default that sits at the bottom of the per-repo
+		// priority chain. GitHub sessions pass their own platform default here
+		// (see `buildGithubAllowedTools`); Linear sessions fall through to the
+		// configured `linearAllowedTools`. Passing it as a parameter keeps this
+		// method pure — the shared, normalized `this.config` is never mutated.
+		const workspaceDefault = platformDefault ?? this.config.linearAllowedTools;
+
 		if (repoArray.length === 0) {
-			const baseTools = this.config.linearAllowedTools ?? [
-				...LINEAR_DEFAULT_ALLOWED_TOOLS,
-			];
+			const baseTools = workspaceDefault ?? [...LINEAR_DEFAULT_ALLOWED_TOOLS];
 			return [...new Set(baseTools)];
 		}
 
 		const perRepoTools = repoArray.map((repo) =>
-			this.buildAllowedToolsForRepo(repo, promptType),
+			this.buildAllowedToolsForRepo(repo, promptType, workspaceDefault),
 		);
 		const unionTools = [...new Set(perRepoTools.flat())];
 
@@ -128,13 +134,11 @@ export class ToolPermissionResolver {
 				? this.config.githubAllowedTools
 				: [...GITHUB_DEFAULT_ALLOWED_TOOLS];
 
-		const originalDefault = this.config.linearAllowedTools;
-		this.config.linearAllowedTools = platformDefault;
-		try {
-			return this.buildAllowedTools(repository, promptType);
-		} finally {
-			this.config.linearAllowedTools = originalDefault;
-		}
+		// Thread the GitHub platform default through as a parameter instead of
+		// temporarily overwriting `this.config.linearAllowedTools`. The old
+		// mutate-and-restore aliased the shared normalized config object other
+		// services hold a reference to (Frozen decision #6).
+		return this.buildAllowedTools(repository, promptType, platformDefault);
 	}
 
 	/**
@@ -144,6 +148,7 @@ export class ToolPermissionResolver {
 	private buildAllowedToolsForRepo(
 		repository: RepositoryConfig,
 		promptType?: PromptType,
+		workspaceDefault?: string[],
 	): string[] {
 		const effectivePromptType =
 			promptType === "graphite-orchestrator" ? "orchestrator" : promptType;
@@ -175,11 +180,11 @@ export class ToolPermissionResolver {
 		if (repository.allowedTools) {
 			return repository.allowedTools;
 		}
-		// 4. Workspace default allowed tools (the platform default the
-		//    surrounding `buildAllowedTools` / `buildGithubAllowedTools`
-		//    swapped in, if any).
-		if (this.config.linearAllowedTools) {
-			return this.config.linearAllowedTools;
+		// 4. Workspace default allowed tools — the platform default the caller
+		//    threaded in (GitHub default for `buildGithubAllowedTools`, else the
+		//    configured `linearAllowedTools`).
+		if (workspaceDefault) {
+			return workspaceDefault;
 		}
 		// 5. Final fallback — Linear platform default.
 		return [...LINEAR_DEFAULT_ALLOWED_TOOLS];

@@ -110,7 +110,7 @@ import { LinearClient } from "@linear/sdk";
 import { getAllTools, getSafeTools } from "cyrus-claude-runner";
 import { LinearEventTransport } from "cyrus-linear-event-transport";
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
-import { EdgeWorker } from "../src/EdgeWorker.js";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker.js";
 import { SharedApplicationServer } from "../src/SharedApplicationServer.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
 
@@ -203,7 +203,7 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 			};
 		} as any);
 
-		edgeWorker = new EdgeWorker(mockConfig);
+		edgeWorker = composeEdgeWorker(mockConfig);
 	});
 
 	afterEach(() => {
@@ -278,7 +278,7 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 				},
 			};
 
-			const edgeWorkerWithDefaults = new EdgeWorker(configWithDefaults);
+			const edgeWorkerWithDefaults = composeEdgeWorker(configWithDefaults);
 			const buildAllowedTools = getBuildAllowedTools(edgeWorkerWithDefaults);
 
 			const repository: RepositoryConfig = {
@@ -327,7 +327,7 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 				linearAllowedTools: undefined,
 			};
 
-			const edgeWorkerNoDefaults = new EdgeWorker(configWithoutDefaults);
+			const edgeWorkerNoDefaults = composeEdgeWorker(configWithoutDefaults);
 			const buildAllowedTools = getBuildAllowedTools(edgeWorkerNoDefaults);
 
 			const repository: RepositoryConfig = {
@@ -623,7 +623,7 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 					},
 				},
 			};
-			const ew = new EdgeWorker(configWithPromptDefaults);
+			const ew = composeEdgeWorker(configWithPromptDefaults);
 
 			const buildDisallowedTools = getBuildDisallowedTools(ew);
 			const tools = buildDisallowedTools(repository, "debugger");
@@ -653,7 +653,7 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 				...mockConfig,
 				defaultDisallowedTools: ["Bash", "DangerousTool"],
 			};
-			const ew = new EdgeWorker(configWithDefaults);
+			const ew = composeEdgeWorker(configWithDefaults);
 
 			const buildDisallowedTools = getBuildDisallowedTools(ew);
 			const tools = buildDisallowedTools(repository);
@@ -740,7 +740,7 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 					},
 				},
 			};
-			const ew = new EdgeWorker(configWithAllLevels);
+			const ew = composeEdgeWorker(configWithAllLevels);
 
 			const buildDisallowedTools = getBuildDisallowedTools(ew);
 

@@ -92,7 +92,7 @@ describe("AgentSessionManager.markInterruptedSessions", () => {
 	it("reconciled sessions no longer count as active", () => {
 		const sink: IActivitySink = {
 			id: "ws",
-			postActivity: vi.fn().mockResolvedValue({ activityId: "a1" }),
+			post: vi.fn().mockResolvedValue({ activityId: "a1" }),
 			createAgentSession: vi.fn().mockResolvedValue("s1"),
 		};
 		manager.restoreState(

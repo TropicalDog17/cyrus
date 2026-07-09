@@ -77,5 +77,9 @@ export function buildAtlassianMcpServerConfig(
  */
 function isSseUrl(url: string): boolean {
 	const withoutQueryOrHash = url.split(/[?#]/, 1)[0] ?? url;
-	return withoutQueryOrHash.replace(/\/+$/, "").endsWith("/sse");
+	let end = withoutQueryOrHash.length;
+	while (end > 0 && withoutQueryOrHash[end - 1] === "/") {
+		end -= 1;
+	}
+	return withoutQueryOrHash.slice(0, end).endsWith("/sse");
 }

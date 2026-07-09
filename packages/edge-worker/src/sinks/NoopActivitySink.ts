@@ -1,9 +1,5 @@
-import type { AgentActivityContent } from "cyrus-core";
-import type {
-	ActivityPostOptions,
-	ActivityPostResult,
-	IActivitySink,
-} from "./IActivitySink.js";
+import type { Activity, ActivityPostResult } from "../activity/Activity.js";
+import type { IActivitySink } from "./IActivitySink.js";
 
 /**
  * A no-op activity sink that silently discards all activities.
@@ -16,10 +12,9 @@ export class NoopActivitySink implements IActivitySink {
 		this.id = id;
 	}
 
-	async postActivity(
+	async post(
 		_sessionId: string,
-		_activity: AgentActivityContent,
-		_options?: ActivityPostOptions,
+		_activity: Activity,
 	): Promise<ActivityPostResult> {
 		return {};
 	}

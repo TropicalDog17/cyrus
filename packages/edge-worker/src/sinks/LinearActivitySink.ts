@@ -3,12 +3,8 @@ import {
 	AgentActivitySignal,
 	type IIssueTrackerService,
 } from "cyrus-core";
-import type {
-	ActivityPostOptions,
-	ActivityPostResult,
-	ActivitySignal,
-	IActivitySink,
-} from "./IActivitySink.js";
+import type { Activity, ActivitySignal } from "../activity/Activity.js";
+import type { ActivityPostResult, IActivitySink } from "./IActivitySink.js";
 
 /**
  * Linear-specific implementation of IActivitySink.
@@ -19,21 +15,9 @@ import type {
  *
  * @example
  * ```typescript
- * const issueTracker = new LinearIssueTrackerService(linearClient, {
- *   workspaceId: 'workspace-123',
- *   // ... other OAuth config
- * });
- *
  * const sink = new LinearActivitySink(issueTracker, 'workspace-123');
- *
- * // Create a session
  * const sessionId = await sink.createAgentSession('issue-id-456');
- *
- * // Post activities
- * const result = await sink.postActivity(sessionId, {
- *   type: 'thought',
- *   body: 'Analyzing the issue...'
- * });
+ * await sink.post(sessionId, { type: 'thought', body: 'Analyzing the issue...' });
  * ```
  */
 export class LinearActivitySink implements IActivitySink {
@@ -74,27 +58,27 @@ export class LinearActivitySink implements IActivitySink {
 	/**
 	 * Post an activity to an existing agent session.
 	 *
-	 * Wraps IIssueTrackerService.createAgentActivity() to provide a simplified
-	 * interface for activity posting.
+	 * Splits the ephemeral/signal/signalMetadata modifiers off the neutral
+	 * {@link Activity} and forwards the remaining content
+	 * (type/body/action/parameter/result) to
+	 * `IIssueTrackerService.createAgentActivity()`.
 	 *
 	 * @param sessionId - The agent session ID to post to
-	 * @param activity - The activity content (thought, action, response, error, etc.)
-	 * @param options - Optional settings for ephemeral, signal, signalMetadata
+	 * @param activity - The neutral activity with modifiers carried inline
 	 * @returns Promise that resolves with the activity post result
 	 */
-	async postActivity(
+	async post(
 		sessionId: string,
-		activity: AgentActivityContent,
-		options?: ActivityPostOptions,
+		activity: Activity,
 	): Promise<ActivityPostResult> {
+		const { ephemeral, signal, signalMetadata, ...content } = activity;
+
 		const result = await this.issueTracker.createAgentActivity({
 			agentSessionId: sessionId,
-			content: activity,
-			...(options?.ephemeral !== undefined && { ephemeral: options.ephemeral }),
-			...(options?.signal && { signal: this.mapSignal(options.signal) }),
-			...(options?.signalMetadata && {
-				signalMetadata: options.signalMetadata,
-			}),
+			content: content as AgentActivityContent,
+			...(ephemeral !== undefined && { ephemeral }),
+			...(signal && { signal: this.mapSignal(signal) }),
+			...(signalMetadata && { signalMetadata }),
 		});
 
 		if (result.success && result.agentActivity) {
@@ -107,9 +91,6 @@ export class LinearActivitySink implements IActivitySink {
 
 	/**
 	 * Create a new agent session on an issue.
-	 *
-	 * Wraps IIssueTrackerService.createAgentSessionOnIssue() to provide a simplified
-	 * interface for session creation.
 	 *
 	 * @param issueId - The issue ID to attach the session to
 	 * @returns Promise that resolves with the created session ID

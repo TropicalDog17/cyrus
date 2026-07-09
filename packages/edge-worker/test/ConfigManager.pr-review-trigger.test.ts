@@ -1,16 +1,13 @@
-import { readFile } from "node:fs/promises";
 import type { EdgeWorkerConfig, ILogger } from "cyrus-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfigManager } from "../src/ConfigManager.js";
 
-vi.mock("node:fs/promises");
-
 /**
  * Tests for CYPACK-1273: ensure the `prReviewTrigger` flag participates in
- * the config hot-reload pipeline — both the merge in `loadConfigSafely()` and
- * the global-change detection in `detectGlobalConfigChanges()`. Without these,
- * a `prReviewTrigger` change written to config.json while Cyrus is running
- * would be silently dropped (see CLAUDE.md note #9).
+ * the config hot-reload pipeline. Rewritten onto the schema-driven
+ * `reconcile(prev, disk)` (Phase A decomposition) — the old
+ * `loadConfigSafely` / `detectGlobalConfigChanges` internals it used to poke
+ * were replaced by `reconcile`, which owns merge + diff.
  */
 describe("ConfigManager - prReviewTrigger hot-reload (CYPACK-1273)", () => {
 	let logger: ILogger;
@@ -48,40 +45,36 @@ describe("ConfigManager - prReviewTrigger hot-reload (CYPACK-1273)", () => {
 		} as unknown as ILogger;
 	});
 
-	it("merges prReviewTrigger:false from the reloaded config file", async () => {
+	it("merges prReviewTrigger:false from the reloaded config file", () => {
 		const manager = makeManager(baseConfig);
-		vi.mocked(readFile).mockResolvedValue(
-			JSON.stringify({
-				repositories: baseConfig.repositories,
-				prReviewTrigger: false,
-			}) as any,
-		);
 
-		const newConfig = await (manager as any).loadConfigSafely();
+		const result = manager.reconcile(baseConfig, {
+			repositories: baseConfig.repositories,
+			prReviewTrigger: false,
+		});
 
-		expect(newConfig).not.toBeNull();
-		expect(newConfig.prReviewTrigger).toBe(false);
+		expect(result.merged.prReviewTrigger).toBe(false);
 	});
 
-	it("detects a prReviewTrigger change as a global config change", () => {
+	it("detects a prReviewTrigger change via changedKeys", () => {
 		const manager = makeManager(baseConfig);
 
-		const changed = (manager as any).detectGlobalConfigChanges({
+		const result = manager.reconcile(baseConfig, {
 			...baseConfig,
 			prReviewTrigger: false,
 		});
 
-		expect(changed).toBe(true);
+		expect(result.changedKeys.has("prReviewTrigger")).toBe(true);
 	});
 
-	it("preserves an existing prReviewTrigger value when the file omits it", async () => {
-		const manager = makeManager({ ...baseConfig, prReviewTrigger: false });
-		vi.mocked(readFile).mockResolvedValue(
-			JSON.stringify({ repositories: baseConfig.repositories }) as any,
-		);
+	it("preserves an existing prReviewTrigger value when the file omits it", () => {
+		const prev = { ...baseConfig, prReviewTrigger: false };
+		const manager = makeManager(prev);
 
-		const newConfig = await (manager as any).loadConfigSafely();
+		const result = manager.reconcile(prev, {
+			repositories: baseConfig.repositories,
+		});
 
-		expect(newConfig.prReviewTrigger).toBe(false);
+		expect(result.merged.prReviewTrigger).toBe(false);
 	});
 });

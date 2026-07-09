@@ -1,6 +1,31 @@
 import { z } from "zod";
 
 /**
+ * Metadata attached to schema fields whose string / string[] values are
+ * filesystem paths that must be tilde-expanded and resolved to absolute
+ * paths before use (e.g. before `fs.readFileSync`).
+ */
+export interface PathFieldMeta {
+	path: true;
+}
+
+/**
+ * Typed registry that tags path-bearing schema fields, colocated with the
+ * schema definition. A single registry-driven walker (`normalizeConfigPaths`)
+ * consumes these tags so a new path field cannot bypass normalization.
+ *
+ * IMPORTANT: this is a dedicated `z.registry()` — NOT `.meta()`. Verified that
+ * a custom registry produces byte-identical `toJSONSchema()` output (so the
+ * committed JSON Schemas and `json-schema-export.test.ts` stay in sync),
+ * whereas `.meta()` would inject the tag into the JSON Schema `properties`.
+ *
+ * Tags MUST be applied to the OUTERMOST schema instance that ends up in
+ * `.shape` (i.e. after any `.optional()` / `.union()` wrap) — `.register()`
+ * keys on the exact instance and does not survive a later wrap.
+ */
+export const pathRegistry = z.registry<PathFieldMeta>();
+
+/**
  * Supported runner/harness types for agent execution.
  *
  * This fork runs Claude and Cursor (the gemini/codex runners were removed).
@@ -277,7 +302,7 @@ export const RepositoryConfigSchema = z.object({
 	name: z.string(),
 
 	// Git configuration
-	repositoryPath: z.string(),
+	repositoryPath: z.string().register(pathRegistry, { path: true }),
 	baseBranch: z.string(),
 	githubUrl: z.string().optional(),
 
@@ -295,14 +320,20 @@ export const RepositoryConfigSchema = z.object({
 	linearWorkspaceName: z.string().optional(),
 
 	// Workspace configuration
-	workspaceBaseDir: z.string(),
+	workspaceBaseDir: z.string().register(pathRegistry, { path: true }),
 
 	// Optional settings
 	isActive: z.boolean().optional(),
-	promptTemplatePath: z.string().optional(),
+	promptTemplatePath: z
+		.string()
+		.optional()
+		.register(pathRegistry, { path: true }),
 	allowedTools: z.array(z.string()).optional(),
 	disallowedTools: z.array(z.string()).optional(),
-	mcpConfigPath: z.union([z.string(), z.array(z.string())]).optional(),
+	mcpConfigPath: z
+		.union([z.string(), z.array(z.string())])
+		.optional()
+		.register(pathRegistry, { path: true }),
 	appendInstruction: z.string().optional(),
 	model: z.string().optional(),
 	fallbackModel: z.string().optional(),
@@ -410,7 +441,10 @@ export const EdgeConfigSchema = z.object({
 	 * When omitted/empty AND the repo has no override, no custom `.mcp.json`
 	 * files load.
 	 */
-	linearMcpConfigs: z.array(z.string()).optional(),
+	linearMcpConfigs: z
+		.array(z.string())
+		.optional()
+		.register(pathRegistry, { path: true }),
 
 	/**
 	 * Filesystem paths to custom-integration MCP config JSON files for
@@ -419,7 +453,10 @@ export const EdgeConfigSchema = z.object({
 	 * does not have its own `allowedTools` override; otherwise the repo's
 	 * `mcpConfigPath` is used.
 	 */
-	githubMcpConfigs: z.array(z.string()).optional(),
+	githubMcpConfigs: z
+		.array(z.string())
+		.optional()
+		.register(pathRegistry, { path: true }),
 
 	/**
 	 * Whether to trigger agent sessions when issue title, description, or attachments are updated.

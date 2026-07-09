@@ -462,9 +462,7 @@ Check workspace isolation
 			workspace2RepoB,
 		]);
 
-		const promptBuilder = (worker as any).promptBuilder as {
-			generateRoutingContextForAllWorkspaces: () => string;
-		};
+		const promptBuilder = worker.promptBuilder;
 		const context = promptBuilder.generateRoutingContextForAllWorkspaces();
 
 		expect(context.match(/<repository_routing_context>/g)?.length || 0).toBe(2);

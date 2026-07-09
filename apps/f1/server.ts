@@ -28,7 +28,7 @@ import {
 	getDefaultWorktreesDir,
 	type RepositoryConfig,
 } from "cyrus-core";
-import { EdgeWorker } from "cyrus-edge-worker";
+import { composeEdgeWorker } from "cyrus-edge-worker";
 import { bold, cyan, dim, gray, green, success } from "./src/utils/colors.js";
 
 // ============================================================================
@@ -281,7 +281,7 @@ async function startServer(): Promise<void> {
 		const config = createEdgeWorkerConfig();
 
 		// Initialize EdgeWorker
-		const edgeWorker = new EdgeWorker(config);
+		const edgeWorker = composeEdgeWorker(config);
 
 		// Setup graceful shutdown
 		const shutdown = async (signal: string): Promise<void> => {

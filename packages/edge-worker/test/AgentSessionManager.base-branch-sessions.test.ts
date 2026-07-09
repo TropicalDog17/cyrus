@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager";
+import { resultSuccess } from "./agent-message-builders";
 
 describe("AgentSessionManager.getSessionsByBaseBranch", () => {
 	let manager: AgentSessionManager;
@@ -188,24 +189,10 @@ describe("AgentSessionManager.getSessionsByBaseBranch", () => {
 		);
 
 		// Complete the session
-		await manager.completeSession("session-1", {
-			type: "result",
-			subtype: "success",
-			duration_ms: 1,
-			duration_api_ms: 1,
-			is_error: false,
-			num_turns: 1,
-			result: "done",
-			stop_reason: null,
-			total_cost_usd: 0,
-			usage: {
-				input_tokens: 1,
-				output_tokens: 1,
-				cache_creation_input_tokens: 0,
-				cache_read_input_tokens: 0,
-				cache_creation: null,
-			},
-		});
+		await manager.completeSession(
+			"session-1",
+			resultSuccess("done", { sessionId: "sdk-session" }),
+		);
 
 		const sessions = manager.getSessionsByBaseBranch("main", "repo-a");
 		expect(sessions).toHaveLength(0);

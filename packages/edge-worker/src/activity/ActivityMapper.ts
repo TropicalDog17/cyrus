@@ -1,80 +1,388 @@
-/**
- * Message Formatter Interface
- *
- * Defines the contract for formatting tool messages into human-readable content
- * suitable for display in Linear agent activities. Each runner implementation
- * should provide its own formatter that understands its specific message format.
- */
-export interface IMessageFormatter {
-	/**
-	 * Format TodoWrite tool parameter as a nice checklist
-	 * @deprecated TodoWrite has been replaced by Task tools (TaskCreate, TaskUpdate, etc.)
-	 * @param jsonContent - The raw JSON content from the TodoWrite tool
-	 * @returns Formatted checklist string with status emojis
-	 */
-	formatTodoWriteParameter(jsonContent: string): string;
+import type {
+	AgentAssistantMessage,
+	AgentMessage,
+	AgentResultMessage,
+	AgentUserMessage,
+} from "cyrus-core";
+import type { Activity } from "./Activity.js";
+import type { MapContext } from "./MapContext.js";
 
-	/**
-	 * Format Task tool parameter (TaskCreate, TaskUpdate, TaskList, TaskGet)
-	 * @param toolName - The specific Task tool name (e.g., "TaskCreate", "TaskUpdate")
-	 * @param toolInput - The raw tool input object
-	 * @returns Formatted task information string
-	 */
-	formatTaskParameter(toolName: string, toolInput: any): string;
-
-	/**
-	 * Format tool input for display in Linear agent activities
-	 * Converts raw tool inputs into user-friendly parameter strings
-	 * @param toolName - The name of the tool (e.g., "Bash", "Read", "Grep")
-	 * @param toolInput - The raw tool input object
-	 * @returns User-friendly parameter string
-	 */
-	formatToolParameter(toolName: string, toolInput: any): string;
-
-	/**
-	 * Format tool action name with description for Bash tool
-	 * Puts the description in round brackets after the tool name in the action field
-	 * @param toolName - The name of the tool
-	 * @param toolInput - The raw tool input object
-	 * @param isError - Whether the tool result is an error
-	 * @returns Formatted action name (e.g., "Bash (List files)")
-	 */
-	formatToolActionName(
-		toolName: string,
-		toolInput: any,
-		isError: boolean,
-	): string;
-
-	/**
-	 * Format tool result for display in Linear agent activities
-	 * Converts raw tool results into formatted Markdown
-	 * @param toolName - The name of the tool
-	 * @param toolInput - The raw tool input object
-	 * @param result - The raw tool result string
-	 * @param isError - Whether the result is an error
-	 * @returns Formatted Markdown string
-	 */
-	formatToolResult(
-		toolName: string,
-		toolInput: any,
-		result: string,
-		isError: boolean,
-	): string;
+/** The originating tool as recorded for a tool_result lookup. */
+interface ToolCall {
+	name: string;
+	input: unknown;
 }
 
 /**
- * Claude Message Formatter
+ * Normalize a provider-native tool name + input to the canonical
+ * (Claude-shaped) name + input the render table keys on.
  *
- * Implements message formatting for Claude SDK tool messages.
- * This formatter understands Claude's specific tool format and converts
- * tool use/result messages into human-readable content for Linear.
+ * For `claude` this is identity (names are already canonical). For `cursor`
+ * this folds in the mapping that used to live in `CursorRunner.projectToolCall`
+ * and its inline mcp extraction (shell -> Bash, read -> Read, mcp ->
+ * `mcp__<server>__<tool>`, update_todos -> TodoWrite, web_fetch -> WebFetch,
+ * workingDirectory-relative Read path). Already-canonical cursor names (e.g.
+ * "Bash", "mcp__linear__x") fall through unchanged, so it is idempotent.
+ *
+ * Exported so AgentSessionManager can normalize before its state-cache
+ * decisions (active Task / TaskCreate subject) — the mapping table lives in one
+ * place.
  */
-export class ClaudeMessageFormatter implements IMessageFormatter {
+export function normalizeTool(
+	provider: "claude" | "cursor",
+	rawName: string,
+	rawInput: unknown,
+	workingDirectory?: string,
+): ToolCall {
+	// Preserve any subtask arrow prefix around the base name.
+	let prefix = "";
+	let base = rawName;
+	if (base.startsWith("↪ ")) {
+		prefix = "↪ ";
+		base = base.slice(2);
+	}
+
+	if (provider !== "cursor") {
+		return { name: rawName, input: rawInput };
+	}
+
+	const args =
+		rawInput && typeof rawInput === "object"
+			? (rawInput as Record<string, unknown>)
+			: {};
+	const lowered = base.toLowerCase();
+	let name = base;
+	let input: unknown = rawInput;
+
+	if (lowered === "shell") {
+		name = "Bash";
+		const command = typeof args.command === "string" ? args.command : "";
+		input = { command, description: command };
+	} else if (lowered === "read") {
+		name = "Read";
+		input = {
+			file_path: typeof args.path === "string" ? args.path : args.file_path,
+			offset: args.offset,
+			limit: args.limit,
+		};
+	} else if (lowered === "grep") {
+		name = "Grep";
+		input = {
+			pattern: typeof args.pattern === "string" ? args.pattern : "",
+			path: typeof args.path === "string" ? args.path : undefined,
+		};
+	} else if (lowered === "glob") {
+		name = "Glob";
+		input = {
+			pattern:
+				typeof args.globPattern === "string" ? args.globPattern : args.pattern,
+			path:
+				typeof args.targetDirectory === "string"
+					? args.targetDirectory
+					: undefined,
+		};
+	} else if (
+		lowered === "edit" ||
+		lowered === "write" ||
+		lowered === "delete"
+	) {
+		name =
+			lowered === "delete" ? "Edit" : lowered === "write" ? "Write" : "Edit";
+		input = { file_path: typeof args.path === "string" ? args.path : "" };
+	} else if (lowered === "mcp") {
+		const mcpServer =
+			typeof args.providerIdentifier === "string"
+				? args.providerIdentifier
+				: typeof args.server === "string"
+					? args.server
+					: "mcp";
+		const innerTool =
+			typeof args.toolName === "string"
+				? args.toolName
+				: typeof args.name === "string"
+					? args.name
+					: "tool";
+		name = `mcp__${mcpServer}__${innerTool}`;
+		input =
+			args.args && typeof args.args === "object"
+				? (args.args as Record<string, unknown>)
+				: {};
+	} else if (lowered === "update_todos" || lowered === "updatetodos") {
+		name = "TodoWrite";
+		input = { todos: args.todos };
+	} else if (lowered === "web_fetch" || lowered === "webfetch") {
+		name = "WebFetch";
+		input = { url: typeof args.url === "string" ? args.url : "" };
+	}
+
+	// Light path normalization: trim workingDirectory prefix on read targets.
+	if (
+		workingDirectory &&
+		name === "Read" &&
+		input &&
+		typeof input === "object" &&
+		typeof (input as { file_path?: unknown }).file_path === "string"
+	) {
+		const filePath = (input as { file_path: string }).file_path;
+		if (filePath.startsWith(workingDirectory)) {
+			const rel = filePath.slice(workingDirectory.length).replace(/^\//, "");
+			if (rel) input = { ...(input as object), file_path: rel };
+		}
+	}
+
+	return { name: prefix + name, input };
+}
+
+/**
+ * The single per-tool render table for the agent timeline. Pure: switches on
+ * the neutral {@link AgentMessage} union plus a read-only {@link MapContext}
+ * snapshot and returns 0..1 {@link Activity} per message.
+ *
+ * The per-tool string rendering is a VERBATIM port of the former
+ * `ClaudeMessageFormatter` (its exact output is asserted by the timeline). The
+ * two runner formatters and Cursor's tool-name normalization fold in here; no
+ * session state is mutated (all writes stay in AgentSessionManager).
+ */
+export class ActivityMapper {
+	map(msg: AgentMessage, ctx: MapContext): Activity[] {
+		switch (msg.type) {
+			case "assistant":
+				return this.mapAssistant(msg, ctx);
+			case "user":
+				return this.mapUser(msg, ctx);
+			case "result":
+				return this.mapResult(msg);
+			case "system":
+				// Model notification (init) and status handling stay in
+				// AgentSessionManager; nothing to render here.
+				return [];
+			default:
+				// rate_limit and any other non-content messages: no activity.
+				return [];
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// Message mappers
+	// ---------------------------------------------------------------------------
+
+	private mapAssistant(
+		msg: AgentAssistantMessage,
+		ctx: MapContext,
+	): Activity[] {
+		const toolUse = msg.content.find((b) => b.type === "tool_use");
+
+		if (toolUse && toolUse.type === "tool_use") {
+			const { name: baseName, input } = normalizeTool(
+				ctx.provider,
+				toolUse.name,
+				toolUse.input,
+				ctx.workingDirectory,
+			);
+
+			// Subtask arrow prefix for tools spawned inside an active Task.
+			const displayName =
+				msg.parentToolUseId && ctx.activeTaskUseId === msg.parentToolUseId
+					? `↪ ${baseName}`
+					: baseName;
+
+			// AskUserQuestion is custom-handled via the Linear select elicitation.
+			if (baseName === "AskUserQuestion") {
+				return [];
+			}
+
+			// TodoWrite (Claude) / write_todos (legacy) render as a thought.
+			if (baseName === "TodoWrite" || baseName === "write_todos") {
+				return [
+					{
+						type: "thought",
+						body: this.renderTodoWrite(JSON.stringify(input, null, 2)),
+					},
+				];
+			}
+
+			// TaskCreate / TaskList render as a thought (subject cache is written in ASM).
+			if (baseName === "TaskCreate" || baseName === "TaskList") {
+				return [
+					{ type: "thought", body: this.renderTaskParameter(baseName, input) },
+				];
+			}
+
+			// TaskUpdate / TaskGet defer to tool_result time (enriched with subject).
+			if (baseName === "TaskUpdate" || baseName === "TaskGet") {
+				return [];
+			}
+
+			// Task (legacy sub-agent) starts an action; active-Task tracking is in ASM.
+			if (baseName === "Task") {
+				return [
+					{
+						type: "action",
+						action: baseName,
+						parameter: this.renderToolParameter(baseName, input),
+					},
+				];
+			}
+
+			// Standard tool: ephemeral action, result filled in at tool_result time.
+			return [
+				{
+					type: "action",
+					action: displayName,
+					parameter: this.renderToolParameter(displayName, input),
+					ephemeral: true,
+				},
+			];
+		}
+
+		// Non-tool assistant turn.
+		if (msg.error) {
+			// Provider error (rate_limit, billing_error, …) surfaces as an error
+			// activity so it is visible to users (CYPACK-719).
+			return [{ type: "error", body: this.extractContent(msg) }];
+		}
+
+		const body = this.extractContent(msg);
+		if (!body.trim()) {
+			return [];
+		}
+		return [{ type: "thought", body }];
+	}
+
+	private mapUser(msg: AgentUserMessage, ctx: MapContext): Activity[] {
+		const toolResult = msg.content.find((b) => b.type === "tool_result");
+		if (!toolResult || toolResult.type !== "tool_result") {
+			return [];
+		}
+
+		const toolUseId = toolResult.toolUseId;
+		const resultContent = toolResult.content;
+		const isError = toolResult.isError;
+
+		// A tool_result whose id matches the session's active Task completes it.
+		if (ctx.activeTaskUseId && ctx.activeTaskUseId === toolUseId) {
+			return [
+				{
+					type: "thought",
+					body: `✅ Task Completed\n\n\n\n${resultContent}\n\n---\n\n`,
+				},
+			];
+		}
+
+		const originalTool = ctx.toolCall(toolUseId);
+		const toolName = originalTool?.name || "Tool";
+		const toolInput = originalTool?.input || "";
+		const baseToolName = toolName.replace("↪ ", "");
+
+		// Enriched TaskUpdate / TaskGet thought (subject resolved via cache in ASM).
+		if (baseToolName === "TaskUpdate" || baseToolName === "TaskGet") {
+			const enrichedInput: Record<string, unknown> =
+				toolInput && typeof toolInput === "object"
+					? { ...(toolInput as Record<string, unknown>) }
+					: {};
+			if (!enrichedInput.subject) {
+				const taskId =
+					typeof enrichedInput.taskId === "string" ? enrichedInput.taskId : "";
+				const cachedSubject = ctx.taskSubjectById(taskId);
+				if (cachedSubject) {
+					enrichedInput.subject = cachedSubject;
+				} else if (
+					(baseToolName === "TaskGet" || baseToolName === "TaskUpdate") &&
+					resultContent
+				) {
+					// Parse `Subject:` out of the result content (e.g. TaskGet's
+					// "ID: 3\nSubject: Fix bug\nStatus: ..."). The stateful cache
+					// write-back lives in AgentSessionManager; this parse enriches
+					// the current render.
+					const subjectMatch = resultContent.match(/^Subject:\s*(.+)$/m);
+					if (subjectMatch?.[1]) {
+						enrichedInput.subject = subjectMatch[1].trim();
+					}
+				}
+			}
+			return [
+				{
+					type: "thought",
+					body: this.renderTaskParameter(baseToolName, enrichedInput),
+				},
+			];
+		}
+
+		// Tools that already produced a non-ephemeral thought at tool_use time, or
+		// are custom-handled, emit no result activity.
+		if (
+			toolName === "TodoWrite" ||
+			toolName === "↪ TodoWrite" ||
+			toolName === "write_todos" ||
+			toolName === "TaskCreate" ||
+			toolName === "↪ TaskCreate" ||
+			toolName === "TaskList" ||
+			toolName === "↪ TaskList" ||
+			toolName === "AskUserQuestion" ||
+			toolName === "↪ AskUserQuestion"
+		) {
+			return [];
+		}
+
+		return [
+			{
+				type: "action",
+				action: this.renderToolActionName(toolName, toolInput, isError),
+				parameter: this.renderToolParameter(toolName, toolInput),
+				result: this.renderToolResult(
+					toolName,
+					toolInput,
+					resultContent?.trim() || "",
+					isError,
+				),
+			},
+		];
+	}
+
+	private mapResult(msg: AgentResultMessage): Activity[] {
+		if (msg.isError) {
+			const body = (
+				"errors" in msg && Array.isArray(msg.errors) && msg.errors.length > 0
+					? msg.errors.join("\n")
+					: ""
+			).trim();
+			return [{ type: "error", body }];
+		}
+		const body =
+			"result" in msg && typeof msg.result === "string" ? msg.result : "";
+		return [{ type: "response", body }];
+	}
+
 	/**
-	 * Format TodoWrite tool parameter as a nice checklist
-	 * @deprecated TodoWrite has been replaced by Task tools
+	 * Flatten a neutral agent message's content blocks to a single string (the
+	 * same join the former `AgentSessionManager.extractContent` produced).
 	 */
-	formatTodoWriteParameter(jsonContent: string): string {
+	private extractContent(
+		msg: AgentAssistantMessage | AgentUserMessage,
+	): string {
+		return msg.content
+			.map((block) => {
+				if (block.type === "text") return block.text;
+				if (block.type === "thinking") return block.thinking;
+				if (block.type === "tool_use")
+					return JSON.stringify(block.input, null, 2);
+				if (block.type === "tool_result") return block.content;
+				return "";
+			})
+			.filter(Boolean)
+			.join("\n");
+	}
+
+	// ===========================================================================
+	// RENDER TABLE — verbatim port of ClaudeMessageFormatter. The exact output
+	// strings are asserted by the timeline; do not paraphrase.
+	// ===========================================================================
+
+	/**
+	 * Format TodoWrite tool parameter as a nice checklist.
+	 * @deprecated TodoWrite has been replaced by Task tools.
+	 */
+	private renderTodoWrite(jsonContent: string): string {
 		try {
 			const data = JSON.parse(jsonContent);
 			if (!data.todos || !Array.isArray(data.todos)) {
@@ -110,7 +418,7 @@ export class ClaudeMessageFormatter implements IMessageFormatter {
 			return formatted;
 		} catch (error) {
 			console.error(
-				"[ClaudeMessageFormatter] Failed to format TodoWrite parameter:",
+				"[ActivityMapper] Failed to format TodoWrite parameter:",
 				error,
 			);
 			return jsonContent;
@@ -118,9 +426,9 @@ export class ClaudeMessageFormatter implements IMessageFormatter {
 	}
 
 	/**
-	 * Format Task tool parameter (TaskCreate, TaskUpdate, TaskList, TaskGet)
+	 * Format Task tool parameter (TaskCreate, TaskUpdate, TaskList, TaskGet).
 	 */
-	formatTaskParameter(toolName: string, toolInput: any): string {
+	private renderTaskParameter(toolName: string, toolInput: any): string {
 		try {
 			// If input is already a string, return it
 			if (typeof toolInput === "string") {
@@ -182,19 +490,15 @@ export class ClaudeMessageFormatter implements IMessageFormatter {
 					return JSON.stringify(toolInput);
 			}
 		} catch (error) {
-			console.error(
-				"[ClaudeMessageFormatter] Failed to format Task parameter:",
-				error,
-			);
+			console.error("[ActivityMapper] Failed to format Task parameter:", error);
 			return JSON.stringify(toolInput);
 		}
 	}
 
 	/**
-	 * Format tool input for display in Linear agent activities
-	 * Converts raw tool inputs into user-friendly parameter strings
+	 * Format tool input for display in agent activities.
 	 */
-	formatToolParameter(toolName: string, toolInput: any): string {
+	private renderToolParameter(toolName: string, toolInput: any): string {
 		// If input is already a string, return it
 		if (typeof toolInput === "string") {
 			return toolInput;
@@ -204,7 +508,7 @@ export class ClaudeMessageFormatter implements IMessageFormatter {
 			switch (toolName) {
 				case "Bash":
 				case "↪ Bash": {
-					// Show command only - description goes in action field via formatToolActionName
+					// Show command only - description goes in action field via renderToolActionName
 					return toolInput.command || JSON.stringify(toolInput);
 				}
 
@@ -282,8 +586,8 @@ export class ClaudeMessageFormatter implements IMessageFormatter {
 				case "↪ TaskGet":
 				case "TaskList":
 				case "↪ TaskList":
-					// Delegate to formatTaskParameter for Task tools
-					return this.formatTaskParameter(
+					// Delegate to renderTaskParameter for Task tools
+					return this.renderTaskParameter(
 						toolName.replace("↪ ", ""),
 						toolInput,
 					);
@@ -371,19 +675,15 @@ export class ClaudeMessageFormatter implements IMessageFormatter {
 			// Fallback to JSON but make it compact
 			return JSON.stringify(toolInput);
 		} catch (error) {
-			console.error(
-				"[ClaudeMessageFormatter] Failed to format tool parameter:",
-				error,
-			);
+			console.error("[ActivityMapper] Failed to format tool parameter:", error);
 			return JSON.stringify(toolInput);
 		}
 	}
 
 	/**
-	 * Format tool action name with description for Bash tool
-	 * Puts the description in round brackets after the tool name in the action field
+	 * Format tool action name with description for Bash tool.
 	 */
-	formatToolActionName(
+	private renderToolActionName(
 		toolName: string,
 		toolInput: any,
 		isError: boolean,
@@ -407,10 +707,9 @@ export class ClaudeMessageFormatter implements IMessageFormatter {
 	}
 
 	/**
-	 * Format tool result for display in Linear agent activities
-	 * Converts raw tool results into formatted Markdown
+	 * Format tool result for display in agent activities.
 	 */
-	formatToolResult(
+	private renderToolResult(
 		toolName: string,
 		toolInput: any,
 		result: string,
@@ -665,10 +964,7 @@ export class ClaudeMessageFormatter implements IMessageFormatter {
 					return "*Completed*";
 			}
 		} catch (error) {
-			console.error(
-				"[ClaudeMessageFormatter] Failed to format tool result:",
-				error,
-			);
+			console.error("[ActivityMapper] Failed to format tool result:", error);
 			return result || "";
 		}
 	}

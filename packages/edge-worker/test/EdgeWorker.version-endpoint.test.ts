@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { EdgeWorker } from "../src/EdgeWorker.js";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
 
 // Mock fs/promises
@@ -135,7 +135,7 @@ describe("EdgeWorker - Version Endpoint", () => {
 				};
 			} as any);
 
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 
 			// Call registerVersionEndpoint
 			(edgeWorker as any).registerVersionEndpoint();
@@ -172,7 +172,7 @@ describe("EdgeWorker - Version Endpoint", () => {
 			} as any);
 
 			// Config without version
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 			(edgeWorker as any).registerVersionEndpoint();
 
 			// Mock reply object
@@ -223,7 +223,7 @@ describe("EdgeWorker - Version Endpoint", () => {
 				...mockConfig,
 				version: "1.2.3",
 			};
-			edgeWorker = new EdgeWorker(configWithVersion);
+			edgeWorker = composeEdgeWorker(configWithVersion);
 			(edgeWorker as any).registerVersionEndpoint();
 
 			// Mock reply object
@@ -275,7 +275,7 @@ describe("EdgeWorker - Version Endpoint", () => {
 				...mockConfig,
 				version: "",
 			};
-			edgeWorker = new EdgeWorker(configWithEmptyVersion);
+			edgeWorker = composeEdgeWorker(configWithEmptyVersion);
 			(edgeWorker as any).registerVersionEndpoint();
 
 			// Mock reply object

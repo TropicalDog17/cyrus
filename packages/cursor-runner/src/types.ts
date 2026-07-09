@@ -1,7 +1,7 @@
 import type {
+	AgentMessage,
 	AgentRunnerConfig,
 	AgentSessionInfo,
-	SDKMessage,
 } from "cyrus-core";
 import type { CursorSandboxInput } from "./sandbox.js";
 
@@ -34,7 +34,7 @@ export interface CursorSessionInfo extends AgentSessionInfo {
 }
 
 export interface CursorRunnerEvents {
-	message: (message: SDKMessage) => void;
+	message: (message: AgentMessage) => void;
 	error: (error: Error) => void;
-	complete: (messages: SDKMessage[]) => void;
+	complete: (messages: AgentMessage[]) => void;
 }
