@@ -166,6 +166,17 @@ export interface SessionOrchestratorDeps {
  * reached through the injected {@link SessionOrchestratorDeps}.
  */
 export class SessionOrchestrator {
+	/**
+	 * In-flight resume chains, keyed by agent session id. Two resumes for one
+	 * session must not overlap: `resumeSessionInner` awaits several times (issue
+	 * fetch, state save, prompt build) between registering a runner and starting
+	 * it, and `stop()` on a runner that has not started yet is a no-op. Overlapping
+	 * resumes therefore used to leave two live subprocesses, each re-writing the
+	 * whole conversation to the prompt cache. Serializing them lets the second
+	 * resume observe the first's running runner and take the streaming fast path.
+	 */
+	private resumeChains: Map<string, Promise<void>> = new Map();
+
 	constructor(private readonly deps: SessionOrchestratorDeps) {}
 
 	/**
@@ -393,8 +404,59 @@ export class SessionOrchestrator {
 	 * Resume or create an agent session with the given prompt (was
 	 * `EdgeWorker.resumeAgentSession`). Positional signature is preserved 1:1 so
 	 * the EdgeWorker delegator is a straight forward.
+	 *
+	 * Resumes for the same session run one at a time; see {@link resumeChains}.
 	 */
 	async resumeSession(
+		session: CyrusAgentSession,
+		repository: RepositoryConfig,
+		sessionId: string,
+		agentSessionManager: AgentSessionManager,
+		promptBody: string,
+		attachmentManifest: string = "",
+		isNewSession: boolean = false,
+		additionalAllowedDirectories: string[] = [],
+		linearWorkspaceId?: string,
+		maxTurns?: number,
+		commentAuthor?: string,
+		commentTimestamp?: string,
+	): Promise<void> {
+		const prev = this.resumeChains.get(sessionId) ?? Promise.resolve();
+		const next = prev.then(() =>
+			this.resumeSessionInner(
+				session,
+				repository,
+				sessionId,
+				agentSessionManager,
+				promptBody,
+				attachmentManifest,
+				isNewSession,
+				additionalAllowedDirectories,
+				linearWorkspaceId,
+				maxTurns,
+				commentAuthor,
+				commentTimestamp,
+			),
+		);
+		// Swallow errors in the stored chain so one failed resume does not reject
+		// every later resume for this session; `next` still rejects for the caller.
+		const chained = next.catch(() => undefined);
+		this.resumeChains.set(sessionId, chained);
+		// Drop the entry once this resume is the last one queued, so the map does
+		// not grow with every session the worker has ever handled.
+		void chained.then(() => {
+			if (this.resumeChains.get(sessionId) === chained) {
+				this.resumeChains.delete(sessionId);
+			}
+		});
+		return next;
+	}
+
+	/**
+	 * Actual resume implementation. Invoked only via the per-session chain in
+	 * {@link resumeSession} so at most one runs for a given session at a time.
+	 */
+	private async resumeSessionInner(
 		session: CyrusAgentSession,
 		repository: RepositoryConfig,
 		sessionId: string,
