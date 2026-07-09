@@ -1582,9 +1582,10 @@ export class AgentSessionManager extends EventEmitter {
 				this.activeStatusActivitiesBySession.set(sessionId, activityId);
 			}
 		} else if (message.status === null) {
-			// The compact_boundary message, when the SDK sends one, already reported
-			// this compaction with its token counts — don't follow it with a vaguer
-			// duplicate. Fall back to the generic thought when no boundary arrived.
+			// The SDK orders these `compacting` -> compact_boundary -> null, so by
+			// now the boundary has already reported this compaction with its token
+			// counts — don't follow it with a vaguer duplicate. Fall back to the
+			// generic thought when no boundary arrived.
 			if (this.compactBoundaryPostedBySession.delete(sessionId)) {
 				this.activeStatusActivitiesBySession.delete(sessionId);
 				return;

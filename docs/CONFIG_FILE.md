@@ -420,6 +420,8 @@ By default Claude's built-in auto-compaction only triggers near the model's full
 
 When omitted, the SDK's default (model-context-sized) behavior is preserved and nothing changes. A value around `120000`–`150000` is a reasonable starting point for long-running issues; lower values compact more aggressively (cheaper, but more summarization of earlier context).
 
+**Valid range: `100000` to `1000000`.** Claude Code silently discards a window outside that range, so the session would compact at the model's native window as though the setting were never there. Cyrus now ignores an out-of-range value and logs a warning rather than letting it look effective.
+
 ### `claudeSessionKeepAliveMinutes` (number)
 
 How long a finished Claude session stays alive waiting for a follow-up comment before shutting down. Defaults to `50`; set `0` to disable. Claude runner only (Cursor manages its own session lifetime).
