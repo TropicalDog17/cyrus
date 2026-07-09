@@ -147,6 +147,7 @@ export function resolveTraceVersion(
 /** A single JSONL record from a Claude Code transcript (loosely typed). */
 interface TranscriptRecord {
 	type?: string;
+	subtype?: string;
 	uuid?: string;
 	timestamp?: string;
 	message?: {
@@ -156,6 +157,18 @@ interface TranscriptRecord {
 		content?: unknown;
 		usage?: Record<string, unknown>;
 		stop_reason?: string | null;
+	};
+	/**
+	 * Present on `type:"system", subtype:"compact_boundary"` records. Note the
+	 * transcript spells these in camelCase, unlike the snake_case
+	 * `compact_metadata` of the SDK's in-stream message.
+	 */
+	compactMetadata?: {
+		trigger?: string;
+		preTokens?: number;
+		postTokens?: number;
+		durationMs?: number;
+		cumulativeDroppedTokens?: number;
 	};
 }
 
@@ -267,6 +280,7 @@ export interface LangfuseLike {
 	trace(body: Record<string, unknown>): {
 		generation(body: Record<string, unknown>): unknown;
 		span(body: Record<string, unknown>): unknown;
+		event(body: Record<string, unknown>): unknown;
 	};
 	flushAsync(): Promise<unknown>;
 	shutdownAsync?(): Promise<unknown>;
@@ -288,6 +302,8 @@ async function defaultClientFactory(
 export interface ExportResult {
 	generations: number;
 	toolSpans: number;
+	/** Context compactions the session went through. */
+	compactions: number;
 }
 
 /**
@@ -363,9 +379,31 @@ export async function exportTranscriptToLangfuse(
 	// tool_result — was written, so we stamp `startTime` from this rather than
 	// from the assistant record itself (which marks when the response landed).
 	let prevTimestamp: Date | undefined;
+	let compactions = 0;
 
 	for (const rec of records) {
 		const ts = toDate(rec.timestamp);
+		if (rec.type === "system" && rec.subtype === "compact_boundary") {
+			// A compaction is the one event that explains a sudden drop in a turn's
+			// input tokens; without it the trace looks like the conversation simply
+			// shrank. Deterministic id keeps a re-export idempotent.
+			const meta = rec.compactMetadata ?? {};
+			trace.event({
+				id: `compact-${rec.uuid}`,
+				name: "compact_boundary",
+				startTime: ts,
+				metadata: {
+					trigger: meta.trigger,
+					preTokens: meta.preTokens,
+					postTokens: meta.postTokens,
+					durationMs: meta.durationMs,
+					cumulativeDroppedTokens: meta.cumulativeDroppedTokens,
+				},
+			});
+			compactions++;
+			prevTimestamp = ts ?? prevTimestamp;
+			continue;
+		}
 		if (rec.type === "user") {
 			const t = textOf(rec.message?.content);
 			// Ignore pure tool_result turns — they are not a human/agent prompt.
@@ -480,7 +518,7 @@ export async function exportTranscriptToLangfuse(
 	if (client.shutdownAsync) await client.shutdownAsync();
 
 	options.logger?.debug?.(
-		`Langfuse export complete: ${generations} generations, ${toolSpans} tool spans`,
+		`Langfuse export complete: ${generations} generations, ${toolSpans} tool spans, ${compactions} compactions`,
 	);
-	return { generations, toolSpans };
+	return { generations, toolSpans, compactions };
 }
