@@ -70,6 +70,21 @@ Routes Linear issues with specific labels to this repository. This is useful whe
 
 Example: `["backend", "api"]` - Only process issues that have the "backend" or "api" label
 
+### `readParentDirectory` (boolean)
+
+Grants sessions **read-only** access to the repository's parent directory — every folder sitting next to the repo checkout (sibling repositories, a shared requirements spec, a canonical schema kept one level up). By default a session can only read the repository it is working in (plus its own worktree and issue attachments); everything else under your home directory is denied at both the tool-permission and OS-sandbox layers. Enable this per repository when a task needs to read files that live *beside* the checkout rather than inside it.
+
+```json
+{
+  "repositoryPath": "/home/dev/projects/life-wallet-backend",
+  "readParentDirectory": true
+}
+```
+
+With `repositoryPath` above, the session may read anything under `/home/dev/projects/` (its sibling folders), while home secrets such as `~/.ssh` and `~/.aws` stay denied.
+
+Defaults to `false`. The grant is strictly read-only regardless of this setting — the session can still only **write** inside its own worktree. Leave it off unless you need the wider read scope; it deliberately widens what a session can see.
+
 ---
 
 ## Routing Priority Order

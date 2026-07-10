@@ -74,6 +74,9 @@
 							"type": "string"
 						}
 					},
+					"readParentDirectory": {
+						"type": "boolean"
+					},
 					"mcpConfigPath": {
 						"anyOf": [
 							{

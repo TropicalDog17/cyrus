@@ -206,6 +206,38 @@ describe("compute — with allowReadDirectories", () => {
 			.allows(".cyrus/ENG-1/attachments");
 	});
 
+	it("readParentDirectory: granting the repo's parent makes every sibling readable without expanding writes", () => {
+		// Mirrors EdgeWorker.getReadParentDirectories: the repo checkout lives at
+		// ~/projects/life-wallet-backend and the session worktree is elsewhere.
+		// Passing dirname(repositoryPath) === ~/projects as an allowReadDirectory
+		// must open the whole projects/ subtree (sibling repos, shared specs)
+		// while home secrets stay denied and writes stay confined to the worktree.
+		const tree: FsTree = {
+			".ssh": dir({ id_rsa: file() }),
+			projects: dir({
+				"life-wallet-backend": dir(),
+				"life-wallet-spec": dir(),
+				"unrelated-service": dir(),
+			}),
+			".cyrus": dir({ worktrees: dir({ "ENG-1": dir() }) }),
+		};
+		const cwd = `${HOME}/.cyrus/worktrees/ENG-1`;
+		const parentDir = `${HOME}/projects`;
+		const policy = computeIn(tree, cwd, [parentDir]);
+
+		check(policy)
+			.denies(".ssh")
+			.allows("projects")
+			.allows("projects/life-wallet-backend")
+			.allows("projects/life-wallet-spec")
+			.allows("projects/unrelated-service");
+
+		// Read grant is emitted for the parent dir...
+		expect(policy.allowReadPaths).toContain(parentDir);
+		// ...but writes remain confined to the worktree (parent never leaks in).
+		expect(policy.allowWritePaths).toEqual([cwd]);
+	});
+
 	it("ignores additional paths outside home", () => {
 		const policy = computeIn(
 			{

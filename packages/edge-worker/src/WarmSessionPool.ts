@@ -14,7 +14,11 @@ import type {
 	ILogger,
 	RepositoryConfig,
 } from "cyrus-core";
-import { nodeDirLister, requireLinearWorkspaceId } from "cyrus-core";
+import {
+	getReadParentDirectories,
+	nodeDirLister,
+	requireLinearWorkspaceId,
+} from "cyrus-core";
 import type { AgentSessionManager } from "./AgentSessionManager.js";
 import type { GitService } from "./GitService.js";
 import type { McpConfigService } from "./McpConfigService.js";
@@ -208,6 +212,11 @@ export class WarmSessionPool {
 							attachmentsDir,
 							repo.repositoryPath,
 							session.workspace.path,
+							// Opt-in read-only parent-directory access. Included here so a
+							// pre-warmed session derives the SAME home-directory Read
+							// denials as the cold path — without it, compute() would deny
+							// the parent dir on resume even when fresh sessions allow it.
+							...getReadParentDirectories([repo]),
 							...gitService.getGitMetadataDirectoriesForWorkspace(
 								session.workspace,
 							),
