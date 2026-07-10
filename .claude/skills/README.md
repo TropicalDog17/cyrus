@@ -46,6 +46,7 @@ That also wires `.codex/skills` and `.opencode/skills`.
 | Skill | When to use |
 | --- | --- |
 | `core-conventions` | Tests, changelog, deps, skills layout |
+| `typescript-best-practices` | Writing/reviewing TS/TSX: strict types, boundaries, `tsconfig` |
 | `release` | Full npm publish of packages + CLI |
 | `release-core-test` | Publish `cyrus-core@test` for CYHOST dev |
 
