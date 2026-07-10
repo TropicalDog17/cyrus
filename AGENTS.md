@@ -62,6 +62,7 @@ activities posted back. Details: `agent-docs/architecture-and-runtime.md`.
 | F1 end-to-end validation | `f1-test-drive` + `apps/f1/CLAUDE.md` + `spec/f1/ARCHITECTURE.md` |
 | New agent CLI harness | `new-agent-harness` + `agent-docs/new-agent-harness.md` |
 | Conventions while coding (tests, changelog, deps) | `core-conventions` |
+| Writing / reviewing TypeScript (strict types, boundaries, `tsconfig`) | `typescript-best-practices` |
 | Config field / sandbox / permissions / MCP catalog | `agent-docs/dev-gotchas.md` |
 | Architecture, session flow, key paths | `agent-docs/architecture-and-runtime.md` |
 | Commands, prompt-test style | `agent-docs/testing-and-commands.md` |
