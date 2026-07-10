@@ -256,6 +256,147 @@ describe("SessionOrchestrator", () => {
 		});
 	});
 
+	describe("resumeSession serialization", () => {
+		const tick = () => new Promise((r) => setTimeout(r, 0));
+
+		function deferred<T>() {
+			let resolve!: (value: T) => void;
+			const promise = new Promise<T>((res) => {
+				resolve = res;
+			});
+			return { promise, resolve };
+		}
+
+		const ISSUE = { id: "issue-1", identifier: "ISS-1", description: "desc" };
+
+		const resume = (orch: SessionOrchestrator, session: any, deps: any) =>
+			orch.resumeSession(
+				session,
+				REPO,
+				session.id,
+				deps.agentSessionManager,
+				"follow-up",
+				"",
+				false,
+				[],
+				"ws-1",
+			);
+
+		it("does not start a second resume for a session until the first finishes", async () => {
+			const gate = deferred<any>();
+			let fetches = 0;
+			const fetchFullIssueDetails = vi.fn(async () => {
+				fetches++;
+				return fetches === 1 ? gate.promise : ISSUE;
+			});
+			const { deps } = makeDeps({ fetchFullIssueDetails } as any);
+			const orch = new SessionOrchestrator(deps);
+			const session: any = {
+				id: "sess-1",
+				issueContext: { issueId: "issue-1" },
+				workspace: { path: "/repo/wt/ISS-1" },
+				claudeSessionId: "claude-existing",
+			};
+
+			const p1 = resume(orch, session, deps);
+			const p2 = resume(orch, session, deps);
+			await tick();
+
+			// The second resume is still queued behind the first.
+			expect(fetchFullIssueDetails).toHaveBeenCalledTimes(1);
+
+			gate.resolve(ISSUE);
+			await Promise.all([p1, p2]);
+			expect(fetchFullIssueDetails).toHaveBeenCalledTimes(2);
+		});
+
+		it("lets the queued resume append to the first resume's runner instead of spawning a second", async () => {
+			// Mirror the real AgentSessionManager: registering a runner attaches it
+			// to the session, so a later resume can see it is already running.
+			const session: any = {
+				id: "sess-1",
+				issueContext: { issueId: "issue-1" },
+				workspace: { path: "/repo/wt/ISS-1" },
+				claudeSessionId: "claude-existing",
+			};
+			const addStreamMessage = vi.fn();
+			h.behavior.current = {
+				...h.behavior.current,
+				isRunning: vi.fn(() => true),
+				addStreamMessage,
+			};
+			const gate = deferred<any>();
+			let fetches = 0;
+			const fetchFullIssueDetails = vi.fn(async () => {
+				fetches++;
+				return fetches === 1 ? gate.promise : ISSUE;
+			});
+			const { deps } = makeDeps({ fetchFullIssueDetails } as any);
+			(deps.agentSessionManager.addAgentRunner as any).mockImplementation(
+				(_id: string, runner: any) => {
+					session.agentRunner = runner;
+				},
+			);
+			const orch = new SessionOrchestrator(deps);
+
+			const p1 = resume(orch, session, deps);
+			const p2 = resume(orch, session, deps);
+			gate.resolve(ISSUE);
+			await Promise.all([p1, p2]);
+
+			// Without serialization both resumes would have built their own runner,
+			// each re-writing the whole conversation to the prompt cache.
+			expect(h.created).toHaveLength(1);
+			expect(addStreamMessage).toHaveBeenCalledTimes(1);
+			expect(addStreamMessage).toHaveBeenCalledWith("follow-up");
+		});
+
+		it("does not serialize resumes for different sessions", async () => {
+			const gate = deferred<any>();
+			const fetchFullIssueDetails = vi.fn(async () => gate.promise);
+			const { deps } = makeDeps({ fetchFullIssueDetails } as any);
+			const orch = new SessionOrchestrator(deps);
+			const mk = (id: string) => ({
+				id,
+				issueContext: { issueId: "issue-1" },
+				workspace: { path: "/repo/wt/ISS-1" },
+				claudeSessionId: "claude-existing",
+			});
+
+			const p1 = resume(orch, mk("sess-1"), deps);
+			const p2 = resume(orch, mk("sess-2"), deps);
+			await tick();
+
+			expect(fetchFullIssueDetails).toHaveBeenCalledTimes(2);
+			gate.resolve(ISSUE);
+			await Promise.all([p1, p2]);
+		});
+
+		it("runs a queued resume after the previous one rejects", async () => {
+			let fetches = 0;
+			const fetchFullIssueDetails = vi.fn(async () => {
+				fetches++;
+				if (fetches === 1) throw new Error("fetch blew up");
+				return ISSUE;
+			});
+			const { deps } = makeDeps({ fetchFullIssueDetails } as any);
+			const orch = new SessionOrchestrator(deps);
+			const session: any = {
+				id: "sess-1",
+				issueContext: { issueId: "issue-1" },
+				workspace: { path: "/repo/wt/ISS-1" },
+				claudeSessionId: "claude-existing",
+			};
+
+			const p1 = resume(orch, session, deps);
+			const p2 = resume(orch, session, deps);
+
+			await expect(p1).rejects.toThrow("fetch blew up");
+			await expect(p2).resolves.toBeUndefined();
+			expect(h.created).toHaveLength(1);
+		});
+	});
+
 	describe("handlePromptWithStreamingCheck", () => {
 		it("appends to the active stream and returns true (no resume)", async () => {
 			const { deps } = makeDeps();

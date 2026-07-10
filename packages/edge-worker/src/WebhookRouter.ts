@@ -166,11 +166,20 @@ export interface WebhookRouterDeps {
 const TEXT_STOP_REQUEST = /^\s*stop(\s+session|\s+working)?[\s.!?]*$/i;
 
 /**
+ * Cap on remembered prompted-activity delivery keys, and how many of the
+ * oldest keys to drop once the cap is exceeded. Mirrors the bounds used by
+ * EdgeWorker's `processedIssueUpdateKeys`.
+ */
+const PROMPTED_DELIVERY_KEY_LIMIT = 500;
+const PROMPTED_DELIVERY_KEY_PRUNE_COUNT = 250;
+
+/**
  * WebhookRouter owns webhook/message dispatch and the agentSession
  * branch-selection state machine. It makes only routing decisions (mandated by
  * packages/CLAUDE.md's webhook constraints) and delegates every terminal effect
- * through {@link WebhookRouterDeps}. It holds no session state, no config, and
- * performs no I/O of its own.
+ * through {@link WebhookRouterDeps}. It holds no session state and no config,
+ * performs no I/O of its own, and keeps only delivery-dedup bookkeeping (see
+ * {@link WebhookRouter.isDuplicatePromptedDelivery}).
  *
  * Extracted from EdgeWorker's inlined routing tables (handleWebhook,
  * handleMessage, the GitHub transport listener, and the branch prologues of
@@ -179,11 +188,56 @@ const TEXT_STOP_REQUEST = /^\s*stop(\s+session|\s+working)?[\s.!?]*$/i;
 export class WebhookRouter {
 	private logger: ILogger;
 
+	/**
+	 * Delivery keys of prompted activities already routed. Linear redelivers a
+	 * webhook when the ack is slow, and a redelivered prompt used to start a
+	 * second agent process for the same comment — each one re-writing the whole
+	 * conversation to the prompt cache. Keyed on the activity id, which is
+	 * stable across redeliveries of one activity and distinct between genuine
+	 * user prompts (so real re-prompts and double-stops still get through).
+	 */
+	private processedPromptedActivityKeys = new Set<string>();
+
 	constructor(
 		private deps: WebhookRouterDeps,
 		logger?: ILogger,
 	) {
 		this.logger = logger ?? createLogger({ component: "WebhookRouter" });
+	}
+
+	/**
+	 * True when this prompted activity has already been routed. Records the key
+	 * as a side effect, so callers must only ask once per delivery.
+	 *
+	 * Applies to every prompted branch, not just normal continuation: a
+	 * redelivered `stop` activity would otherwise look like the intentional
+	 * second stop that EdgeWorker escalates into a hard kill.
+	 */
+	private isDuplicatePromptedDelivery(
+		webhook: AgentSessionPromptedWebhook,
+	): boolean {
+		const activityId = webhook.agentActivity?.id;
+		// Fall back to the same `${createdAt}:${entityId}` shape EdgeWorker uses
+		// for issue updates; a redelivery repeats both halves.
+		const key = activityId ?? `${webhook.createdAt}:${webhook.agentSession.id}`;
+
+		if (this.processedPromptedActivityKeys.has(key)) {
+			this.logger.debug(
+				`Duplicate prompted activity delivery (key=${key}), skipping`,
+			);
+			return true;
+		}
+		this.processedPromptedActivityKeys.add(key);
+
+		// Prevent unbounded growth — prune the oldest keys when the set gets large.
+		if (this.processedPromptedActivityKeys.size > PROMPTED_DELIVERY_KEY_LIMIT) {
+			const keys = [...this.processedPromptedActivityKeys];
+			for (const stale of keys.slice(0, PROMPTED_DELIVERY_KEY_PRUNE_COUNT)) {
+				this.processedPromptedActivityKeys.delete(stale);
+			}
+		}
+
+		return false;
 	}
 
 	/**
@@ -359,6 +413,7 @@ export class WebhookRouter {
 	 * agentSessionPrompted: 5-way branch selection.
 	 *
 	 * Precedence (per packages/CLAUDE.md) — MUST be preserved exactly:
+	 *   0. duplicate delivery guard (redelivered activities are dropped)
 	 *   1. stop signal (evaluated BEFORE any repository lookup; session must exist)
 	 *   1.5 parked re-prompt (re-check blockers, wake if resolved)
 	 *   2. pending repository selection
@@ -368,6 +423,11 @@ export class WebhookRouter {
 	async routePromptedActivity(
 		webhook: AgentSessionPromptedWebhook,
 	): Promise<void> {
+		// Branch 0: drop redelivered activities before any branch can act on them.
+		if (this.isDuplicatePromptedDelivery(webhook)) {
+			return;
+		}
+
 		const agentSessionId = webhook.agentSession.id;
 		const activityBody = webhook.agentActivity?.content?.body || "";
 		const signal = (webhook.agentActivity as { signal?: string } | undefined)
