@@ -21,6 +21,7 @@ import type {
 } from "cyrus-core";
 import {
 	DEFAULT_CLAUDE_SESSION_KEEP_ALIVE_MINUTES,
+	getReadParentDirectories,
 	requireLinearWorkspaceId,
 } from "cyrus-core";
 import { CursorRunner } from "cyrus-cursor-runner";
@@ -626,6 +627,10 @@ export class SessionOrchestrator {
 			...new Set([
 				attachmentsDir,
 				repository.repositoryPath,
+				// Opt-in read-only access to the repo's parent directory (sibling
+				// folders). Routed through the shared helper so resumed/follow-up
+				// sessions get the SAME read scope as fresh ones — no drift.
+				...getReadParentDirectories([repository]),
 				...additionalAllowedDirectories,
 				...this.deps.gitService.getGitMetadataDirectoriesForWorkspace(
 					session.workspace,

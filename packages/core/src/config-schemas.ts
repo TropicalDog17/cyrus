@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import { z } from "zod";
 
 /**
@@ -330,6 +331,14 @@ export const RepositoryConfigSchema = z.object({
 		.register(pathRegistry, { path: true }),
 	allowedTools: z.array(z.string()).optional(),
 	disallowedTools: z.array(z.string()).optional(),
+	/**
+	 * Opt-in: grant sessions READ-ONLY access to the repository's parent
+	 * directory (`dirname(repositoryPath)`), i.e. every sibling folder next to
+	 * the repo checkout (sibling repos, shared specs). Off by default so the
+	 * secure home-directory read denial stays intact. Writes remain confined to
+	 * the worktree regardless of this flag.
+	 */
+	readParentDirectory: z.boolean().optional(),
 	mcpConfigPath: z
 		.union([z.string(), z.array(z.string())])
 		.optional()
@@ -677,4 +686,32 @@ export function requireLinearWorkspaceId(repo: RepositoryConfig): string {
 		);
 	}
 	return repo.linearWorkspaceId;
+}
+
+/**
+ * Opt-in per-repo read expansion. For each repository whose config sets
+ * `readParentDirectory`, return the repository's parent directory
+ * (`dirname(repositoryPath)`) so a session can READ every sibling folder next
+ * to the checkout (sibling repos, shared specs). Repos without the flag
+ * contribute nothing, preserving the secure home-directory read denial.
+ *
+ * These directories are only ever meant to be added to a session's READ
+ * allow-list — writes stay confined to the worktree. Callers pass the result
+ * into the read-directory set consumed by AccessPolicy.compute(); all session
+ * paths (new, resumed, and pre-warmed) MUST route through this single helper so
+ * the read scope cannot drift between them.
+ *
+ * The paths are deduplicated so several repos that share a parent do not emit
+ * duplicate grants.
+ */
+export function getReadParentDirectories(
+	repositories: RepositoryConfig[],
+): string[] {
+	return [
+		...new Set(
+			repositories
+				.filter((repo) => repo.readParentDirectory)
+				.map((repo) => dirname(repo.repositoryPath)),
+		),
+	];
 }

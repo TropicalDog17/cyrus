@@ -129,6 +129,7 @@ export {
 	EdgeConfigPayloadSchema,
 	// Zod schemas for runtime validation
 	EdgeConfigSchema,
+	getReadParentDirectories,
 	LinearWorkspaceConfigSchema,
 	migrateEdgeConfig,
 	NetworkPolicySchema,

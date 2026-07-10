@@ -35,6 +35,7 @@ import {
 	compute,
 	createLogger,
 	DEFAULT_PROXY_URL,
+	getReadParentDirectories,
 	normalizeConfigPaths,
 	PersistenceManager,
 	requireLinearWorkspaceId,
@@ -3400,6 +3401,7 @@ ${taskSection}`;
 			...new Set([
 				attachmentsDir,
 				...allRepoPaths,
+				...getReadParentDirectories(repositories),
 				...this.gitService.getGitMetadataDirectoriesForWorkspace(workspace),
 			]),
 		];

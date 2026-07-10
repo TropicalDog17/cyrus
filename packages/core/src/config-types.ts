@@ -19,6 +19,7 @@ export {
 	type EdgeConfigPayload,
 	EdgeConfigPayloadSchema,
 	EdgeConfigSchema,
+	getReadParentDirectories,
 	type LinearWorkspaceConfig,
 	LinearWorkspaceConfigSchema,
 	migrateEdgeConfig,
