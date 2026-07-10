@@ -9,6 +9,7 @@
 import type {
 	AgentAssistantContentBlock,
 	AgentAssistantMessage,
+	AgentCompactBoundaryMessage,
 	AgentRateLimitInfo,
 	AgentRateLimitMessage,
 	AgentResultMessage,
@@ -47,6 +48,20 @@ export function statusMessage(
 	sessionId = "claude-session",
 ): AgentStatusMessage {
 	return { type: "system", subtype: "status", sessionId, status };
+}
+
+export function compactBoundaryMessage(
+	overrides: Partial<AgentCompactBoundaryMessage> = {},
+): AgentCompactBoundaryMessage {
+	return {
+		type: "system",
+		subtype: "compact_boundary",
+		sessionId: "claude-session",
+		trigger: "auto",
+		preTokens: 210418,
+		postTokens: 45210,
+		...overrides,
+	};
 }
 
 export function assistantMessage(

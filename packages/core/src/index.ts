@@ -50,6 +50,7 @@ export { createLogger, LogLevel } from "./logging/index.js";
 export type {
 	AgentAssistantContentBlock,
 	AgentAssistantMessage,
+	AgentCompactBoundaryMessage,
 	AgentMessage,
 	AgentPendingWork,
 	AgentRateLimitInfo,

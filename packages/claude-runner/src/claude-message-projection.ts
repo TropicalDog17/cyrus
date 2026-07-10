@@ -96,6 +96,22 @@ export function toAgentMessage(sdk: SDKMessage): AgentMessage | null {
 					status: sdk.status,
 				};
 			}
+			if (sdk.subtype === "compact_boundary") {
+				const meta = sdk.compact_metadata;
+				return {
+					type: "system",
+					subtype: "compact_boundary",
+					sessionId: sdk.session_id,
+					trigger: meta.trigger,
+					preTokens: meta.pre_tokens,
+					...(meta.post_tokens !== undefined && {
+						postTokens: meta.post_tokens,
+					}),
+					...(meta.duration_ms !== undefined && {
+						durationMs: meta.duration_ms,
+					}),
+				};
+			}
 			return null;
 		}
 
@@ -212,7 +228,7 @@ export function toAgentMessage(sdk: SDKMessage): AgentMessage | null {
 		default:
 			// Informational / transport-level SDK messages with no neutral
 			// equivalent (stream_event, tool_progress, auth_status,
-			// tool_use_summary, prompt_suggestion, compact boundary, etc.).
+			// tool_use_summary, prompt_suggestion, etc.).
 			return null;
 	}
 }

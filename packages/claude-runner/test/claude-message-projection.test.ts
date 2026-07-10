@@ -44,6 +44,58 @@ describe("toAgentMessage", () => {
 		});
 	});
 
+	it("projects system/compact_boundary into a neutral AgentCompactBoundaryMessage", () => {
+		const sdk = {
+			type: "system",
+			subtype: "compact_boundary",
+			session_id: "sess-1",
+			uuid: "cb-1",
+			compact_metadata: {
+				trigger: "auto",
+				pre_tokens: 210418,
+				post_tokens: 45210,
+				duration_ms: 8123,
+			},
+		} as unknown as SDKMessage;
+
+		expect(toAgentMessage(sdk)).toEqual({
+			type: "system",
+			subtype: "compact_boundary",
+			sessionId: "sess-1",
+			trigger: "auto",
+			preTokens: 210418,
+			postTokens: 45210,
+			durationMs: 8123,
+		});
+	});
+
+	it("omits post_tokens / duration_ms when the SDK does not report them", () => {
+		const sdk = {
+			type: "system",
+			subtype: "compact_boundary",
+			session_id: "sess-1",
+			compact_metadata: { trigger: "manual", pre_tokens: 406100 },
+		} as unknown as SDKMessage;
+
+		expect(toAgentMessage(sdk)).toEqual({
+			type: "system",
+			subtype: "compact_boundary",
+			sessionId: "sess-1",
+			trigger: "manual",
+			preTokens: 406100,
+		});
+	});
+
+	it("still drops unknown system subtypes", () => {
+		const sdk = {
+			type: "system",
+			subtype: "tool_use_summary",
+			session_id: "sess-1",
+		} as unknown as SDKMessage;
+
+		expect(toAgentMessage(sdk)).toBeNull();
+	});
+
 	it("projects assistant text / thinking / tool_use blocks (thinking preserved)", () => {
 		const sdk = {
 			type: "assistant",

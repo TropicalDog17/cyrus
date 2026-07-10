@@ -171,6 +171,12 @@ function createEdgeWorkerConfig(): EdgeWorkerConfig {
 		...(process.env.CURSOR_MODEL && {
 			cursorDefaultModel: process.env.CURSOR_MODEL,
 		}),
+		// Env-gated early auto-compaction, for verifying that the SDK honors the
+		// window (and whether it does so when resuming an already-oversized
+		// conversation). A small value like 40000 crosses cheaply on sonnet.
+		...(process.env.CYRUS_AUTOCOMPACT_WINDOW && {
+			claudeAutoCompactWindow: Number(process.env.CYRUS_AUTOCOMPACT_WINDOW),
+		}),
 		// Enable all tools including Edit(**), Bash, etc. for full testing capability
 		linearAllowedTools: getAllTools(),
 		// CLI platform needs a linearWorkspaces entry so the CLIIssueTrackerService

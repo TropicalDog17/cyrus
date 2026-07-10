@@ -584,6 +584,25 @@ export interface AgentStatusMessage {
 	status: "compacting" | "requesting" | null;
 }
 
+/**
+ * A completed context compaction. Unlike {@link AgentStatusMessage}, which only
+ * says compaction is in flight, this carries how much conversation was traded
+ * away — the measurement that tells whether an early auto-compact window is
+ * doing anything.
+ */
+export interface AgentCompactBoundaryMessage {
+	type: "system";
+	subtype: "compact_boundary";
+	sessionId: string;
+	/** `auto` when a compaction window triggered it, `manual` on an explicit request. */
+	trigger: "auto" | "manual";
+	/** Conversation size before compaction, in tokens. */
+	preTokens: number;
+	/** Size after compaction; absent when the provider does not report it. */
+	postTokens?: number;
+	durationMs?: number;
+}
+
 /** Assistant turn carrying text / thinking / tool_use blocks. */
 export interface AgentAssistantMessage {
 	type: "assistant";
@@ -648,6 +667,7 @@ export interface AgentRateLimitMessage {
 export type AgentMessage =
 	| AgentSystemInitMessage
 	| AgentStatusMessage
+	| AgentCompactBoundaryMessage
 	| AgentAssistantMessage
 	| AgentUserMessage
 	| AgentResultMessage

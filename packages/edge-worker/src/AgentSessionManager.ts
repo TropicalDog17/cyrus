@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import {
 	type AgentAssistantMessage,
+	type AgentCompactBoundaryMessage,
 	type AgentMessage,
 	type AgentPendingWork,
 	type AgentRateLimitMessage,
@@ -72,6 +73,11 @@ export declare interface AgentSessionManager {
 	): boolean;
 }
 
+/** Render a token count for humans: 210418 -> "210k", 840 -> "840". */
+function formatTokenCount(tokens: number): string {
+	return tokens < 1000 ? String(tokens) : `${Math.round(tokens / 1000)}k`;
+}
+
 /**
  * Manages Agent Sessions integration with Claude Code SDK
  * Transforms Claude streaming messages into Agent Session format
@@ -98,6 +104,8 @@ export class AgentSessionManager extends EventEmitter {
 	private taskSubjectsByToolUseId: Map<string, string> = new Map(); // Cache TaskCreate subjects by toolUseId until result arrives with task ID
 	private taskSubjectsById: Map<string, string> = new Map(); // Cache task subjects by task ID (e.g., "1" → "Fix login bug")
 	private activeStatusActivitiesBySession: Map<string, string> = new Map(); // Maps session ID to active compacting status activity ID
+	/** Sessions whose current compaction was already reported by a compact_boundary. */
+	private compactBoundaryPostedBySession: Set<string> = new Set();
 	private stopRequestedSessions: Set<string> = new Set(); // Sessions explicitly stopped by user signal
 	// Per-session serialization queue for handleClaudeMessage. The EdgeWorker's
 	// onMessage callback is fire-and-forget, so without serialization the async
@@ -518,6 +526,8 @@ export class AgentSessionManager extends EventEmitter {
 					} else if (message.subtype === "status") {
 						// Handle status updates (compacting, etc.)
 						await this.handleStatusMessage(sessionId, message);
+					} else if (message.subtype === "compact_boundary") {
+						await this.handleCompactBoundaryMessage(sessionId, message);
 					}
 					break;
 
@@ -1554,6 +1564,9 @@ export class AgentSessionManager extends EventEmitter {
 		}
 
 		if (message.status === "compacting") {
+			// A new compaction cycle begins; any boundary from the previous one is
+			// no longer the reason to suppress this cycle's closing thought.
+			this.compactBoundaryPostedBySession.delete(sessionId);
 			const activityId = await this.postActivity(
 				sessionId,
 				{
@@ -1569,6 +1582,14 @@ export class AgentSessionManager extends EventEmitter {
 				this.activeStatusActivitiesBySession.set(sessionId, activityId);
 			}
 		} else if (message.status === null) {
+			// The SDK orders these `compacting` -> compact_boundary -> null, so by
+			// now the boundary has already reported this compaction with its token
+			// counts — don't follow it with a vaguer duplicate. Fall back to the
+			// generic thought when no boundary arrived.
+			if (this.compactBoundaryPostedBySession.delete(sessionId)) {
+				this.activeStatusActivitiesBySession.delete(sessionId);
+				return;
+			}
 			// Clear the status - post a non-ephemeral thought to replace the ephemeral one
 			await this.postActivity(
 				sessionId,
@@ -1581,5 +1602,40 @@ export class AgentSessionManager extends EventEmitter {
 			// Clean up the stored activity ID regardless — stale IDs do no harm
 			this.activeStatusActivitiesBySession.delete(sessionId);
 		}
+	}
+
+	/**
+	 * Handle a completed context compaction. Reports how much conversation was
+	 * traded away, which is what makes an early auto-compact window (the
+	 * `claudeAutoCompactWindow` setting) observable — a session that never
+	 * compacts pays to re-read its whole history on every turn.
+	 */
+	private async handleCompactBoundaryMessage(
+		sessionId: string,
+		message: AgentCompactBoundaryMessage,
+	): Promise<void> {
+		const session = this.sessions.get(sessionId);
+		if (!session?.externalSessionId) {
+			const log = this.sessionLog(sessionId);
+			log.debug(
+				`Skipping compact boundary - no external session ID (platform: ${session?.issueContext?.trackerId || "unknown"})`,
+			);
+			return;
+		}
+
+		const pre = formatTokenCount(message.preTokens);
+		const body =
+			message.postTokens === undefined
+				? `Compacted conversation (${message.trigger}, was ${pre} tokens)`
+				: `Compacted conversation: ${pre} → ${formatTokenCount(message.postTokens)} tokens (${message.trigger})`;
+
+		await this.postActivity(
+			sessionId,
+			{ content: { type: "thought", body }, ephemeral: false },
+			"compact boundary",
+		);
+		this.compactBoundaryPostedBySession.add(sessionId);
+		// The ephemeral "Compacting…" thought is superseded by the line above.
+		this.activeStatusActivitiesBySession.delete(sessionId);
 	}
 }

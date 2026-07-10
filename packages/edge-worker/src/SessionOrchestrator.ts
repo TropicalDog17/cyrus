@@ -181,6 +181,38 @@ function resolveSessionKeepAliveMs(
 }
 
 /**
+ * Range the Claude CLI accepts for `settings.autoCompactWindow`. Its own schema
+ * is `number().int().min(1e5).max(1e6).catch(undefined)` — a value outside this
+ * range fails validation and is **silently discarded**, so the session compacts
+ * at the model's native window as if the setting had never been passed.
+ * Verified empirically: a 40000 window let a Sonnet session reach 154k tokens
+ * without compacting, while 100000 compacted it at 70k.
+ */
+const MIN_AUTO_COMPACT_WINDOW = 100_000;
+const MAX_AUTO_COMPACT_WINDOW = 1_000_000;
+
+/**
+ * Drop an out-of-range auto-compaction window, loudly. The SDK would drop it
+ * silently, leaving an operator to believe a knob is capping context cost when
+ * it is doing nothing at all.
+ */
+export function resolveAutoCompactWindow(
+	window: number | undefined,
+	logger: ILogger,
+): number | undefined {
+	if (window === undefined) return undefined;
+	if (window < MIN_AUTO_COMPACT_WINDOW || window > MAX_AUTO_COMPACT_WINDOW) {
+		logger.warn(
+			`Ignoring claudeAutoCompactWindow=${window}: the Claude SDK only accepts ` +
+				`${MIN_AUTO_COMPACT_WINDOW}–${MAX_AUTO_COMPACT_WINDOW} and silently discards ` +
+				`anything else, so sessions would compact at the model's native window.`,
+		);
+		return undefined;
+	}
+	return window;
+}
+
+/**
  * Owns agent-session runner creation and message wiring: starting a fresh
  * session, resuming/continuing one, the add-to-stream-vs-resume decision, runner
  * config assembly (incl. onMessage/onError/onAskUserQuestion wiring), and the
@@ -802,7 +834,10 @@ export class SessionOrchestrator {
 			// Global early auto-compaction window (Claude runner only). Caps the
 			// per-turn re-read context tax on long multi-subroutine sessions by
 			// forcing the SDK to compact well before the model's full window.
-			autoCompactWindow: config.claudeAutoCompactWindow,
+			autoCompactWindow: resolveAutoCompactWindow(
+				config.claudeAutoCompactWindow,
+				this.deps.logger,
+			),
 			// Idle keep-alive window (Claude runner only). Keeps a finished session
 			// alive briefly so a follow-up comment appends to the live conversation
 			// rather than resuming — a resume re-writes the whole transcript to the

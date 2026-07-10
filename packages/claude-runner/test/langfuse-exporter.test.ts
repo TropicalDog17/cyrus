@@ -126,6 +126,9 @@ function makeFakeClient(): { client: LangfuseLike; calls: unknown[] } {
 				span(body) {
 					calls.push({ kind: "span", body });
 				},
+				event(body) {
+					calls.push({ kind: "event", body });
+				},
 			};
 		},
 		async flushAsync() {
@@ -208,7 +211,7 @@ describe("exportTranscriptToLangfuse", () => {
 			clientFactory: () => client,
 		});
 
-		expect(result).toEqual({ generations: 1, toolSpans: 1 });
+		expect(result).toEqual({ generations: 1, toolSpans: 1, compactions: 0 });
 		const generations = calls.filter(
 			(c) => (c as { kind: string }).kind === "generation",
 		);
@@ -416,7 +419,7 @@ describe("exportTranscriptToLangfuse", () => {
 		});
 
 		// One turn, one tool span — NOT three generations.
-		expect(result).toEqual({ generations: 1, toolSpans: 1 });
+		expect(result).toEqual({ generations: 1, toolSpans: 1, compactions: 0 });
 		const generations = calls.filter(
 			(c) => (c as { kind: string }).kind === "generation",
 		);
@@ -433,6 +436,113 @@ describe("exportTranscriptToLangfuse", () => {
 				output: 40,
 			},
 		});
+	});
+
+	it("emits one event per compact_boundary record, keyed deterministically", async () => {
+		const { client, calls } = makeFakeClient();
+		// Field names mirror real transcripts: the JSONL spells the metadata in
+		// camelCase, unlike the SDK's in-stream snake_case `compact_metadata`.
+		const transcriptPath = writeTempTranscript(
+			transcript([
+				JSON.stringify({
+					type: "user",
+					uuid: "u1",
+					timestamp: "2026-07-08T10:00:00.000Z",
+					message: { role: "user", content: [{ type: "text", text: "go" }] },
+				}),
+				JSON.stringify({
+					type: "system",
+					subtype: "compact_boundary",
+					uuid: "cb-1",
+					timestamp: "2026-07-08T10:00:05.000Z",
+					content: "Conversation compacted",
+					compactMetadata: {
+						trigger: "auto",
+						preTokens: 406100,
+						postTokens: 12659,
+						durationMs: 114565,
+						cumulativeDroppedTokens: 393441,
+					},
+				}),
+				JSON.stringify({
+					type: "assistant",
+					uuid: "a1",
+					timestamp: "2026-07-08T10:00:06.000Z",
+					message: {
+						id: "msg-1",
+						role: "assistant",
+						model: "claude-opus-4-8",
+						stop_reason: "end_turn",
+						content: [{ type: "text", text: "done" }],
+						usage: { input_tokens: 10, output_tokens: 5 },
+					},
+				}),
+			]),
+		);
+
+		const result = await exportTranscriptToLangfuse({
+			transcriptPath,
+			sessionId: "sess-compact",
+			config: CONFIG,
+			clientFactory: () => client,
+		});
+
+		expect(result).toEqual({ generations: 1, toolSpans: 0, compactions: 1 });
+		const events = calls.filter(
+			(c) => (c as { kind: string }).kind === "event",
+		);
+		expect(events).toHaveLength(1);
+		expect((events[0] as { body: Record<string, unknown> }).body).toMatchObject(
+			{
+				id: "compact-cb-1",
+				name: "compact_boundary",
+				metadata: {
+					trigger: "auto",
+					preTokens: 406100,
+					postTokens: 12659,
+					durationMs: 114565,
+					cumulativeDroppedTokens: 393441,
+				},
+			},
+		);
+	});
+
+	it("emits no compaction events for a transcript without a boundary", async () => {
+		const { client, calls } = makeFakeClient();
+		const transcriptPath = writeTempTranscript(
+			transcript([
+				JSON.stringify({
+					type: "user",
+					uuid: "u1",
+					timestamp: "2026-07-08T10:00:00.000Z",
+					message: { role: "user", content: [{ type: "text", text: "go" }] },
+				}),
+				JSON.stringify({
+					type: "assistant",
+					uuid: "a1",
+					timestamp: "2026-07-08T10:00:01.000Z",
+					message: {
+						id: "msg-1",
+						role: "assistant",
+						model: "claude-opus-4-8",
+						content: [{ type: "text", text: "done" }],
+						usage: { input_tokens: 10, output_tokens: 5 },
+					},
+				}),
+			]),
+		);
+
+		const result = await exportTranscriptToLangfuse({
+			transcriptPath,
+			sessionId: "sess-plain",
+			config: CONFIG,
+			clientFactory: () => client,
+		});
+
+		expect(result.compactions).toBe(0);
+		expect(
+			calls.filter((c) => (c as { kind: string }).kind === "event"),
+		).toHaveLength(0);
 	});
 
 	it("reconstructs real per-turn and per-tool durations from timestamps", async () => {
