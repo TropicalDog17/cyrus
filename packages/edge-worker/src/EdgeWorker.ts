@@ -41,6 +41,7 @@ import {
 	requireLinearWorkspaceId,
 	toClaudeToolPatterns,
 	WebhookIpValidator,
+	withLinearMcpPruned,
 } from "cyrus-core";
 import {
 	extractCommentAuthor,
@@ -4570,6 +4571,14 @@ ${taskSection}`;
 	/**
 	 * Build disallowed tools list following the same hierarchy as allowed tools.
 	 * Accepts single or multiple repositories (intersection for multi-repo).
+	 *
+	 * The verbose, rarely-used Linear MCP tools are appended here via
+	 * `withLinearMcpPruned` so they are removed from the model's context
+	 * (DEV-140). This is the single chokepoint every session path funnels
+	 * through (issue, warm-pool, multi-repo), so the prune applies uniformly
+	 * regardless of per-repo `disallowedTools` config. The Linear server is
+	 * still eager-loaded (`alwaysLoad`, see `McpConfigService`); pruning trims
+	 * its ~47-tool surface down to the essentials Cyrus actually uses.
 	 */
 	private buildDisallowedTools(
 		repositories: RepositoryConfig | RepositoryConfig[],
@@ -4580,9 +4589,11 @@ ${taskSection}`;
 			| "orchestrator"
 			| "graphite-orchestrator",
 	): string[] {
-		return this.toolPermissionResolver.buildDisallowedTools(
-			repositories,
-			promptType,
+		return withLinearMcpPruned(
+			this.toolPermissionResolver.buildDisallowedTools(
+				repositories,
+				promptType,
+			),
 		);
 	}
 

@@ -94,7 +94,9 @@ export {
 	GITHUB_DEFAULT_ALLOWED_TOOLS,
 	getDefaultAllowedTools,
 	LINEAR_DEFAULT_ALLOWED_TOOLS,
+	LINEAR_MCP_PRUNED_TOOLS,
 	READONLY_DEFAULT_ALLOWED_TOOLS,
+	withLinearMcpPruned,
 } from "./allowed-tools-defaults.js";
 export type {
 	BaseBranchResolution,

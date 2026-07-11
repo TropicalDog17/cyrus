@@ -115,6 +115,15 @@ export class McpConfigService {
 		// `cyrus-docs` (and the optional slack/atlassian servers below) stay
 		// deferred: they're used rarely, so keeping them behind tool search keeps
 		// the turn-1 context lean. See CYPACK-716 / DEV-140.
+		//
+		// Eager-loading the Linear server pulls in ALL ~47 of its tools, so the
+		// verbose, rarely-used ones (releases, milestones, attachments, diffs,
+		// documents, agent skills, …) are pruned back out of context via
+		// `disallowedTools` — see `LINEAR_MCP_PRUNED_TOOLS` /
+		// `withLinearMcpPruned` in cyrus-core, applied at
+		// `EdgeWorker.buildDisallowedTools`. What stays loaded is the essential
+		// Linear surface Cyrus uses every session (issues, comments, teams,
+		// users, statuses, labels, projects).
 		const mcpConfig: Record<string, McpServerConfig> = {
 			linear: {
 				type: "http",

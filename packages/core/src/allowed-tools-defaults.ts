@@ -220,6 +220,94 @@ export const GITHUB_DEFAULT_ALLOWED_TOOLS = [
 ] as const;
 
 /**
+ * Linear MCP tools pruned from the model's context (DEV-140).
+ *
+ * The official Linear MCP (`mcp.linear.app`) registers ~47 tools. Their
+ * combined descriptions push the Claude Agent SDK past its ~10%-of-context
+ * threshold, which silently enables *MCP tool-search auto mode* and defers
+ * EVERY Linear tool behind an on-demand `ToolSearch` — the ~1-minute turn-1
+ * stall this issue is about. We stop the stall by eager-loading the Linear
+ * server (`alwaysLoad`, see `McpConfigService.buildMcpConfig`), but loading all
+ * 47 verbose tools bloats every turn with release / milestone / attachment /
+ * diff / document / agent-skill tooling a coding-and-issue agent almost never
+ * calls.
+ *
+ * So we prune. These tools are appended to `disallowedTools`, which *removes
+ * them from the model's context entirely* — the SDK documents disallowed tools
+ * as "removed from the model's context and cannot be used, even if they would
+ * otherwise be allowed", and an `mcp__linear__<tool>` spec removes exactly that
+ * tool from the server. What survives is the essential Linear surface Cyrus
+ * uses every session (the KEEP set below): read/update issues and comments, and
+ * resolve teams / users / workflow statuses / labels / projects. To load or
+ * drop a tool, edit this one list.
+ *
+ * KEEP (stay loaded via `alwaysLoad`): get_issue, list_issues, save_issue,
+ * list_comments, save_comment, list_issue_statuses, get_issue_status, get_team,
+ * list_teams, get_user, list_users, list_issue_labels, get_project,
+ * list_projects.
+ */
+export const LINEAR_MCP_PRUNED_TOOLS = [
+	// Attachments — Cyrus uploads via cyrus-tools `linear_upload_file` instead.
+	"mcp__linear__create_attachment",
+	"mcp__linear__create_attachment_from_upload",
+	"mcp__linear__delete_attachment",
+	"mcp__linear__get_attachment",
+	"mcp__linear__prepare_attachment_upload",
+	"mcp__linear__extract_images",
+	// Labels — reading (`list_issue_labels`) stays; creating does not.
+	"mcp__linear__create_issue_label",
+	"mcp__linear__list_project_labels",
+	// Comments — read/write stay; destructive delete does not.
+	"mcp__linear__delete_comment",
+	// Project status updates (health posts) — rare, not turn-1 context.
+	"mcp__linear__get_status_updates",
+	"mcp__linear__save_status_update",
+	"mcp__linear__delete_status_update",
+	// Diffs — the agent works from the git worktree, not Linear diffs.
+	"mcp__linear__get_diff",
+	"mcp__linear__get_diff_threads",
+	"mcp__linear__list_diffs",
+	// Documents — rare; cyrus-docs covers documentation lookups.
+	"mcp__linear__get_document",
+	"mcp__linear__list_documents",
+	"mcp__linear__save_document",
+	// Linear agent skills — skill management, not issue work.
+	"mcp__linear__get_agent_skill",
+	"mcp__linear__list_agent_skills",
+	// Cycles — sprint cycles, rarely needed for a coding session.
+	"mcp__linear__list_cycles",
+	// Milestones — rare planning surface.
+	"mcp__linear__get_milestone",
+	"mcp__linear__list_milestones",
+	"mcp__linear__save_milestone",
+	// Releases / release notes / pipelines — release management, rare.
+	"mcp__linear__get_release",
+	"mcp__linear__list_releases",
+	"mcp__linear__save_release",
+	"mcp__linear__get_release_note",
+	"mcp__linear__list_release_notes",
+	"mcp__linear__save_release_note",
+	"mcp__linear__list_release_pipelines",
+	// Projects — reading (`get_project`/`list_projects`) stays; writing does not.
+	"mcp__linear__save_project",
+	// Linear's own docs search — cyrus-docs is the documentation path.
+	"mcp__linear__search_documentation",
+] as const;
+
+/**
+ * Append the Linear MCP prune list to a resolved `disallowedTools` array,
+ * de-duplicated. Pure and order-stable (resolved entries first). Applied once,
+ * at the single `disallowedTools` chokepoint, so the prune covers every session
+ * path (issue, warm-pool, multi-repo) regardless of per-repo config. See
+ * `LINEAR_MCP_PRUNED_TOOLS`.
+ */
+export function withLinearMcpPruned(
+	disallowedTools: readonly string[],
+): string[] {
+	return [...new Set([...disallowedTools, ...LINEAR_MCP_PRUNED_TOOLS])];
+}
+
+/**
  * Platform identifier used by callers that want to resolve a default list
  * dynamically. Keeps platform-string typos out of the call sites.
  */
