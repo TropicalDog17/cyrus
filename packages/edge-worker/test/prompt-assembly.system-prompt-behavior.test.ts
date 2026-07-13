@@ -71,9 +71,9 @@ No comments yet.
 
 		// Verify system prompt contains shared instructions (but no label-based prompt)
 		expect(result.systemPrompt).toBeDefined();
-		expect(result.systemPrompt).toContain("<task_management_instructions>");
+		expect(result.systemPrompt).toContain("<work_management>");
 		expect(result.systemPrompt).toContain(
-			"CRITICAL: You MUST use the Task tools",
+			"Use TaskCreate and TaskUpdate only when substantial multi-step work",
 		);
 		expect(result.systemPrompt).not.toContain("builder");
 		expect(result.systemPrompt).not.toContain("debugger");
@@ -159,14 +159,12 @@ Build the payment integration
 
 		// Check for label-based (builder) prompt content
 		expect(result.systemPrompt).toContain("builder");
-		expect(result.systemPrompt).toContain("Task tool");
+		expect(result.systemPrompt).toContain("Use Agent");
 		expect(result.systemPrompt).toContain("<builder_specific_instructions>");
 
 		// Verify todolist-system-prompt-extension instructions are NOT included in label-based prompts
 		// Check for unique content from todolist-system-prompt-extension that won't be in builder prompt
-		expect(result.systemPrompt).not.toContain(
-			"CRITICAL: You MUST use the Task tools tool extensively",
-		);
+		expect(result.systemPrompt).not.toContain("visible checklist");
 		expect(result.systemPrompt).not.toContain("YOU ARE IN 1 OF 2 SITUATIONS");
 		expect(result.systemPrompt).not.toContain("**Situation 1 - Execute**");
 		expect(result.systemPrompt).not.toContain("**Situation 2 - Clarify**");
@@ -254,9 +252,7 @@ Orchestrate this task
 		expect(result.systemPrompt).toContain("sub-issue");
 
 		// Verify shared instructions are NOT included in label-based prompts
-		expect(result.systemPrompt).not.toContain(
-			"CRITICAL: You MUST use the Task tools tool extensively",
-		);
+		expect(result.systemPrompt).not.toContain("visible checklist");
 	});
 
 	it("should load orchestrator system prompt when labelPrompts exists but without orchestrator entry (hardcoded rule)", async () => {
@@ -346,8 +342,6 @@ Orchestrate this task
 		expect(result.systemPrompt).toContain("sub-issue");
 
 		// Verify shared instructions are NOT included in label-based prompts
-		expect(result.systemPrompt).not.toContain(
-			"CRITICAL: You MUST use the Task tools tool extensively",
-		);
+		expect(result.systemPrompt).not.toContain("visible checklist");
 	});
 });

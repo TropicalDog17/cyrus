@@ -50,23 +50,15 @@ describe("LINEAR_MCP_PRUNED_TOOLS", () => {
 	// essential Linear surface Cyrus uses every session.
 	const KEEP = [
 		"mcp__linear__get_issue",
-		"mcp__linear__list_issues",
 		"mcp__linear__save_issue",
 		"mcp__linear__list_comments",
 		"mcp__linear__save_comment",
-		"mcp__linear__list_issue_statuses",
-		"mcp__linear__get_issue_status",
 		"mcp__linear__get_team",
-		"mcp__linear__list_teams",
-		"mcp__linear__get_user",
-		"mcp__linear__list_users",
-		"mcp__linear__list_issue_labels",
-		"mcp__linear__get_project",
 		"mcp__linear__list_projects",
 	];
 
-	it("prunes exactly the 33 verbose Linear tools", () => {
-		expect(tools).toHaveLength(33);
+	it("prunes exactly the 41 verbose or unused Linear tools", () => {
+		expect(tools).toHaveLength(41);
 	});
 
 	it("only ever prunes `mcp__linear__` tools", () => {
@@ -82,6 +74,8 @@ describe("LINEAR_MCP_PRUNED_TOOLS", () => {
 		expect(tools).toContain("mcp__linear__search_documentation");
 		expect(tools).toContain("mcp__linear__save_status_update");
 		expect(tools).toContain("mcp__linear__save_release");
+		expect(tools).toContain("mcp__linear__list_issues");
+		expect(tools).toContain("mcp__linear__list_issue_statuses");
 	});
 
 	it("never prunes an essential Linear tool", () => {

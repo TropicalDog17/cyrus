@@ -39,6 +39,7 @@ import {
 } from "cyrus-core";
 import dotenv from "dotenv";
 import { toAgentMessage } from "./claude-message-projection.js";
+import { getAvailableBuiltinTools } from "./config.js";
 import {
 	exportTranscriptToLangfuse,
 	resolveLangfuseConfig,
@@ -351,12 +352,14 @@ export class ClaudeRunner
 				toolUseID: string;
 			},
 		): Promise<PermissionResult> => {
-			// Only intercept AskUserQuestion tool
+			// Only AskUserQuestion is an interactive permission request Cyrus can
+			// satisfy. `allowedTools` auto-approves configured tools before this
+			// callback; anything else reaching this callback is outside the session
+			// policy and must fail closed.
 			if (toolName !== "AskUserQuestion") {
-				// Allow all other tools to proceed normally
 				return {
-					behavior: "allow",
-					updatedInput: input,
+					behavior: "deny",
+					message: `Tool ${toolName} is not allowed in this session`,
 				};
 			}
 
@@ -754,6 +757,12 @@ export class ClaudeRunner
 				sdkSettings.autoCompactWindow = this.config.autoCompactWindow;
 			}
 
+			const availableBuiltins =
+				this.config.tools ??
+				(this.config.allowedTools !== undefined
+					? getAvailableBuiltinTools(this.config.allowedTools)
+					: undefined);
+
 			const queryOptions: Parameters<typeof query>[0] = {
 				prompt: promptForQuery,
 				options: {
@@ -834,7 +843,7 @@ export class ClaudeRunner
 					...(this.config.skills !== undefined && {
 						skills: this.config.skills,
 					}),
-					...(this.config.tools !== undefined && { tools: this.config.tools }),
+					...(availableBuiltins !== undefined && { tools: availableBuiltins }),
 					...(this.config.maxTurns && { maxTurns: this.config.maxTurns }),
 					...(this.config.outputFormat && {
 						outputFormat: this.config.outputFormat,

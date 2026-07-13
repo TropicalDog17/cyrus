@@ -17,6 +17,7 @@ export {
 export {
 	availableTools,
 	getAllTools,
+	getAvailableBuiltinTools,
 	getCoordinatorTools,
 	getReadOnlyTools,
 	getSafeTools,
