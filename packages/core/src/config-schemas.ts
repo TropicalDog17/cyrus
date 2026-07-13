@@ -442,6 +442,14 @@ export const EdgeConfigSchema = z.object({
 	 */
 	claudeMaxWarmIdleSessions: z.number().int().min(0).optional(),
 
+	/**
+	 * How long (in minutes) an AskUserQuestion elicitation waits for the user's
+	 * answer in Linear before unblocking the agent with a "no response" denial.
+	 * `0` waits indefinitely; unset defaults to 30 minutes. Claude runner only.
+	 * Hot-reloaded: applies to questions asked after a config change.
+	 */
+	askUserQuestionTimeoutMinutes: z.number().int().min(0).optional(),
+
 	/** Default Cursor model to use across all repositories (e.g., "composer-2.5", "composer-2") */
 	cursorDefaultModel: z.string().optional(),
 

@@ -32,6 +32,7 @@ const EDGE_CONFIG: EdgeConfig = {
 	claudeAutoCompactWindow: 120_000,
 	claudeSessionKeepAliveMinutes: 30,
 	claudeMaxWarmIdleSessions: 4,
+	askUserQuestionTimeoutMinutes: 45,
 	cursorDefaultModel: "cursor-default",
 	cursorDefaultFallbackModel: "cursor-fallback",
 	defaultRunner: "claude",

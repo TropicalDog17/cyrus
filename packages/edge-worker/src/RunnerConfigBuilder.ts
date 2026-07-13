@@ -32,6 +32,7 @@ export type RunnerConfig = ClaudeRunnerConfig | CursorRunnerConfig;
 
 import { buildIntentToAddHook } from "./hooks/IntentToAddHook.js";
 import { buildPrMarkerHook } from "./hooks/PrMarkerHook.js";
+import { appendAskUserQuestionAddendum } from "./prompts/askUserQuestionPromptAddendum.js";
 import { appendBrowserUseAddendum } from "./prompts/browserUsePromptAddendum.js";
 import { appendCloudRuntimeAddendum } from "./prompts/cloudRuntimePromptAddendum.js";
 import { appendContextDisciplineAddendum } from "./prompts/contextDisciplinePromptAddendum.js";
@@ -296,7 +297,9 @@ export class RunnerConfigBuilder {
 			appendSystemPrompt: appendCloudRuntimeAddendum(
 				appendBrowserUseAddendum(
 					appendFailureModeAddendum(
-						appendContextDisciplineAddendum(input.systemPrompt),
+						appendContextDisciplineAddendum(
+							appendAskUserQuestionAddendum(input.systemPrompt),
+						),
 					),
 				),
 			),

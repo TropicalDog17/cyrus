@@ -46,6 +46,13 @@ export interface AskUserQuestionHandlerDeps {
 	 * @param organizationId - Linear organization/workspace ID
 	 */
 	getIssueTracker: (organizationId: string) => IIssueTrackerService | null;
+	/**
+	 * Optional per-question timeout override in milliseconds. Re-read on each
+	 * question so config hot-reload takes effect without restart. When omitted
+	 * or returns `undefined`, falls back to constructor config / default.
+	 * `0` means wait indefinitely.
+	 */
+	getTimeoutMs?: () => number | undefined;
 }
 
 /**
@@ -75,6 +82,16 @@ export interface AskUserQuestionHandlerConfig {
  * session hanging for hours on a lost response webhook.
  */
 export const DEFAULT_QUESTION_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * Convert `askUserQuestionTimeoutMinutes` config to milliseconds for the handler.
+ * `undefined` means use the handler default; `0` means wait indefinitely.
+ */
+export function questionTimeoutMsFromMinutes(
+	minutes: number | undefined,
+): number | undefined {
+	return minutes != null ? minutes * 60_000 : undefined;
+}
 
 /**
  * Handler for presenting AskUserQuestion tool calls to users via Linear's select signal.
@@ -226,6 +243,7 @@ export class AskUserQuestionHandler {
 		// through `finalize`: a user response, session abort, or timeout. A
 		// timeout is essential — without it a lost "prompted" webhook leaves the
 		// Claude subprocess blocked on this tool result forever.
+		const timeoutMs = this.deps.getTimeoutMs?.() ?? this.timeoutMs;
 		return new Promise<AskUserQuestionResult>((resolve) => {
 			let settled = false;
 			let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -264,17 +282,17 @@ export class AskUserQuestionHandler {
 			// Guard against a never-delivered response webhook deadlocking the
 			// tool call. On timeout, unblock the agent with a denial that tells
 			// it to proceed rather than hang.
-			if (this.timeoutMs > 0) {
+			if (timeoutMs > 0) {
 				timeoutId = setTimeout(() => {
-					const minutes = Math.round(this.timeoutMs / 60000);
+					const minutes = Math.round(timeoutMs / 60000);
 					this.logger.warn(
-						`AskUserQuestion for session ${linearAgentSessionId} timed out after ${this.timeoutMs}ms with no response`,
+						`AskUserQuestion for session ${linearAgentSessionId} timed out after ${timeoutMs}ms with no response`,
 					);
 					finalize({
 						answered: false,
 						message: `No response was received within ${minutes} minute(s). Proceed using your best judgment (for example, your recommended default), and ask again later if you still need the user's decision.`,
 					});
-				}, this.timeoutMs);
+				}, timeoutMs);
 				// Don't let this timer keep the process alive on its own.
 				timeoutId.unref?.();
 			}

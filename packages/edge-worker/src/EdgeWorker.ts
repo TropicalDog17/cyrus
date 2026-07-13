@@ -75,7 +75,10 @@ import {
 } from "cyrus-linear-event-transport";
 import { ActivityPoster } from "./ActivityPoster.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
-import { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
+import {
+	AskUserQuestionHandler,
+	questionTimeoutMsFromMinutes,
+} from "./AskUserQuestionHandler.js";
 import { AttachmentService } from "./AttachmentService.js";
 import type { Activity } from "./activity/index.js";
 import {
@@ -332,6 +335,9 @@ export class EdgeWorker extends EventEmitter {
 			getIssueTracker: (linearWorkspaceId: string) => {
 				return this.getIssueTrackerForWorkspace(linearWorkspaceId) ?? null;
 			},
+			// Re-read per question so config hot-reload takes effect without restart.
+			getTimeoutMs: () =>
+				questionTimeoutMsFromMinutes(this.config.askUserQuestionTimeoutMinutes),
 		});
 
 		// Initialize the webhook/message router. Every dep is a late-bound arrow
