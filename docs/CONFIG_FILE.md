@@ -466,6 +466,20 @@ Caps how many kept-alive Claude sessions may sit idle at the same time. When mor
 
 Defaults to `0`, meaning unbounded — the keep-alive window alone limits accumulation to sessions active in the last few minutes. Set a positive cap if you run many concurrent issues and want a hard ceiling on how many idle subprocesses are held at once. Only meaningful alongside a non-zero `claudeSessionKeepAliveMinutes`.
 
+### `askUserQuestionTimeoutMinutes` (number)
+
+How long (in minutes) Cyrus waits for your answer when the agent asks a question via Linear's select signal before unblocking the agent with a "no response" denial. Claude runner only.
+
+When the agent uses AskUserQuestion, the session blocks until you pick an option or reply with a comment. If no response arrives within this window, the agent is told to proceed with its best judgment rather than waiting indefinitely.
+
+```json
+{
+  "askUserQuestionTimeoutMinutes": 30
+}
+```
+
+When omitted, defaults to 30 minutes. Set `0` to wait indefinitely (legacy behavior). Applies to questions asked after a config change — no restart needed.
+
 ---
 
 ## Tool Configuration Priority

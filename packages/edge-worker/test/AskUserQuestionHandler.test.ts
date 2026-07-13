@@ -1,6 +1,10 @@
 import type { AskUserQuestionInput, IIssueTrackerService } from "cyrus-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AskUserQuestionHandler } from "../src/AskUserQuestionHandler.js";
+import {
+	AskUserQuestionHandler,
+	DEFAULT_QUESTION_TIMEOUT_MS,
+	questionTimeoutMsFromMinutes,
+} from "../src/AskUserQuestionHandler.js";
 
 /**
  * Unit tests for AskUserQuestionHandler.
@@ -657,6 +661,179 @@ describe("AskUserQuestionHandler", () => {
 			noTimeoutHandler.handleUserResponse("session-inf", "PostgreSQL");
 			const result = await resultPromise;
 			expect(result.answered).toBe(true);
+		});
+
+		it("should prefer getTimeoutMs over constructor config", async () => {
+			const getterHandler = new AskUserQuestionHandler(
+				{
+					getIssueTracker: mockGetIssueTracker,
+					getTimeoutMs: () => 500,
+				},
+				{ timeoutMs: 60_000 },
+			);
+			const abortController = new AbortController();
+
+			const resultPromise = getterHandler.handleAskUserQuestion(
+				buildInput(),
+				"session-getter",
+				"org-123",
+				abortController.signal,
+			);
+
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(500);
+
+			const result = await resultPromise;
+			expect(result.answered).toBe(false);
+			expect(result.message).toContain("No response was received");
+		});
+
+		it("should fall back to constructor config when getTimeoutMs returns undefined", async () => {
+			const fallbackHandler = new AskUserQuestionHandler(
+				{
+					getIssueTracker: mockGetIssueTracker,
+					getTimeoutMs: () => undefined,
+				},
+				{ timeoutMs: 800 },
+			);
+			const abortController = new AbortController();
+
+			const resultPromise = fallbackHandler.handleAskUserQuestion(
+				buildInput(),
+				"session-fallback",
+				"org-123",
+				abortController.signal,
+			);
+
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(800);
+
+			const result = await resultPromise;
+			expect(result.answered).toBe(false);
+		});
+
+		it("should wait indefinitely when getTimeoutMs returns 0", async () => {
+			const indefiniteHandler = new AskUserQuestionHandler(
+				{
+					getIssueTracker: mockGetIssueTracker,
+					getTimeoutMs: () => 0,
+				},
+				{ timeoutMs: 1000 },
+			);
+			const abortController = new AbortController();
+
+			const resultPromise = indefiniteHandler.handleAskUserQuestion(
+				buildInput(),
+				"session-getter-zero",
+				"org-123",
+				abortController.signal,
+			);
+
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+			expect(indefiniteHandler.hasPendingQuestion("session-getter-zero")).toBe(
+				true,
+			);
+
+			indefiniteHandler.handleUserResponse("session-getter-zero", "PostgreSQL");
+			const result = await resultPromise;
+			expect(result.answered).toBe(true);
+		});
+
+		it("should re-read getTimeoutMs on each question", async () => {
+			let configuredTimeoutMs = 400;
+			const hotReloadHandler = new AskUserQuestionHandler(
+				{
+					getIssueTracker: mockGetIssueTracker,
+					getTimeoutMs: () => configuredTimeoutMs,
+				},
+				{ timeoutMs: 60_000 },
+			);
+			const abortController = new AbortController();
+
+			const firstPromise = hotReloadHandler.handleAskUserQuestion(
+				buildInput(),
+				"session-reload-1",
+				"org-123",
+				abortController.signal,
+			);
+
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(400);
+			const firstResult = await firstPromise;
+			expect(firstResult.answered).toBe(false);
+
+			configuredTimeoutMs = 200;
+			const secondAbort = new AbortController();
+			const secondPromise = hotReloadHandler.handleAskUserQuestion(
+				buildInput(),
+				"session-reload-2",
+				"org-123",
+				secondAbort.signal,
+			);
+
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(200);
+			const secondResult = await secondPromise;
+			expect(secondResult.answered).toBe(false);
+		});
+	});
+
+	describe("questionTimeoutMsFromMinutes", () => {
+		it("converts minutes to milliseconds", () => {
+			expect(questionTimeoutMsFromMinutes(45)).toBe(2_700_000);
+		});
+
+		it("preserves 0 as indefinite wait", () => {
+			expect(questionTimeoutMsFromMinutes(0)).toBe(0);
+		});
+
+		it("returns undefined when minutes is unset", () => {
+			expect(questionTimeoutMsFromMinutes(undefined)).toBeUndefined();
+		});
+	});
+
+	describe("default timeout", () => {
+		const buildInput = (): AskUserQuestionInput => ({
+			questions: [
+				{
+					question: "Which database?",
+					header: "Database",
+					options: [
+						{ label: "PostgreSQL", description: "Open source relational DB" },
+					],
+					multiSelect: false,
+				},
+			],
+		});
+
+		beforeEach(() => {
+			vi.useFakeTimers();
+		});
+
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it("uses DEFAULT_QUESTION_TIMEOUT_MS when no config or getter is provided", async () => {
+			const defaultHandler = new AskUserQuestionHandler({
+				getIssueTracker: mockGetIssueTracker,
+			});
+			const abortController = new AbortController();
+
+			const resultPromise = defaultHandler.handleAskUserQuestion(
+				buildInput(),
+				"session-default",
+				"org-123",
+				abortController.signal,
+			);
+
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(DEFAULT_QUESTION_TIMEOUT_MS);
+
+			const result = await resultPromise;
+			expect(result.answered).toBe(false);
+			expect(result.message).toContain("No response was received");
 		});
 	});
 });
