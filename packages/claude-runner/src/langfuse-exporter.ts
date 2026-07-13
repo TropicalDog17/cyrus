@@ -264,6 +264,46 @@ function num(v: unknown): number {
 }
 
 /**
+ * Cache-write tokens, split by TTL.
+ *
+ * Anthropic bills a cache write by how long the entry lives: a 5-minute write
+ * costs 1.25x the base input rate, a 1-hour write 2x. Langfuse prices those with
+ * *separate* usage keys — `input_cache_creation_5m` and `input_cache_creation_1h`
+ * — while the flat `cache_creation_input_tokens` key is priced at the 5-minute
+ * rate.
+ *
+ * Cyrus sessions write 1-hour cache almost exclusively (the idle keep-alive
+ * window is built on it — see `claudeSessionKeepAliveMinutes`), so reporting the
+ * flat key charged every trace's cache writes at 62.5% of what they actually
+ * cost. Measured across this fork's sessions, that hid $181 of real spend.
+ *
+ * Emit the TTL-split keys when the transcript records the breakdown, and fall
+ * back to the flat key when it does not (older transcripts, other providers).
+ * The keys are priced *independently*, so the same token must never appear under
+ * two of them — any remainder the split does not account for is attributed to
+ * the flat key rather than guessed into a TTL bucket.
+ */
+function cacheCreationUsage(
+	usage: Record<string, unknown>,
+): Record<string, number> {
+	const total = num(usage.cache_creation_input_tokens);
+	const detail = usage.cache_creation as Record<string, unknown> | undefined;
+	const oneHour = num(detail?.ephemeral_1h_input_tokens);
+	const fiveMin = num(detail?.ephemeral_5m_input_tokens);
+
+	if (oneHour + fiveMin === 0) {
+		return { cache_creation_input_tokens: total };
+	}
+
+	const remainder = Math.max(0, total - oneHour - fiveMin);
+	return {
+		input_cache_creation_1h: oneHour,
+		input_cache_creation_5m: fiveMin,
+		...(remainder > 0 ? { cache_creation_input_tokens: remainder } : {}),
+	};
+}
+
+/**
  * Ensure an observation never ends before it starts. Returns `end` when both
  * bounds exist and `end >= start`; otherwise falls back to `start` (a
  * zero-duration point) so Langfuse still receives a valid, orderable span even
@@ -447,28 +487,79 @@ export function findSubagentTranscripts(
 /**
  * Recover which `Agent` tool call spawned which subagent.
  *
- * The Agent tool's result text carries the id of the agent it launched
- * (`agentId: a379cd62836b5edec`), and that id is also the transcript filename.
- * Mapping it back lets each subagent's turns hang under the tool span that
- * spawned them instead of floating at the top of the trace.
+ * There are two spawn modes and they leave different evidence:
  *
- * Returns agentId -> spawning tool_use id. Subagents with no recoverable parent
- * are still exported; they just sit at the trace root.
+ *  - **async** — the tool result is a launch receipt that names the agent
+ *    (`agentId: a379cd62836b5edec`), which is also the transcript filename. That
+ *    is an exact link, so prefer it.
+ *  - **sync** — the tool result is the subagent's finished report. It carries no
+ *    id at all, so there is nothing to match on. This is the common case, and an
+ *    id-only implementation silently leaves these subagents unparented.
+ *
+ * For the sync case fall back to time: a subagent runs strictly inside its Agent
+ * call's window (between the `tool_use` and its `tool_result`), so a subagent
+ * whose transcript opens inside exactly one unclaimed window belongs to it.
+ * Ambiguity is left unlinked rather than guessed — a wrong parent is worse than
+ * none, and an unparented subagent still reports its full cost at the trace root.
+ *
+ * Returns agentId -> spawning tool_use id.
  */
-function mapAgentIdsToToolUses(
+function linkSubagentsToAgentCalls(
 	turns: Map<string, AssistantTurn>,
 	toolResults: Map<string, string>,
+	toolResultTimes: Map<string, Date>,
+	subagents: { agentId: string; firstTimestamp?: Date }[],
 ): Map<string, string> {
 	const byAgentId = new Map<string, string>();
+	const claimed = new Set<string>();
+	const calls: { toolUseId: string; start?: Date; end?: Date }[] = [];
+
 	for (const turn of turns.values()) {
 		for (const block of turn.toolUses) {
 			if (block.name !== "Agent" || !block.id) continue;
-			const result = toolResults.get(block.id);
-			if (!result) continue;
-			const match = /agentId:\s*([A-Za-z0-9_-]+)/.exec(result);
-			if (match?.[1]) byAgentId.set(match[1], block.id);
+			calls.push({
+				toolUseId: block.id,
+				// Open the window at the *start* of the turn that issued the call,
+				// not when its record was flushed: the subagent's transcript is
+				// opened as the call is dispatched, which lands a second or so
+				// before the parent's assistant record is written. Using the
+				// flush time excludes the very subagent the window is meant to
+				// catch. The tool_result closes the window.
+				start: turn.startTime ?? turn.endTime,
+				end: toolResultTimes.get(block.id),
+			});
+			const match = /agentId:\s*([A-Za-z0-9_-]+)/.exec(
+				toolResults.get(block.id) ?? "",
+			);
+			if (match?.[1]) {
+				byAgentId.set(match[1], block.id);
+				claimed.add(block.id);
+			}
 		}
 	}
+
+	for (const { agentId, firstTimestamp } of subagents) {
+		if (byAgentId.has(agentId) || !firstTimestamp) continue;
+		const t = firstTimestamp.getTime();
+		const candidates = calls.filter(
+			(c) =>
+				!claimed.has(c.toolUseId) &&
+				c.start !== undefined &&
+				t >= c.start.getTime() &&
+				// A missing tool_result means the call never returned — the session
+				// was interrupted or ended while the subagent was still running.
+				// The window is open-ended rather than empty; treating it as empty
+				// would drop the link for exactly the sessions that were cut short.
+				(c.end === undefined || t <= c.end.getTime()),
+		);
+		// Exactly one unclaimed Agent call was running when this subagent began.
+		if (candidates.length === 1) {
+			const only = candidates[0] as { toolUseId: string };
+			byAgentId.set(agentId, only.toolUseId);
+			claimed.add(only.toolUseId);
+		}
+	}
+
 	return byAgentId;
 }
 
@@ -591,12 +682,14 @@ function emitTurns(args: {
 			output: turn.outputParts.join("\n") || undefined,
 			...(parentObservationId ? { parentObservationId } : {}),
 			// Break the input down by cache tier so Langfuse prices cache reads
-			// and writes at their (much cheaper) rates instead of charging every
-			// input token at the full uncached rate. Langfuse derives `total`.
+			// and writes at their own rates instead of charging every input token
+			// at the full uncached rate. Cache writes are further split by TTL —
+			// a 1-hour write costs 2x base, not the 1.25x the flat key implies.
+			// Langfuse derives `total`.
 			usageDetails: {
 				input: freshInput,
 				cache_read_input_tokens: cacheRead,
-				cache_creation_input_tokens: cacheCreation,
+				...cacheCreationUsage(usage),
 				output: outputTokens,
 			},
 			startTime,
@@ -701,21 +794,31 @@ export async function exportTranscriptToLangfuse(
 	});
 
 	// Subagent turns live in their own files and carry their own usage; without
-	// this pass a delegating session's cost is silently under-reported.
-	const agentIdToToolUse = mapAgentIdsToToolUses(
+	// this pass a delegating session's cost is silently under-reported. Parse
+	// them before emitting: linking a sync-spawned subagent to its Agent call
+	// needs to know when its transcript begins.
+	const subagentTranscripts = findSubagentTranscripts(transcriptPath).map(
+		(s) => ({ ...s, parsed: parseTranscript(s.path) }),
+	);
+	const agentIdToToolUse = linkSubagentsToAgentCalls(
 		parsed.turns,
 		parsed.toolResults,
+		parsed.toolResultTimes,
+		subagentTranscripts.map((s) => ({
+			agentId: s.agentId,
+			firstTimestamp: s.parsed.firstTimestamp,
+		})),
 	);
-	const subagentTranscripts = findSubagentTranscripts(transcriptPath);
+
 	let subagentGenerations = 0;
 	let subagentToolSpans = 0;
 
-	for (const { agentId, path } of subagentTranscripts) {
+	for (const { agentId, parsed: subParsed } of subagentTranscripts) {
 		const spawningToolUseId = agentIdToToolUse.get(agentId);
 		const counts = emitTurns({
 			client,
 			traceId,
-			parsed: parseTranscript(path),
+			parsed: subParsed,
 			turnName: "subagent-turn",
 			// Hang the subagent's work under the Agent tool call that spawned it.
 			// Unlinkable subagents still export — they just sit at the trace root.
