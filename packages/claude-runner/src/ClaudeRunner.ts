@@ -760,6 +760,23 @@ export class ClaudeRunner
 					model: this.config.model || "opus",
 					fallbackModel: this.config.fallbackModel || "sonnet",
 					abortController: this.abortController,
+					// A read-only reconnaissance agent pinned to a cheaper model. The
+					// SDK has no global "subagent model" option — an agent's model can
+					// only be set on an agent you define — so cheap delegation means
+					// registering one. Omitted entirely when unconfigured, leaving the
+					// SDK's built-in agents (which inherit the session model) untouched.
+					...(this.config.subagentModel && {
+						agents: {
+							explore: {
+								description:
+									"Read-only codebase reconnaissance. Use to locate code or trace a call path across many files — anything answerable by searching and reading without editing. Returns a compact summary with file:line references instead of pulling every file into the main conversation.",
+								prompt:
+									"You are a read-only code explorer. Search and read to answer the question you were given, then reply with a compact summary citing concrete file:line references. Do not modify anything. Report only what you actually found — if the answer is not in the codebase, say so rather than guessing.",
+								tools: ["Read", "Grep", "Glob"],
+								model: this.config.subagentModel,
+							},
+						},
+					}),
 					// Use Claude Code preset by default to maintain backward compatibility
 					// This can be overridden if systemPrompt is explicitly provided
 					systemPrompt: this.config.systemPrompt || {
