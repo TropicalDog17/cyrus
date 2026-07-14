@@ -38,6 +38,33 @@ describe("ToolPermissionResolver", () => {
 			expect(resolver.buildAllowedTools(repo())).toEqual(["Read", "Grep"]);
 		});
 
+		// The CLI hands us `linearAllowedTools: []` whenever the operator has not
+		// set one (`WorkerService` resolves `env || config || []`). An empty array
+		// is truthy, so treating it as "configured" silently replaced the platform
+		// default with an empty allow-list — every Bash/Edit/Write call then fell
+		// through to the fail-closed `canUseTool` and was denied with
+		// "Tool Bash is not allowed in this session".
+		it("treats an empty workspace linearAllowedTools as unset, not as a lockdown", () => {
+			const { resolver } = makeResolver({ linearAllowedTools: [] });
+			expect(resolver.buildAllowedTools(repo())).toEqual([
+				...LINEAR_DEFAULT_ALLOWED_TOOLS,
+			]);
+		});
+
+		it("treats an empty repo-level allowedTools as unset, not as a lockdown", () => {
+			const { resolver } = makeResolver();
+			expect(resolver.buildAllowedTools(repo({ allowedTools: [] }))).toEqual([
+				...LINEAR_DEFAULT_ALLOWED_TOOLS,
+			]);
+		});
+
+		it("treats an empty linearAllowedTools as unset for a repo-less session", () => {
+			const { resolver } = makeResolver({ linearAllowedTools: [] });
+			expect(resolver.buildAllowedTools([])).toEqual([
+				...LINEAR_DEFAULT_ALLOWED_TOOLS,
+			]);
+		});
+
 		it("prefers a repo-level allowedTools override over the workspace default", () => {
 			const { resolver } = makeResolver({ linearAllowedTools: ["Read"] });
 			expect(

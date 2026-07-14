@@ -47,6 +47,29 @@ export class ToolPermissionResolver {
 	}
 
 	/**
+	 * Is this allow-list entry actually configured?
+	 *
+	 * An empty array means "not set", not "deny everything". The distinction is
+	 * easy to lose because `[]` is truthy: a plain `if (list)` accepts it and
+	 * uses it *in place of* the platform default, so the session starts with
+	 * nothing pre-approved and the fail-closed `canUseTool` in ClaudeRunner then
+	 * denies the first `Bash`/`Edit`/`Write` call — on an install that never
+	 * restricted anything. An empty list arrives here easily: any hand-written
+	 * `"allowedTools": []`, a hot-reloaded or pushed config, or (until this was
+	 * fixed) the CLI itself, which resolved an unset `linearAllowedTools` to `[]`.
+	 *
+	 * "Deny everything" is not expressible as an empty list anyway — ClaudeRunner
+	 * only forwards `allowedTools` to the SDK when it is non-empty — so
+	 * "empty === unset" is the only coherent reading, and it is what
+	 * `buildGithubAllowedTools` has always done.
+	 */
+	private isConfiguredToolList<T extends string | string[]>(
+		list: T | undefined,
+	): list is T {
+		return list === undefined ? false : list.length > 0;
+	}
+
+	/**
 	 * Resolve a tool preset string to an array of tool names.
 	 */
 	public resolveToolPreset(preset: string | string[]): string[] {
@@ -97,7 +120,9 @@ export class ToolPermissionResolver {
 		const workspaceDefault = platformDefault ?? this.config.linearAllowedTools;
 
 		if (repoArray.length === 0) {
-			const baseTools = workspaceDefault ?? [...LINEAR_DEFAULT_ALLOWED_TOOLS];
+			const baseTools = this.isConfiguredToolList(workspaceDefault)
+				? workspaceDefault
+				: [...LINEAR_DEFAULT_ALLOWED_TOOLS];
 			return [...new Set(baseTools)];
 		}
 
@@ -162,28 +187,26 @@ export class ToolPermissionResolver {
 			promptConfig && !Array.isArray(promptConfig)
 				? promptConfig.allowedTools
 				: undefined;
-		if (promptAllowedTools) {
+		if (this.isConfiguredToolList(promptAllowedTools)) {
 			return this.resolveToolPreset(promptAllowedTools);
 		}
 		// 2. Global prompt type defaults
-		if (
-			effectivePromptType &&
-			this.config.promptDefaults?.[effectivePromptType]?.allowedTools
-		) {
-			return this.resolveToolPreset(
-				this.config.promptDefaults[effectivePromptType].allowedTools,
-			);
+		const promptDefaultTools = effectivePromptType
+			? this.config.promptDefaults?.[effectivePromptType]?.allowedTools
+			: undefined;
+		if (this.isConfiguredToolList(promptDefaultTools)) {
+			return this.resolveToolPreset(promptDefaultTools);
 		}
 		// 3. Repository-level allowed tools (verbatim — no platform-default
 		//    merging; if the operator narrows the list, they get the narrow
 		//    list).
-		if (repository.allowedTools) {
+		if (this.isConfiguredToolList(repository.allowedTools)) {
 			return repository.allowedTools;
 		}
 		// 4. Workspace default allowed tools — the platform default the caller
 		//    threaded in (GitHub default for `buildGithubAllowedTools`, else the
 		//    configured `linearAllowedTools`).
-		if (workspaceDefault) {
+		if (this.isConfiguredToolList(workspaceDefault)) {
 			return workspaceDefault;
 		}
 		// 5. Final fallback — Linear platform default.
