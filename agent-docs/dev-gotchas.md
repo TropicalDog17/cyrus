@@ -73,6 +73,43 @@ Compare output to `availableTools` in `packages/claude-runner/src/config.ts`.
 Also review `readOnlyTools`, `writeTools`, and helpers. Skipping this can cause
 sessions to silently miss new tools or reference removed ones.
 
+## Context compaction (`claudeAutoCompactWindow`)
+
+The Claude CLI validates the setting as
+`number().int().min(1e5).max(1e6).optional().catch(void 0)` — **any value outside
+`[100_000, 1_000_000]` is silently discarded** and the session falls back to the
+model's native window. `resolveAutoCompactWindow()` in `SessionOrchestrator` drops
+an out-of-range window and warns, rather than tightening the Zod schema (which
+would make an existing out-of-range `config.json` fail to parse).
+
+The compaction threshold is
+`min(nativeWindow, w) − min(maxOutputTokens, 20_000) − 13_000`, applied **before**
+any model-specific branch — the model is irrelevant once the window is set. At
+`w = 120_000` the threshold is ~87k. With `w` unset on `claude-opus-4-8` (1M native
+window) it is ~967k, which a real session never reaches — so an unset window means
+effectively no compaction on 1M-context models.
+
+**`WarmSessionPool.warmup()` bypasses this entirely.** It builds its own `startup()`
+options and never passes `settings`, so pre-warmed sessions ignore
+`autoCompactWindow`. Only reachable when `CYRUS_ENABLE_WARM_SESSIONS` is set.
+**Open bug — not yet fixed.**
+
+## Transcript JSONL is camelCase, SDK messages are snake_case
+
+The Langfuse exporter parses the transcript, not SDK messages. The transcript spells
+compaction metadata `compactMetadata.{trigger, preTokens, postTokens, durationMs,
+cumulativeDroppedTokens}` — **not** the SDK message's `compact_metadata.pre_tokens`.
+Do not reuse SDK field names in transcript-parsing code.
+
+## `ClaudeRunner.stop()` is a no-op before the runner starts
+
+Calling `stop()` on a runner that has not started yet does nothing. Two concurrent
+resumes therefore each build a runner and leave **two live subprocesses**, one
+orphaned. `SessionOrchestrator.resumeSession` prevents this by serializing per
+`sessionId` through a `resumeChains` promise map. Do not remove that serialization,
+and do not skip the defensive `existingRunner.stop()` — it is the fallback for a
+steer-only backend rejecting `addStreamMessage`.
+
 ## Routing behavior and self-describing prompts
 
 When changing repository routing (description-tag syntax, label routing, base

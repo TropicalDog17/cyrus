@@ -1,6 +1,6 @@
 ---
 name: core-conventions
-description: Project conventions for tests, changelogs, dependency security, and skills layout. Use when writing or reviewing code changes, adding tests (especially prompt assembly), updating dependencies, or editing agent skills/docs.
+description: Project conventions for tests, recording durable findings, dependency security, and skills layout. Use when writing or reviewing code changes, adding tests (especially prompt assembly), updating dependencies, or editing agent skills/docs.
 ---
 
 # Core conventions
@@ -28,16 +28,25 @@ Full command matrix: `agent-docs/testing-and-commands.md`.
   `.toContain()` checks. Examples in `agent-docs/testing-and-commands.md`.
 - Major product behavior: validate with F1 (`f1-test-drive` skill).
 
-## Changelog
+## Recording what you learned
 
-| Kind of change | File |
+This repo keeps **no changelog** — git history is the log, and it is searchable by
+file, attributable, and never drifts. Do not reintroduce one. Sort what you learned
+by how long it stays true:
+
+| What you have | Where it goes |
 | --- | --- |
-| End-user impact (CLI users) | `CHANGELOG.md` under `## [Unreleased]` |
-| Internal-only (refactors, tooling) | `CHANGELOG.internal.md` |
+| An invariant that causes silent breakage if ignored | `agent-docs/dev-gotchas.md` |
+| A decision, and why it beat the alternative | `docs/adr/` — one decision per file |
+| Domain vocabulary or a module seam | `CONTEXT.md` (only once it exists in code) |
+| File lists, symbol inventories, test manifests | Nowhere — `git log -p` has it |
 
-Subsections: `### Added` / `### Changed` / `### Fixed` / `### Removed`. Include
-Linear issue id and PR link. User changelog = user impact only, not package
-internals. Full ship flow: `verify-and-ship`.
+A gotcha is worth more when a test enforces it. The strongest example in this repo:
+`WorkerService.test.ts` fails if its fixture does not enumerate every
+`EdgeConfigSchema.shape` key, so a dropped config field cannot ship. Prefer that over
+a note whenever the invariant is testable.
+
+Full ship flow: `verify-and-ship`.
 
 ## Dependency security
 

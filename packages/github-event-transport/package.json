@@ -1,6 +1,7 @@
 {
 	"name": "cyrus-github-event-transport",
 	"version": "0.2.66",
+	"private": true,
 	"description": "GitHub event transport for receiving and verifying forwarded GitHub webhooks",
 	"type": "module",
 	"main": "dist/index.js",
@@ -23,8 +24,5 @@
 		"@types/node": "^20.0.0",
 		"typescript": "^5.3.3",
 		"vitest": "^4.1.0"
-	},
-	"publishConfig": {
-		"access": "public"
 	}
 }

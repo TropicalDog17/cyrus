@@ -1,6 +1,7 @@
 {
 	"name": "cyrus-core",
 	"version": "0.2.66",
+	"private": true,
 	"description": "Core business logic for Cyrus",
 	"type": "module",
 	"main": "dist/index.js",
@@ -28,8 +29,5 @@
 		"tsx": "^4.20.6",
 		"typescript": "^5.3.3",
 		"vitest": "^4.1.0"
-	},
-	"publishConfig": {
-		"access": "public"
 	}
 }

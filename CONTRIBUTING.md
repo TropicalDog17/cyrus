@@ -67,11 +67,12 @@ cyrus/
    pnpm typecheck            # TypeScript type checking
    pnpm lint                 # Biome lint check
    ```
-4. Update `CHANGELOG.md` under the `## [Unreleased]` section with your changes:
-   - Use subsections: `### Added`, `### Changed`, `### Fixed`, `### Removed`
-   - Include the PR number/link and Linear issue identifier (e.g., `CYPACK-123`)
-   - Focus on end-user impact, not implementation details
-   - For internal-only changes, update `CHANGELOG.internal.md` instead
+4. Record anything durable you learned where it will actually be re-read. This repo
+   keeps no changelog — git history is the log, and it is better at it.
+   - An invariant that causes silent breakage → `agent-docs/dev-gotchas.md`
+   - A decision, and why it beat the alternative → `docs/adr/`
+   - Anything derivable from the diff (file lists, symbol inventories, test
+     manifests) → nowhere; `git log -p` already has it
 5. Issue your pull request
 
 ## Testing

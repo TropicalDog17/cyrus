@@ -98,9 +98,9 @@ pnpm lint
 # optional: pnpm build
 ```
 
-Update `CHANGELOG.md` (`## [Unreleased]`) for user-facing changes, or
-`CHANGELOG.internal.md` for internal-only work. Include PR link and Linear issue
-id. End-user impact only in the public changelog.
+There is no changelog to update — git history is the log. Durable findings go to
+`agent-docs/dev-gotchas.md` (invariants) or `docs/adr/` (decisions). See
+`core-conventions`.
 
 ## Dependency security
 

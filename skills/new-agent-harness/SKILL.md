@@ -40,7 +40,7 @@ Paste into your response and check off as you go:
    events are not mapped, Linear timeline action/file-edit visibility is lost.
 5. Validate with package tests and an F1 drive (`f1-test-drive`) covering
    label selection, description selectors, tool visibility, and final response.
-6. Ship via `verify-and-ship` (changelog, checks, PR).
+6. Ship via `verify-and-ship` (checks, PR).
 
 ## Key references
 
