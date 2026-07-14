@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	exportTranscriptToLangfuse,
+	findSubagentTranscripts,
 	type LangfuseConfig,
 	type LangfuseLike,
 	resolveLangfuseConfig,
@@ -113,23 +114,41 @@ describe("resolveTraceVersion", () => {
 	});
 });
 
-/** Records every call to the fake Langfuse client for assertions. */
+/**
+ * Records every call to the fake Langfuse client for assertions.
+ *
+ * The trace-client methods deliberately reproduce the real SDK's behavior of
+ * *overwriting* `parentObservationId` with the client's own `observationId`
+ * (`null` on a trace client) — see `LangfuseObjectClient` in langfuse-core. If
+ * the exporter ever routes a nested observation back through `trace.generation()`
+ * instead of the root `client.generation()`, the parent link is silently lost;
+ * modelling the overwrite here is what makes the nesting tests able to catch it.
+ */
 function makeFakeClient(): { client: LangfuseLike; calls: unknown[] } {
 	const calls: unknown[] = [];
+	const viaTraceClient = (kind: string) => (body: Record<string, unknown>) => {
+		calls.push({
+			kind,
+			body: { ...body, parentObservationId: null, traceId: "from-trace" },
+		});
+	};
 	const client: LangfuseLike = {
 		trace(body) {
 			calls.push({ kind: "trace", body });
 			return {
-				generation(body) {
-					calls.push({ kind: "generation", body });
-				},
-				span(body) {
-					calls.push({ kind: "span", body });
-				},
-				event(body) {
-					calls.push({ kind: "event", body });
-				},
+				generation: viaTraceClient("generation"),
+				span: viaTraceClient("span"),
+				event: viaTraceClient("event"),
 			};
+		},
+		generation(body) {
+			calls.push({ kind: "generation", body });
+		},
+		span(body) {
+			calls.push({ kind: "span", body });
+		},
+		event(body) {
+			calls.push({ kind: "event", body });
 		},
 		async flushAsync() {
 			calls.push({ kind: "flush" });
@@ -211,7 +230,14 @@ describe("exportTranscriptToLangfuse", () => {
 			clientFactory: () => client,
 		});
 
-		expect(result).toEqual({ generations: 1, toolSpans: 1, compactions: 0 });
+		expect(result).toEqual({
+			generations: 1,
+			toolSpans: 1,
+			compactions: 0,
+			subagents: 0,
+			subagentGenerations: 0,
+			subagentToolSpans: 0,
+		});
 		const generations = calls.filter(
 			(c) => (c as { kind: string }).kind === "generation",
 		);
@@ -419,7 +445,14 @@ describe("exportTranscriptToLangfuse", () => {
 		});
 
 		// One turn, one tool span — NOT three generations.
-		expect(result).toEqual({ generations: 1, toolSpans: 1, compactions: 0 });
+		expect(result).toEqual({
+			generations: 1,
+			toolSpans: 1,
+			compactions: 0,
+			subagents: 0,
+			subagentGenerations: 0,
+			subagentToolSpans: 0,
+		});
 		const generations = calls.filter(
 			(c) => (c as { kind: string }).kind === "generation",
 		);
@@ -487,7 +520,14 @@ describe("exportTranscriptToLangfuse", () => {
 			clientFactory: () => client,
 		});
 
-		expect(result).toEqual({ generations: 1, toolSpans: 0, compactions: 1 });
+		expect(result).toEqual({
+			generations: 1,
+			toolSpans: 0,
+			compactions: 1,
+			subagents: 0,
+			subagentGenerations: 0,
+			subagentToolSpans: 0,
+		});
 		const events = calls.filter(
 			(c) => (c as { kind: string }).kind === "event",
 		);
@@ -738,9 +778,9 @@ describe("exportTranscriptToLangfuse", () => {
 	});
 });
 
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 const tmpDir = mkdtempSync(join(tmpdir(), "langfuse-export-test-"));
 let fileCounter = 0;
@@ -749,3 +789,484 @@ function writeTempTranscript(content: string): string {
 	writeFileSync(path, content, "utf8");
 	return path;
 }
+
+/**
+ * Write a subagent transcript into the location Claude Code actually uses:
+ * `<transcript-without-.jsonl>/subagents/agent-<agentId>.jsonl`.
+ */
+function writeTempSubagent(
+	transcriptPath: string,
+	agentId: string,
+	content: string,
+): void {
+	const dir = join(
+		dirname(transcriptPath),
+		basename(transcriptPath, ".jsonl"),
+		"subagents",
+	);
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, `agent-${agentId}.jsonl`), content, "utf8");
+}
+
+/** The main-thread half of a delegating session: one Agent call + its result. */
+function delegatingMainTranscript(agentId: string): string {
+	return transcript([
+		JSON.stringify({
+			type: "user",
+			uuid: "u1",
+			timestamp: "2026-07-08T10:00:00.000Z",
+			message: { role: "user", content: "where does auth live?" },
+		}),
+		JSON.stringify({
+			type: "assistant",
+			uuid: "a1",
+			timestamp: "2026-07-08T10:00:01.000Z",
+			message: {
+				id: "msg-main",
+				role: "assistant",
+				model: "claude-opus-4-8",
+				content: [
+					{
+						type: "tool_use",
+						id: "toolu-agent-1",
+						name: "Agent",
+						input: { subagent_type: "Explore", prompt: "find auth" },
+					},
+				],
+				usage: { input_tokens: 10, output_tokens: 5 },
+			},
+		}),
+		JSON.stringify({
+			type: "user",
+			uuid: "u2",
+			timestamp: "2026-07-08T10:00:30.000Z",
+			message: {
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: "toolu-agent-1",
+						content: [
+							{
+								type: "text",
+								text: `Async agent launched successfully.\nagentId: ${agentId} (internal ID - do not mention to user.`,
+							},
+						],
+					},
+				],
+			},
+		}),
+	]);
+}
+
+/** A subagent's own transcript: one turn that burns real tokens + one tool call. */
+const SUBAGENT_TRANSCRIPT = transcript([
+	JSON.stringify({
+		type: "user",
+		uuid: "su1",
+		isSidechain: true,
+		timestamp: "2026-07-08T10:00:02.000Z",
+		message: { role: "user", content: "find auth" },
+	}),
+	JSON.stringify({
+		type: "assistant",
+		uuid: "sa1",
+		isSidechain: true,
+		timestamp: "2026-07-08T10:00:20.000Z",
+		message: {
+			id: "msg-sub-1",
+			role: "assistant",
+			model: "claude-opus-4-8",
+			content: [
+				{
+					type: "tool_use",
+					id: "toolu-sub-grep",
+					name: "Grep",
+					input: { pattern: "auth" },
+				},
+			],
+			// The whole point: this usage exists nowhere in the main transcript.
+			usage: {
+				input_tokens: 500,
+				cache_read_input_tokens: 90_000,
+				cache_creation_input_tokens: 2_000,
+				output_tokens: 300,
+			},
+		},
+	}),
+]);
+
+describe("subagent transcripts", () => {
+	it("returns no subagents for a session that never delegated", () => {
+		const transcriptPath = writeTempTranscript("");
+		expect(findSubagentTranscripts(transcriptPath)).toEqual([]);
+	});
+
+	it("discovers subagent transcripts by their on-disk agent id", () => {
+		const transcriptPath = writeTempTranscript("");
+		writeTempSubagent(transcriptPath, "a379cd62836b5edec", SUBAGENT_TRANSCRIPT);
+		expect(findSubagentTranscripts(transcriptPath)).toEqual([
+			{
+				agentId: "a379cd62836b5edec",
+				path: expect.stringContaining("agent-a379cd62836b5edec.jsonl"),
+			},
+		]);
+	});
+
+	it("exports subagent turns — the tokens the main transcript never sees", async () => {
+		const { client, calls } = makeFakeClient();
+		const agentId = "a379cd62836b5edec";
+		const transcriptPath = writeTempTranscript(
+			delegatingMainTranscript(agentId),
+		);
+		writeTempSubagent(transcriptPath, agentId, SUBAGENT_TRANSCRIPT);
+
+		const result = await exportTranscriptToLangfuse({
+			transcriptPath,
+			sessionId: "sess-delegating",
+			config: CONFIG,
+			clientFactory: () => client,
+		});
+
+		// Main thread: 1 turn, 1 tool call (the Agent call itself).
+		// Subagent: 1 turn, 1 tool call — counted separately, not silently dropped.
+		expect(result).toEqual({
+			generations: 1,
+			toolSpans: 1,
+			compactions: 0,
+			subagents: 1,
+			subagentGenerations: 1,
+			subagentToolSpans: 1,
+		});
+
+		const generations = calls.filter(
+			(c) => (c as { kind: string }).kind === "generation",
+		) as { body: Record<string, unknown> }[];
+		const sub = generations.find((g) => g.body.id === "gen-msg-sub-1");
+
+		// The subagent's usage must reach Langfuse, or a delegating session looks
+		// far cheaper than it is.
+		expect(sub?.body).toMatchObject({
+			name: "subagent-turn",
+			model: "claude-opus-4-8",
+			usageDetails: {
+				input: 500,
+				cache_read_input_tokens: 90_000,
+				cache_creation_input_tokens: 2_000,
+				output: 300,
+			},
+			metadata: { subagent: true, agentId },
+		});
+	});
+
+	it("nests subagent observations under the Agent tool span that spawned them", async () => {
+		const { client, calls } = makeFakeClient();
+		const agentId = "a379cd62836b5edec";
+		const transcriptPath = writeTempTranscript(
+			delegatingMainTranscript(agentId),
+		);
+		writeTempSubagent(transcriptPath, agentId, SUBAGENT_TRANSCRIPT);
+
+		await exportTranscriptToLangfuse({
+			transcriptPath,
+			sessionId: "sess-nesting",
+			config: CONFIG,
+			clientFactory: () => client,
+		});
+
+		const bodyById = (kind: string, id: string) =>
+			(
+				calls.find(
+					(c) =>
+						(c as { kind: string; body?: { id?: string } }).kind === kind &&
+						(c as { body?: { id?: string } }).body?.id === id,
+				) as { body: Record<string, unknown> } | undefined
+			)?.body;
+
+		// The spawn link is recovered from `agentId:` in the Agent tool_result.
+		expect(bodyById("generation", "gen-msg-sub-1")?.parentObservationId).toBe(
+			"tool-toolu-agent-1",
+		);
+		expect(bodyById("span", "tool-toolu-sub-grep")?.parentObservationId).toBe(
+			"tool-toolu-agent-1",
+		);
+		// Main-thread turns stay at the trace root.
+		expect(
+			bodyById("generation", "gen-msg-main")?.parentObservationId,
+		).toBeUndefined();
+	});
+
+	it("nests a SYNC-spawned subagent, whose tool result carries no agentId", async () => {
+		// The common case: the Agent tool returns the subagent's finished report,
+		// not a launch receipt, so there is no `agentId:` to match on. Matching by
+		// id alone left these unparented — the subagent ran inside the Agent call's
+		// window, so fall back to that.
+		const { client, calls } = makeFakeClient();
+		const main = transcript([
+			JSON.stringify({
+				type: "user",
+				uuid: "u1",
+				timestamp: "2026-07-08T10:00:00.000Z",
+				message: { role: "user", content: "where does auth live?" },
+			}),
+			JSON.stringify({
+				type: "assistant",
+				uuid: "a1",
+				timestamp: "2026-07-08T10:00:01.000Z",
+				message: {
+					id: "msg-main",
+					role: "assistant",
+					model: "claude-opus-4-8",
+					content: [
+						{
+							type: "tool_use",
+							id: "toolu-sync-1",
+							name: "Agent",
+							input: { subagent_type: "Explore" },
+						},
+					],
+					usage: { input_tokens: 10, output_tokens: 5 },
+				},
+			}),
+			JSON.stringify({
+				type: "user",
+				uuid: "u2",
+				timestamp: "2026-07-08T10:00:30.000Z",
+				message: {
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: "toolu-sync-1",
+							// A finished report — no agentId anywhere.
+							content: [
+								{ type: "text", text: "## Report\nAuth lives in auth.ts:42" },
+							],
+						},
+					],
+				},
+			}),
+		]);
+		const transcriptPath = writeTempTranscript(main);
+		// Subagent transcript opens inside the Agent call's window (01s..30s).
+		writeTempSubagent(transcriptPath, "syncagent01", SUBAGENT_TRANSCRIPT);
+
+		const result = await exportTranscriptToLangfuse({
+			transcriptPath,
+			sessionId: "sess-sync",
+			config: CONFIG,
+			clientFactory: () => client,
+		});
+
+		expect(result.subagentGenerations).toBe(1);
+		const gen = calls.find(
+			(c) =>
+				(c as { kind: string; body?: { id?: string } }).kind === "generation" &&
+				(c as { body?: { id?: string } }).body?.id === "gen-msg-sub-1",
+		) as { body: Record<string, unknown> };
+		expect(gen.body.parentObservationId).toBe("tool-toolu-sync-1");
+	});
+
+	it("leaves a subagent unlinked rather than guessing when the window is ambiguous", async () => {
+		// Two concurrent Agent calls, neither naming an agentId: a wrong parent is
+		// worse than none, so it stays at the trace root (still fully costed).
+		const { client, calls } = makeFakeClient();
+		const main = transcript([
+			JSON.stringify({
+				type: "user",
+				uuid: "u1",
+				timestamp: "2026-07-08T10:00:00.000Z",
+				message: { role: "user", content: "go" },
+			}),
+			JSON.stringify({
+				type: "assistant",
+				uuid: "a1",
+				timestamp: "2026-07-08T10:00:01.000Z",
+				message: {
+					id: "msg-main",
+					role: "assistant",
+					model: "claude-opus-4-8",
+					content: [
+						{ type: "tool_use", id: "toolu-p1", name: "Agent", input: {} },
+						{ type: "tool_use", id: "toolu-p2", name: "Agent", input: {} },
+					],
+					usage: { input_tokens: 10, output_tokens: 5 },
+				},
+			}),
+			JSON.stringify({
+				type: "user",
+				uuid: "u2",
+				timestamp: "2026-07-08T10:00:30.000Z",
+				message: {
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: "toolu-p1",
+							content: "report A",
+						},
+						{
+							type: "tool_result",
+							tool_use_id: "toolu-p2",
+							content: "report B",
+						},
+					],
+				},
+			}),
+		]);
+		const transcriptPath = writeTempTranscript(main);
+		writeTempSubagent(transcriptPath, "ambiguous01", SUBAGENT_TRANSCRIPT);
+
+		const result = await exportTranscriptToLangfuse({
+			transcriptPath,
+			sessionId: "sess-ambiguous",
+			config: CONFIG,
+			clientFactory: () => client,
+		});
+
+		// Still exported and costed — just not parented.
+		expect(result.subagentGenerations).toBe(1);
+		const gen = calls.find(
+			(c) =>
+				(c as { kind: string; body?: { id?: string } }).kind === "generation" &&
+				(c as { body?: { id?: string } }).body?.id === "gen-msg-sub-1",
+		) as { body: Record<string, unknown> };
+		expect(gen.body.parentObservationId).toBeUndefined();
+	});
+
+	it("still exports a subagent whose spawning Agent call cannot be matched", async () => {
+		// Defensive: if the tool_result text ever stops carrying `agentId:`, the
+		// tokens must still be reported — orphaned at the trace root, not dropped.
+		const { client } = makeFakeClient();
+		const transcriptPath = writeTempTranscript(
+			delegatingMainTranscript("some-other-id"),
+		);
+		writeTempSubagent(transcriptPath, "unmatched-agent", SUBAGENT_TRANSCRIPT);
+
+		const result = await exportTranscriptToLangfuse({
+			transcriptPath,
+			sessionId: "sess-orphan",
+			config: CONFIG,
+			clientFactory: () => client,
+		});
+
+		expect(result.subagents).toBe(1);
+		expect(result.subagentGenerations).toBe(1);
+	});
+});
+
+/** Build a one-turn transcript whose single assistant turn carries `usage`. */
+function turnWithUsage(usage: Record<string, unknown>): string {
+	return transcript([
+		JSON.stringify({
+			type: "user",
+			uuid: "u1",
+			timestamp: "2026-07-08T10:00:00.000Z",
+			message: { role: "user", content: "go" },
+		}),
+		JSON.stringify({
+			type: "assistant",
+			uuid: "a1",
+			timestamp: "2026-07-08T10:00:01.000Z",
+			message: {
+				id: "msg-ttl",
+				role: "assistant",
+				model: "claude-opus-4-8",
+				content: [{ type: "text", text: "done" }],
+				usage,
+			},
+		}),
+	]);
+}
+
+async function usageDetailsFor(
+	usage: Record<string, unknown>,
+): Promise<Record<string, number>> {
+	const { client, calls } = makeFakeClient();
+	await exportTranscriptToLangfuse({
+		transcriptPath: writeTempTranscript(turnWithUsage(usage)),
+		sessionId: `sess-ttl-${fileCounter}`,
+		config: CONFIG,
+		clientFactory: () => client,
+	});
+	const gen = calls.find(
+		(c) => (c as { kind: string }).kind === "generation",
+	) as { body: { usageDetails: Record<string, number> } };
+	return gen.body.usageDetails;
+}
+
+/**
+ * Anthropic bills a 1-hour cache write at 2x base and a 5-minute write at 1.25x.
+ * Langfuse prices those under separate usage keys; its flat
+ * `cache_creation_input_tokens` key is the 5-minute rate. Cyrus writes 1-hour
+ * cache almost exclusively, so reporting the flat key charged cache writes at
+ * 62.5% of their real cost.
+ */
+describe("cache-write TTL pricing", () => {
+	it("reports a 1-hour cache write under the 1h key, not the flat (5m-priced) one", async () => {
+		const details = await usageDetailsFor({
+			input_tokens: 2_766,
+			cache_creation_input_tokens: 32_040,
+			cache_read_input_tokens: 0,
+			output_tokens: 826,
+			cache_creation: {
+				ephemeral_1h_input_tokens: 32_040,
+				ephemeral_5m_input_tokens: 0,
+			},
+		});
+
+		expect(details.input_cache_creation_1h).toBe(32_040);
+		// The flat key is priced at the 5m rate — emitting it here would undercharge.
+		expect(details).not.toHaveProperty("cache_creation_input_tokens");
+	});
+
+	it("splits a mixed-TTL turn across both keys without double-counting", async () => {
+		const details = await usageDetailsFor({
+			input_tokens: 10,
+			cache_creation_input_tokens: 1_000,
+			cache_read_input_tokens: 0,
+			output_tokens: 5,
+			cache_creation: {
+				ephemeral_1h_input_tokens: 700,
+				ephemeral_5m_input_tokens: 300,
+			},
+		});
+
+		expect(details.input_cache_creation_1h).toBe(700);
+		expect(details.input_cache_creation_5m).toBe(300);
+		// Each key is priced independently — a token counted twice is billed twice.
+		const written =
+			(details.input_cache_creation_1h ?? 0) +
+			(details.input_cache_creation_5m ?? 0) +
+			(details.cache_creation_input_tokens ?? 0);
+		expect(written).toBe(1_000);
+	});
+
+	it("falls back to the flat key when the transcript records no TTL breakdown", async () => {
+		const details = await usageDetailsFor({
+			input_tokens: 10,
+			cache_creation_input_tokens: 500,
+			cache_read_input_tokens: 0,
+			output_tokens: 5,
+		});
+
+		expect(details.cache_creation_input_tokens).toBe(500);
+		expect(details).not.toHaveProperty("input_cache_creation_1h");
+	});
+
+	it("attributes an unexplained remainder to the flat key rather than guessing a TTL", async () => {
+		const details = await usageDetailsFor({
+			input_tokens: 10,
+			cache_creation_input_tokens: 1_000,
+			cache_read_input_tokens: 0,
+			output_tokens: 5,
+			cache_creation: {
+				ephemeral_1h_input_tokens: 600,
+				ephemeral_5m_input_tokens: 0,
+			},
+		});
+
+		expect(details.input_cache_creation_1h).toBe(600);
+		expect(details.cache_creation_input_tokens).toBe(400);
+	});
+});

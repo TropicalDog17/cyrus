@@ -30,6 +30,7 @@ const EDGE_CONFIG: EdgeConfig = {
 	claudeDefaultModel: "sonnet",
 	claudeDefaultFallbackModel: "haiku",
 	claudeAutoCompactWindow: 120_000,
+	claudeSubagentModel: "haiku",
 	claudeSessionKeepAliveMinutes: 30,
 	claudeMaxWarmIdleSessions: 4,
 	askUserQuestionTimeoutMinutes: 45,

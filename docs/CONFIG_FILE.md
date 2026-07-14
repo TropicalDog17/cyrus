@@ -437,6 +437,22 @@ When omitted, the SDK's default (model-context-sized) behavior is preserved and 
 
 **Valid range: `100000` to `1000000`.** Claude Code silently discards a window outside that range, so the session would compact at the model's native window as though the setting were never there. Cyrus now ignores an out-of-range value and logs a warning rather than letting it look effective.
 
+### `claudeSubagentModel` (string)
+
+Model used by the read-only `explore` subagent, which the agent can hand broad codebase searches to instead of reading every candidate file into the main conversation. Accepts a model alias (`haiku`, `sonnet`, `opus`) or a full model id. Applies to all repositories; Claude runner only.
+
+```json
+{
+  "claudeSubagentModel": "haiku"
+}
+```
+
+Delegating a search is not automatically cheaper. A subagent accumulates and re-sends *its own* context on every turn, exactly like the main session does, so a subagent that inherits the session's model (Opus) largely **moves** the cost rather than removing it — on traced sessions, the subagents' own re-reads were the bulk of what they cost. What makes delegation pay is running that work on a cheaper model: Opus 4.8 re-reads cached context at $0.50 per million tokens, against Haiku 4.5's $0.10.
+
+The trade-off is quality: the explorer is what finds the code, and a weaker model can miss things or misreport where something lives. It is restricted to reading and searching (`Read`, `Grep`, `Glob`) and cannot edit, and the agent is told to read files it is about to change directly rather than trusting a summary — but if you see it acting on bad reconnaissance, move it up to `sonnet` or remove the setting.
+
+When omitted, no `explore` agent is registered and delegation falls back to the built-in agents, which inherit the session's model — i.e. omitting it is exactly the previous behavior.
+
 ### `claudeSessionKeepAliveMinutes` (number)
 
 How long a finished Claude session stays alive waiting for a follow-up comment before shutting down. Defaults to `50`; set `0` to disable. Claude runner only (Cursor manages its own session lifetime).

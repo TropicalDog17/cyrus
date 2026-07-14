@@ -62,6 +62,21 @@ export interface ClaudeRunnerConfig extends AgentRunnerConfig {
 	 */
 	autoCompactWindow?: number;
 	/**
+	 * Model for the read-only `explore` subagent Cyrus registers (an alias like
+	 * `haiku` / `sonnet`, or a full model id). When unset, no such agent is
+	 * registered and delegation falls back to the SDK's built-in agents, which
+	 * inherit the session model.
+	 *
+	 * Why this knob exists: a subagent accumulates and re-sends its own context
+	 * every turn, exactly like the main thread, so delegated reconnaissance is
+	 * not free — on traced sessions the subagents' own cache reads dominate their
+	 * cost. Delegating to an agent that inherits Opus therefore *moves* spend
+	 * rather than reducing it. Pinning reconnaissance to a cheaper model is what
+	 * makes delegation pay: on Opus 4.8 vs Haiku 4.5, cache reads are $0.50/Mtok
+	 * vs $0.10/Mtok — the same sweep for a fifth of the price.
+	 */
+	subagentModel?: string;
+	/**
 	 * How long (in ms) to keep the streaming session alive after a turn ends,
 	 * waiting for a follow-up message. A positive value implies
 	 * `keepSessionWarm`. When the window elapses with no new message the prompt

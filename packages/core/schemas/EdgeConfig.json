@@ -532,6 +532,9 @@
 			"exclusiveMinimum": 0,
 			"maximum": 9007199254740991
 		},
+		"claudeSubagentModel": {
+			"type": "string"
+		},
 		"claudeSessionKeepAliveMinutes": {
 			"type": "integer",
 			"minimum": 0,

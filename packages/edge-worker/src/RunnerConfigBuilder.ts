@@ -90,6 +90,13 @@ export interface IssueRunnerConfigInput {
 	 */
 	autoCompactWindow?: number;
 	/**
+	 * Model for the read-only `explore` subagent
+	 * (`EdgeWorkerConfig.claudeSubagentModel`). Claude runner only; ignored for
+	 * Cursor. Undefined registers no such agent, leaving the SDK's built-in
+	 * agents (which inherit the session model) in place.
+	 */
+	subagentModel?: string;
+	/**
 	 * Idle window (ms) a finished Claude session stays alive waiting for a
 	 * follow-up, derived from `EdgeWorkerConfig.claudeSessionKeepAliveMinutes`.
 	 * Claude runner only; ignored for Cursor. Undefined or `0` shuts the session
@@ -359,6 +366,12 @@ export class RunnerConfigBuilder {
 		// its own context, so this is a no-op there and intentionally not set.
 		if (runnerType === "claude" && input.autoCompactWindow !== undefined) {
 			config.autoCompactWindow = input.autoCompactWindow;
+		}
+
+		// Claude-only: forward the explore-subagent model. Cursor has no
+		// equivalent agent registration, so this is not set there.
+		if (runnerType === "claude" && input.subagentModel !== undefined) {
+			config.subagentModel = input.subagentModel;
 		}
 
 		// Claude-only: forward the idle keep-alive window. Cursor owns its own

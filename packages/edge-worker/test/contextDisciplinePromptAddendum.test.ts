@@ -14,6 +14,20 @@ describe("context-discipline prompt addendum", () => {
 		expect(CONTEXT_DISCIPLINE_PROMPT_ADDENDUM).toMatch(/scoped issues/i);
 	});
 
+	it("directs broad file sweeps to the Agent tool rather than the main thread", () => {
+		// The tool is named `Agent` in the current SDK — the older `Task` name would
+		// point the model at a tool that does not exist.
+		expect(CONTEXT_DISCIPLINE_PROMPT_ADDENDUM).toMatch(/\bAgent tool\b/);
+		expect(CONTEXT_DISCIPLINE_PROMPT_ADDENDUM).not.toMatch(/\bTask tool\b/);
+		expect(CONTEXT_DISCIPLINE_PROMPT_ADDENDUM).toMatch(/file:line/);
+		// Delegation is scoped to reconnaissance; files being edited are read directly.
+		expect(CONTEXT_DISCIPLINE_PROMPT_ADDENDUM).toMatch(
+			/Read directly the files you are about to edit/,
+		);
+		// Post-compact recovery is the case plain re-read discipline misses.
+		expect(CONTEXT_DISCIPLINE_PROMPT_ADDENDUM).toMatch(/auto-compact/);
+	});
+
 	it("frames the guidance as avoiding wasted work, not cutting corners", () => {
 		expect(CONTEXT_DISCIPLINE_PROMPT_ADDENDUM).toMatch(/wasted/i);
 		expect(CONTEXT_DISCIPLINE_PROMPT_ADDENDUM).toMatch(

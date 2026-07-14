@@ -843,6 +843,10 @@ export class SessionOrchestrator {
 				config.claudeAutoCompactWindow,
 				this.deps.logger,
 			),
+			// Model for the read-only `explore` subagent (Claude runner only).
+			// Unset registers no such agent, so delegation keeps inheriting the
+			// session model — today's behavior.
+			subagentModel: config.claudeSubagentModel,
 			// Idle keep-alive window (Claude runner only). Keeps a finished session
 			// alive briefly so a follow-up comment appends to the live conversation
 			// rather than resuming — a resume re-writes the whole transcript to the

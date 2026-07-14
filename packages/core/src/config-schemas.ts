@@ -412,6 +412,23 @@ export const EdgeConfigSchema = z.object({
 	claudeAutoCompactWindow: z.number().int().positive().optional(),
 
 	/**
+	 * Model for the read-only `explore` subagent Cyrus registers (an alias like
+	 * `haiku` / `sonnet`, or a full model id). Claude runner only.
+	 *
+	 * Delegating a broad file sweep to a subagent keeps the main conversation
+	 * small, but it is not free: a subagent re-sends its own accumulated context
+	 * every turn just like the main thread, so an agent that inherits the session
+	 * model (Opus) *moves* the cost rather than removing it. Pinning
+	 * reconnaissance to a cheaper model is what makes delegation pay — Opus 4.8
+	 * cache reads are $0.50/Mtok against Haiku 4.5's $0.10/Mtok.
+	 *
+	 * When unset, no `explore` agent is registered and delegation falls back to
+	 * the SDK's built-in agents (which inherit the session model) — i.e. unset is
+	 * exactly today's behavior.
+	 */
+	claudeSubagentModel: z.string().optional(),
+
+	/**
 	 * How long (in minutes) a finished Claude session stays alive waiting for a
 	 * follow-up comment before it shuts down. Defaults to
 	 * {@link DEFAULT_CLAUDE_SESSION_KEEP_ALIVE_MINUTES}; set `0` to disable.
