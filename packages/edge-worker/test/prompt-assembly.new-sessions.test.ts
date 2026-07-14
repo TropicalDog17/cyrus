@@ -4,6 +4,7 @@
  * Tests prompt assembly for new (initial) sessions with full issue context.
  */
 
+import type { IIssueTrackerService } from "cyrus-core";
 import { describe, it } from "vitest";
 import { createTestWorker, scenario } from "./prompt-assembly-utils.js";
 
@@ -179,6 +180,162 @@ Choose the appropriate skill based on the context:
 Analyze the issue description, labels, and any user comments to determine which workflow fits. Do NOT skip the verify-and-ship step if you made code changes — it ensures quality checks pass and a PR is created.`)
 			.expectPromptType("fallback")
 			.expectComponents("issue-context", "user-comment")
+			.verify();
+	});
+
+	it("excludes the active routing thread and orders retained comments chronologically", async () => {
+		const worker = createTestWorker();
+		const repository = {
+			id: "repo-routing-context",
+			name: "routing-context",
+			path: "/test/repo",
+		};
+		const olderRootTime = new Date("2026-07-14T10:00:00.000Z");
+		const olderReplyTime = new Date("2026-07-14T10:01:00.000Z");
+		const newerReplyTime = new Date("2026-07-14T10:02:00.000Z");
+		const newerRootTime = new Date("2026-07-14T10:03:00.000Z");
+
+		worker.issueTrackers.set(repository.id, {
+			fetchComments: async () => ({
+				nodes: [
+					{
+						id: "newer-root",
+						body: "Newer context",
+						createdAt: newerRootTime,
+						parent: Promise.resolve(null),
+						user: Promise.resolve({ displayName: "Bob" }),
+					},
+					{
+						id: "routing-selection",
+						body: "git@github.com:example/repo",
+						createdAt: newerReplyTime,
+						parent: Promise.resolve({ id: "routing-root" }),
+						user: Promise.resolve({ displayName: "Alice" }),
+					},
+					{
+						id: "older-root",
+						body: "Older context",
+						createdAt: olderRootTime,
+						parent: Promise.resolve(null),
+						user: Promise.resolve({ displayName: "Alice" }),
+					},
+					{
+						id: "newer-reply",
+						body: "Second detail",
+						createdAt: newerReplyTime,
+						parent: Promise.resolve({ id: "older-root" }),
+						user: Promise.resolve({ displayName: "Bob" }),
+					},
+					{
+						id: "routing-root",
+						body: "This thread is for an agent session with cyrusagent.",
+						createdAt: olderReplyTime,
+						parent: Promise.resolve(null),
+						user: Promise.resolve(null),
+					},
+					{
+						id: "older-reply",
+						body: "First detail",
+						createdAt: olderReplyTime,
+						parent: Promise.resolve({ id: "older-root" }),
+						user: Promise.resolve({ displayName: "Alice" }),
+					},
+					{
+						id: "routing-question",
+						body: "Which repository should I work in?",
+						createdAt: olderReplyTime,
+						parent: Promise.resolve({ id: "routing-root" }),
+						user: Promise.resolve({ displayName: "cyrusagent" }),
+					},
+				],
+			}),
+			fetchComment: async () => ({ user: Promise.resolve(null), body: "" }),
+			fetchTeams: async () => ({ nodes: [] }),
+			fetchLabels: async () => ({ nodes: [] }),
+		} as unknown as IIssueTrackerService);
+
+		await scenario(worker)
+			.newSession()
+			.assignmentBased()
+			.withSession({
+				issueId: "issue-routing-context",
+				workspace: { path: "/test/repo" },
+				metadata: {},
+			})
+			.withIssue({
+				id: "issue-routing-context",
+				identifier: "CEE-789",
+				title: "Keep routing out of the prompt",
+				description: "Use only task-relevant comments",
+			})
+			.withRepository(repository)
+			.withAgentSession({ comment: { id: "routing-root" } })
+			.withUserComment("")
+			.withLabels()
+			.expectUserPrompt(`<context>
+  <repository>routing-context</repository>
+  <working_directory>/test/repo</working_directory>
+  <base_branch>main</base_branch>
+</context>
+
+<linear_issue>
+  <id>issue-routing-context</id>
+  <identifier>CEE-789</identifier>
+  <title>Keep routing out of the prompt</title>
+  <description>
+Use only task-relevant comments
+  </description>
+  <state>Unknown</state>
+  <priority>None</priority>
+  <url></url>
+  <assignee>
+    <linear_display_name></linear_display_name>
+    <linear_profile_url></linear_profile_url>
+    <github_username></github_username>
+    <github_user_id></github_user_id>
+    <github_noreply_email></github_noreply_email>
+  </assignee>
+</linear_issue>
+
+<linear_comments>
+<comment_thread>
+	<root_comment>
+		<author>@Alice</author>
+		<timestamp>${olderRootTime.toLocaleString()}</timestamp>
+		<content>
+Older context
+		</content>
+	</root_comment>
+  <replies>
+		<reply>
+			<author>@Alice</author>
+			<timestamp>${olderReplyTime.toLocaleString()}</timestamp>
+			<content>
+First detail
+			</content>
+		</reply>
+		<reply>
+			<author>@Bob</author>
+			<timestamp>${newerReplyTime.toLocaleString()}</timestamp>
+			<content>
+Second detail
+			</content>
+		</reply>
+  </replies>
+</comment_thread>
+
+<comment_thread>
+	<root_comment>
+		<author>@Bob</author>
+		<timestamp>${newerRootTime.toLocaleString()}</timestamp>
+		<content>
+Newer context
+		</content>
+	</root_comment>
+</comment_thread>
+</linear_comments>`)
+			.expectPromptType("fallback")
+			.expectComponents("issue-context")
 			.verify();
 	});
 });

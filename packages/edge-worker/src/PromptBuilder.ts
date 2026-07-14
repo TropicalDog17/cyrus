@@ -756,6 +756,7 @@ Focus on addressing the specific request in the mention. You can use the Linear 
 		guidance?: GuidanceRule[],
 		resolvedBaseBranches?: Record<string, BaseBranchResolution>,
 		workspaceRepoPaths?: Record<string, string>,
+		excludedCommentThreadId?: string,
 	): Promise<PromptResult> {
 		const repository = repositories[0]!;
 		this.logger.debug(
@@ -815,7 +816,10 @@ Focus on addressing the specific request in the mention. You can use the Linear 
 
 					const commentNodes = comments.nodes;
 					if (commentNodes.length > 0) {
-						commentThreads = await this.formatCommentThreads(commentNodes);
+						commentThreads = await this.formatCommentThreads(
+							commentNodes,
+							excludedCommentThreadId,
+						);
 						this.logger.debug(
 							`Formatted ${commentNodes.length} comments into threads`,
 						);
@@ -1099,8 +1103,31 @@ ${newComment ? `New comment to address:\n${newComment.body}\n\n` : ""}Please ana
 	 * @param comments Array of Linear comments
 	 * @returns Formatted string showing comment threads
 	 */
-	async formatCommentThreads(comments: Comment[]): Promise<string> {
+	async formatCommentThreads(
+		comments: Comment[],
+		excludedThreadId?: string,
+	): Promise<string> {
 		if (comments.length === 0) {
+			return "No comments yet.";
+		}
+
+		const commentsWithParents = await Promise.all(
+			[...comments]
+				.sort(
+					(a, b) =>
+						new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+				)
+				.map(async (comment) => ({
+					comment,
+					parent: await comment.parent,
+				})),
+		);
+		const visibleComments = commentsWithParents.filter(
+			({ comment, parent }) =>
+				comment.id !== excludedThreadId && parent?.id !== excludedThreadId,
+		);
+
+		if (visibleComments.length === 0) {
 			return "No comments yet.";
 		}
 
@@ -1109,8 +1136,7 @@ ${newComment ? `New comment to address:\n${newComment.body}\n\n` : ""}Please ana
 		const rootComments: Comment[] = [];
 
 		// First pass: identify root comments and create thread structure
-		for (const comment of comments) {
-			const parent = await comment.parent;
+		for (const { comment, parent } of visibleComments) {
 			if (!parent) {
 				// This is a root comment
 				rootComments.push(comment);
@@ -1119,8 +1145,7 @@ ${newComment ? `New comment to address:\n${newComment.body}\n\n` : ""}Please ana
 		}
 
 		// Second pass: assign replies to their threads
-		for (const comment of comments) {
-			const parent = await comment.parent;
+		for (const { comment, parent } of visibleComments) {
 			if (parent?.id) {
 				const thread = threads.get(parent.id);
 				if (thread) {

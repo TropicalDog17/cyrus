@@ -282,8 +282,10 @@ export class SessionOrchestrator {
 
 		// HACK: This is required since the comment body is always populated, thus there is no other way to differentiate between the two trigger events
 		const AGENT_SESSION_MARKER = "This thread is for an agent session";
-		const isMentionTriggered =
-			commentBody && !commentBody.includes(AGENT_SESSION_MARKER);
+		const isMentionTriggered = Boolean(
+			commentBody && !commentBody.includes(AGENT_SESSION_MARKER),
+		);
+		const userComment = isMentionTriggered ? (commentBody ?? "") : "";
 		// Check if the comment contains the /label-based-prompt command
 		const isLabelBasedPromptRequested = commentBody?.includes(
 			"/label-based-prompt",
@@ -329,14 +331,14 @@ export class SessionOrchestrator {
 				fullIssue,
 				repositories,
 				repository: primaryRepo,
-				userComment: commentBody || "", // Empty for delegation, present for mentions
+				userComment,
 				attachmentManifest: attachmentResult.manifest,
 				guidance: guidance || undefined,
 				agentSession,
 				labels,
 				isNewSession: true,
 				isStreaming: false, // Not yet streaming
-				isMentionTriggered: isMentionTriggered || false,
+				isMentionTriggered,
 				isLabelBasedPromptRequested: isLabelBasedPromptRequested || false,
 				resolvedBaseBranches: sessionData.workspace.resolvedBaseBranches,
 				linearWorkspaceId,
