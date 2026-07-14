@@ -5,7 +5,7 @@ This changelog documents internal development changes, refactors, tooling update
 ## [Unreleased]
 
 ### Changed
-- Enabled pnpm's global virtual store so trusted local Git worktrees share dependency storage while retaining isolated `node_modules` trees.
+- Enabled pnpm's global virtual store so trusted local Git worktrees share dependency storage while retaining isolated `node_modules` trees. ([#36](https://github.com/TropicalDog17/cyrus/pull/36))
 
 ### Added
 - **`askUserQuestionTimeoutMinutes` config knob + AskUserQuestion one-question prompt addendum (DEV-144).** Langfuse trace audit of DEV-144 found 42% of wall clock blocked on AskUserQuestion's hardcoded 30-minute timeout and wasted turns from multi-question calls the runner rejects. New `EdgeConfigSchema.askUserQuestionTimeoutMinutes` (`z.number().int().min(0).optional()`, `0`/unset semantics: `0` ⇒ indefinite, unset ⇒ handler's 30-min default), regenerated `core/schemas/*.json`. `AskUserQuestionHandlerDeps.getTimeoutMs` re-read per question (hot-reload-aware); `questionTimeoutMsFromMinutes` pure helper; `EdgeWorker` wires `getTimeoutMs: () => questionTimeoutMsFromMinutes(this.config.askUserQuestionTimeoutMinutes)`. Tests: getter precedence/fallback/0/indefinite/per-call-read + `questionTimeoutMsFromMinutes` unit cases in `AskUserQuestionHandler.test.ts`; `WorkerService.test.ts` fixture exhaustiveness. New `askUserQuestionPromptAddendum.ts` + test, wired innermost in `RunnerConfigBuilder` `appendSystemPrompt` chain (Claude-only surface). ([#30](https://github.com/TropicalDog17/cyrus/pull/30))
