@@ -197,6 +197,21 @@ describe("SessionOrchestrator", () => {
 			expect(h.created[0].startStreaming).toHaveBeenCalledWith("USER_PROMPT");
 		});
 
+		it("omits the Linear agent-session marker from delegation prompts", async () => {
+			const { deps } = makeDeps();
+			const orch = new SessionOrchestrator(deps);
+
+			await orch.startSession({
+				...START_REQ(null),
+				commentBody: "This thread is for an agent session with cyrusagent.",
+			});
+
+			const assemblyInput = vi.mocked(deps.promptAssembler.assemble).mock
+				.calls[0]?.[0];
+			expect(assemblyInput?.userComment).toBe("");
+			expect(assemblyInput?.isMentionTriggered).toBe(false);
+		});
+
 		it("falls back to non-streaming start when the runner does not support streaming", async () => {
 			h.behavior.current.supportsStreamingInput = false;
 			h.behavior.current.startStreaming = undefined;

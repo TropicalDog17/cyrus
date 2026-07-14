@@ -354,6 +354,7 @@ ${input.userComment}
 			guidance,
 			resolvedBaseBranches,
 			workspaceRepoPaths,
+			agentSession?.comment?.id,
 		);
 	}
 }
