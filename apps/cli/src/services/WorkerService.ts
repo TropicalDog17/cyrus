@@ -182,10 +182,14 @@ export class WorkerService {
 			version: this.version,
 			repositories,
 			cyrusHome: this.cyrusHome,
+			// Leave this `undefined` when unset — never `[]`. An empty list is a
+			// configured-but-empty allow-list to every consumer downstream, and
+			// the platform default (which carries Bash/Edit/Write) would be
+			// dropped in its favour. Unset must mean "use the platform default".
 			linearAllowedTools:
 				process.env.LINEAR_ALLOWED_TOOLS?.split(",").map((t) => t.trim()) ||
 				edgeConfig.linearAllowedTools ||
-				[],
+				undefined,
 			githubAllowedTools: edgeConfig.githubAllowedTools,
 			linearMcpConfigs: edgeConfig.linearMcpConfigs,
 			githubMcpConfigs: edgeConfig.githubMcpConfigs,
