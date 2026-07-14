@@ -20,7 +20,7 @@ All notable changes to this project will be documented in this file.
 - On long-running sessions Cyrus now nudges the agent to keep its working context lean — avoiding redundant re-reads of files it already has, preferring targeted reads over whole large files, and offering to split genuinely oversized work into smaller scoped issues. This reduces wasted cost and latency without changing the quality of work. ([#18](https://github.com/TropicalDog17/cyrus/pull/18))
 
 ### Security
-- Claude's repository tool allow-list now controls the built-in tools exposed to both cold and pre-warmed sessions, and unexpected permission callbacks fail closed instead of approving every non-question tool. The hosted `Agent` delegation name is now included alongside the locally reported `Task` name. ([#32](https://github.com/TropicalDog17/cyrus/pull/32))
+- Claude now fails closed when an unexpected tool reaches the permission callback instead of approving every non-question tool. The hosted `Agent` delegation name is also included alongside the locally reported `Task` name. ([#32](https://github.com/TropicalDog17/cyrus/pull/32))
 
 ### Removed
 - **This fork runs on Linear + GitHub with Claude and Cursor executors.** The Gemini and Codex runners and the GitLab and Slack integrations have been removed. `defaultRunner` accepts `claude` (default) or `cursor`.
