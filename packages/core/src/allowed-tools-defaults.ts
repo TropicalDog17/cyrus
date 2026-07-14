@@ -37,6 +37,7 @@ export const LINEAR_DEFAULT_ALLOWED_TOOLS = [
 
 	// Execution
 	"Bash",
+	"Agent",
 	"Task",
 
 	// Web
@@ -121,6 +122,7 @@ export const READONLY_DEFAULT_ALLOWED_TOOLS = [
 	"ScheduleWakeup",
 
 	// Planning + task lifecycle
+	"Agent",
 	"Task",
 	"TaskCreate",
 	"TaskUpdate",
@@ -166,6 +168,7 @@ export const GITHUB_DEFAULT_ALLOWED_TOOLS = [
 
 	// Execution
 	"Bash",
+	"Agent",
 	"Task",
 
 	// Web
@@ -241,10 +244,10 @@ export const GITHUB_DEFAULT_ALLOWED_TOOLS = [
  * resolve teams / users / workflow statuses / labels / projects. To load or
  * drop a tool, edit this one list.
  *
- * KEEP (stay loaded via `alwaysLoad`): get_issue, list_issues, save_issue,
- * list_comments, save_comment, list_issue_statuses, get_issue_status, get_team,
- * list_teams, get_user, list_users, list_issue_labels, get_project,
- * list_projects.
+ * KEEP (stay loaded via `alwaysLoad`): get_issue, save_issue, list_comments,
+ * save_comment, get_team, list_projects. `save_issue` and `list_projects` are
+ * rare enough to defer, but the SDK only supports server-wide eager loading for
+ * remote MCP servers; pruning them here would remove them entirely.
  */
 export const LINEAR_MCP_PRUNED_TOOLS = [
 	// Attachments — Cyrus uploads via cyrus-tools `linear_upload_file` instead.
@@ -292,6 +295,15 @@ export const LINEAR_MCP_PRUNED_TOOLS = [
 	"mcp__linear__save_project",
 	// Linear's own docs search — cyrus-docs is the documentation path.
 	"mcp__linear__search_documentation",
+	// Census-confirmed unused read helpers. Pruning removes them entirely.
+	"mcp__linear__list_issues",
+	"mcp__linear__list_teams",
+	"mcp__linear__list_issue_labels",
+	"mcp__linear__list_users",
+	"mcp__linear__get_project",
+	"mcp__linear__get_issue_status",
+	"mcp__linear__get_user",
+	"mcp__linear__list_issue_statuses",
 ] as const;
 
 /**

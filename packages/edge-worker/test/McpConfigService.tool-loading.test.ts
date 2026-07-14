@@ -7,8 +7,8 @@ import {
 } from "../src/McpConfigService.js";
 
 /**
- * Verifies that McpConfigService.buildMcpConfig() marks the Linear-critical MCP
- * servers with `alwaysLoad: true` so their tools are never deferred behind the
+ * Verifies that McpConfigService.buildMcpConfig() marks only the Linear MCP
+ * server with `alwaysLoad: true` so its turn-1 tools are never deferred behind the
  * SDK's MCP tool-search auto mode. Deferral would force the agent to spend
  * ~a minute running `ToolSearch` round-trips against the remote Linear MCP on
  * turn 1 before it can read or update the issue (DEV-140 / CYPACK-716).
@@ -31,12 +31,15 @@ function makeService(): McpConfigService {
 }
 
 describe("McpConfigService — MCP tool loading", () => {
-	it("eager-loads linear and cyrus-tools so their tools are not deferred", () => {
+	it("eager-loads Linear but defers rarely-used cyrus-tools", () => {
 		const config = makeService().buildMcpConfig("repo-1", "ws-1", "session-1");
 
-		// The two servers whose tools are needed on every session load up front.
+		// Core Linear tools are needed on every session; cyrus-tools are not.
 		expect(config.linear).toMatchObject({ alwaysLoad: true });
-		expect(config["cyrus-tools"]).toMatchObject({ alwaysLoad: true });
+		expect(config["cyrus-tools"]).toBeDefined();
+		expect(
+			(config["cyrus-tools"] as { alwaysLoad?: boolean }).alwaysLoad,
+		).toBeUndefined();
 	});
 
 	it("leaves rarely-used servers deferred (no alwaysLoad)", () => {

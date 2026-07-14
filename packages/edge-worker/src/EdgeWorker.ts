@@ -4584,7 +4584,8 @@ ${taskSection}`;
 	 * through (issue, warm-pool, multi-repo), so the prune applies uniformly
 	 * regardless of per-repo `disallowedTools` config. The Linear server is
 	 * still eager-loaded (`alwaysLoad`, see `McpConfigService`); pruning trims
-	 * its ~47-tool surface down to the essentials Cyrus actually uses.
+	 * its ~47-tool surface down to the essentials Cyrus actually uses. The local
+	 * `cyrus-tools` server remains available on demand instead of being eager.
 	 */
 	private buildDisallowedTools(
 		repositories: RepositoryConfig | RepositoryConfig[],

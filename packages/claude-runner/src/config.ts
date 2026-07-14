@@ -22,6 +22,9 @@ export const availableTools = [
 
 	// Execution tools
 	"Bash",
+	// Hosted Claude variants expose delegation as Agent; older/current local
+	// variants may still report Task. Keep both so availability stays portable.
+	"Agent",
 	"Task",
 
 	// Web tools
@@ -90,6 +93,7 @@ export const readOnlyTools: ToolName[] = [
 	"TaskUpdate",
 	"TaskGet",
 	"TaskList",
+	"Agent",
 	"Task",
 	"Skill",
 	"Monitor",
@@ -122,6 +126,31 @@ export function getReadOnlyTools(): string[] {
  */
 export function getAllTools(): string[] {
 	return [...availableTools];
+}
+
+function getBaseToolName(tool: string): string {
+	const parameterStart = tool.indexOf("(");
+	return parameterStart === -1 ? tool : tool.slice(0, parameterStart);
+}
+
+const availableBuiltinToolNames = new Set(availableTools.map(getBaseToolName));
+
+/**
+ * Resolve an allowed-tools policy to the built-in tool names that should be
+ * available to Claude. MCP entries are configured separately through
+ * `mcpServers`; command/path suffixes only narrow permission matching and are
+ * therefore stripped for the SDK's base `tools` list.
+ */
+export function getAvailableBuiltinTools(
+	allowedTools: readonly string[],
+): string[] {
+	return [
+		...new Set(
+			allowedTools
+				.map(getBaseToolName)
+				.filter((tool) => availableBuiltinToolNames.has(tool)),
+		),
+	];
 }
 
 /**

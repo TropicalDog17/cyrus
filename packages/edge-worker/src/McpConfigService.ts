@@ -103,18 +103,18 @@ export class McpConfigService {
 		// Workspace-level MCP servers — configured once regardless of repo count
 		// https://linear.app/docs/mcp
 		//
-		// `alwaysLoad: true` on `linear` and `cyrus-tools` opts them out of the
+		// `alwaysLoad: true` on `linear` opts it out of the
 		// SDK's MCP tool-search auto mode. That mode (enabled by default once the
 		// combined MCP tool descriptions exceed ~10% of the context window —
 		// which the official Linear MCP's ~50 verbose tools do on their own)
 		// otherwise DEFERS every Linear tool behind the `ToolSearch` tool, so the
 		// agent burns ~a minute of round-trips to the remote `mcp.linear.app`
 		// discovering schemas on turn 1 before it can read or update the issue.
-		// Every Linear/GitHub session reads and writes Linear state, so these
-		// tools are needed immediately — load them up front instead of deferring.
-		// `cyrus-docs` (and the optional slack/atlassian servers below) stay
-		// deferred: they're used rarely, so keeping them behind tool search keeps
-		// the turn-1 context lean. See CYPACK-716 / DEV-140.
+		// Every Linear/GitHub session needs the core Linear issue/comment tools
+		// immediately, so load that server up front. `cyrus-tools`, `cyrus-docs`,
+		// and the optional slack/atlassian servers stay deferred: their tools are
+		// used rarely, so keeping them behind local/on-demand tool search keeps the
+		// turn-1 context lean. See CYPACK-716 / DEV-140.
 		//
 		// Eager-loading the Linear server pulls in ALL ~47 of its tools, so the
 		// verbose, rarely-used ones (releases, milestones, attachments, diffs,
@@ -144,7 +144,6 @@ export class McpConfigService {
 							}
 						: {}),
 				},
-				alwaysLoad: true,
 			},
 			"cyrus-docs": {
 				type: "http",
