@@ -1,6 +1,7 @@
 {
 	"name": "cyrus-mcp-tools",
 	"version": "0.2.66",
+	"private": true,
 	"description": "Runner-neutral MCP tool servers for Cyrus",
 	"type": "module",
 	"main": "dist/index.js",
@@ -27,8 +28,5 @@
 		"@types/node": "^20.0.0",
 		"typescript": "^5.3.3",
 		"vitest": "^4.1.0"
-	},
-	"publishConfig": {
-		"access": "public"
 	}
 }
