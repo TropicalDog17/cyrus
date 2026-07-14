@@ -38,7 +38,11 @@ activities posted back. Details: `agent-docs/architecture-and-runtime.md`.
 
 - **Stack:** Node.js >= 22, pnpm >= 10, TypeScript, Vitest, Biome. Never npm/yarn.
 - **Ship gate:** `pnpm test:packages:run`, `pnpm typecheck`, `pnpm lint` before PR.
-  User-facing changes → `CHANGELOG.md`; internal → `CHANGELOG.internal.md`.
+- **No changelog.** Git history is the log. Record findings where they get re-read:
+  an invariant that causes silent breakage → `agent-docs/dev-gotchas.md`; a decision
+  and why it beat the alternative → `docs/adr/`. Never narrate a change into a doc.
+- **Not published to npm.** Every package is `private`; the deploy path is
+  deploy-on-merge to the self-hosted systemd unit (`scripts/deploy-local.sh`).
 - **Prompt assembly tests:** assert the *entire* expected prompt via
   `.expectUserPrompt()` / `.verify()` — never weak `.toContain()` checks. See
   `agent-docs/testing-and-commands.md`.
@@ -58,18 +62,16 @@ activities posted back. Details: `agent-docs/architecture-and-runtime.md`.
 | Implement a feature / refactor | `implementation` → then `verify-and-ship` → `summarize` |
 | Fix a bug | `debug` → then `verify-and-ship` → `summarize` |
 | Question / research (no code change) | `investigate` → `summarize` |
-| Ship checks, changelog, PR/MR | `verify-and-ship` |
+| Ship checks, PR/MR | `verify-and-ship` |
 | F1 end-to-end validation | `f1-test-drive` + `apps/f1/CLAUDE.md` + `spec/f1/ARCHITECTURE.md` |
 | New agent CLI harness | `new-agent-harness` + `agent-docs/new-agent-harness.md` |
-| Conventions while coding (tests, changelog, deps) | `core-conventions` |
+| Conventions while coding (tests, deps) | `core-conventions` |
 | Writing / reviewing TypeScript (strict types, boundaries, `tsconfig`) | `typescript-best-practices` |
 | Config field / sandbox / permissions / MCP catalog | `agent-docs/dev-gotchas.md` |
 | Architecture, session flow, key paths | `agent-docs/architecture-and-runtime.md` |
 | Commands, prompt-test style | `agent-docs/testing-and-commands.md` |
 | Domain vocabulary / seams | `CONTEXT.md` |
 | Linear webhook branch rules | `packages/CLAUDE.md` |
-| Full product release to npm | `release` |
-| Dev-only `cyrus-core@test` publish | `release-core-test` |
 | First-time Cyrus install / integrations | `cyrus-setup` (+ `cyrus-setup-*` subskills) |
 | User setup docs (self-host, config file, tunnels) | `docs/` |
 

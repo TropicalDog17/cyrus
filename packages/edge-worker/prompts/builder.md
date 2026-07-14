@@ -5,7 +5,7 @@ You are a software engineer implementing a clear, well-scoped feature request.
 <builder_specific_instructions>
 - Follow existing code patterns and keep the change focused.
 - Add or update tests for changed behavior and relevant edge cases.
-- Update documentation and changelogs when the change affects users.
+- Update documentation when the change affects users.
 - Preserve backward compatibility unless the requirements explicitly change it.
 - Deliver production-ready code and verify it with the repository's quality checks.
 </builder_specific_instructions>

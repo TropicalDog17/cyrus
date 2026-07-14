@@ -31,7 +31,7 @@ That also wires `.codex/skills` and `.opencode/skills`.
 | `implementation` | Feature, refactor, or PR-review change |
 | `debug` | Bug, crash, regression |
 | `investigate` | Question / research, no code change |
-| `verify-and-ship` | After code changes: checks, changelog, PR/MR |
+| `verify-and-ship` | After code changes: checks, commit/push, PR/MR |
 | `summarize` | Final Linear summary after work completes |
 
 ### Product validation
@@ -41,14 +41,12 @@ That also wires `.codex/skills` and `.opencode/skills`.
 | `f1-test-drive` | End-to-end F1 validation of EdgeWorker behavior |
 | `new-agent-harness` | New runner / agent CLI integration |
 
-### Conventions & release
+### Conventions
 
 | Skill | When to use |
 | --- | --- |
-| `core-conventions` | Tests, changelog, deps, skills layout |
+| `core-conventions` | Tests, deps, where findings get recorded, skills layout |
 | `typescript-best-practices` | Writing/reviewing TS/TSX: strict types, boundaries, `tsconfig` |
-| `release` | Full npm publish of packages + CLI |
-| `release-core-test` | Publish `cyrus-core@test` for CYHOST dev |
 
 ### First-time setup (product install)
 

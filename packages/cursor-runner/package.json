@@ -1,6 +1,7 @@
 {
 	"name": "cyrus-cursor-runner",
 	"version": "0.2.66",
+	"private": true,
 	"description": "Cursor Agent CLI process wrapper for Cyrus",
 	"type": "module",
 	"main": "dist/index.js",
@@ -23,8 +24,5 @@
 		"@types/node": "^20.0.0",
 		"typescript": "^5.3.3",
 		"vitest": "^4.1.9"
-	},
-	"publishConfig": {
-		"access": "public"
 	}
 }
