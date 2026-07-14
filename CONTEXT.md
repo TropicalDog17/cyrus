@@ -9,11 +9,43 @@ one vocabulary. Architecture terms (**module**, **interface**, **seam**,
 
 - **Issue** — a unit of work from an issue tracker (today: Linear; partially GitHub).
 - **Session** — one agent run against an Issue, in an isolated git worktree.
-- **Runner** — an adapter over an agent CLI (Claude Code, Cursor) that streams messages.
+- **Runner** — an adapter over an agent CLI (Claude Code, Cursor) that streams
+  messages. An ACP-backed runner is in design, not in code — see *Planned
+  vocabulary* below.
 - **Activity** — a thought / action / response / error posted back to the Issue timeline.
 - **AgentMessage** — the **neutral** streaming message contract runners emit (see below).
 - **Effective access policy** — the single computed answer to "what may this session
   read/write", rendered into both the tool-permission layer and the OS sandbox layer.
+
+## Planned vocabulary — ACP agent profiles (NOT YET IN CODE)
+
+> **None of the terms in this section exist in the codebase.** They are the shared
+> language for the in-design ACP runner work, recorded here so the ADRs in
+> `docs/adr/` (0001–0010) agree on one vocabulary. Do not read them as descriptions
+> of current behavior, and do not "fix" code to match them.
+>
+> What is actually true today: there is no ACP code, no agent-profile registry, and
+> no `agentProfileId`. `IAgentRunner` carries `readonly provider: "claude" | "cursor"`
+> (`packages/core/src/agent-runner-types.ts`), implemented by `ClaudeRunner` and
+> `CursorRunner`. Delete this section's gate only when the code lands.
+
+- **Agent profile** — the stable Cyrus identity and launch configuration for an
+  agent. A profile selects its runner protocol, command, environment, and defaults.
+- **Profile authentication** — credentials established outside Issue sessions and
+  shared by the ACP host for one Agent profile.
+- **Runner session ID** — the opaque conversation identifier assigned by a runner,
+  meaningful only when paired with the Agent profile that can resume it.
+- **Prompt turn** — one prompt-and-response cycle inside a Runner session; a
+  Cyrus Session may contain many sequential Prompt turns.
+- **ACP host** — the long-lived, profile-scoped agent process and initialized ACP
+  connection shared by the Runner sessions for one Agent profile.
+- **Required agent capability** — an ACP capability an Agent profile must negotiate
+  before Cyrus can safely make that profile available for a requested session.
+- **Session MCP catalog** — the complete set of MCP servers Cyrus grants to one
+  Runner session; ACP sessions do not inherit ambient Agent configuration.
+- **Prompt queue** — the per-Runner-session FIFO of prompts accepted while an ACP
+  prompt turn is active and delivered as subsequent turns. Linear records prompts
+  and emits webhooks; it does not own this delivery queue.
 
 ## Seam inventory (target decomposition of EdgeWorker)
 
@@ -58,7 +90,9 @@ ToolPermissionResolver, EgressProxy, SharedApplicationServer, AgentSessionManage
   rate_limit) — **not** `= SDKMessage`. Includes a `thinking` block (fixes Cursor data loss).
   Neutral `usage` shape (no Anthropic cache-bucket fields → Cursor stops counterfeiting).
 - Add `readonly provider: 'claude' | 'cursor'` to `IAgentRunner` — deletes the
-  `constructor.name` sniff and the session-id-field reverse-derivation.
+  `constructor.name` sniff and the session-id-field reverse-derivation. (Shipped.
+  The planned ACP work replaces this union with a profile-registry lookup keyed on
+  `agentProfileId` — see `docs/adr/0009` and `docs/adr/0001`. Not in code yet.)
 - `AgentRunnerConfig` neutral base; `ClaudeRunnerConfig`/`CursorRunnerConfig` extend it —
   removes the `& Record<string, unknown>` escape hatch.
 
