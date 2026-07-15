@@ -826,20 +826,38 @@ export class GitService {
 				}
 			}
 
-			// Fetch latest changes from remote
-			this.logger.debug("Fetching latest changes from remote...");
-			let hasRemote = true;
-			try {
-				execSync("git fetch origin", {
-					cwd: repository.repositoryPath,
-					stdio: "pipe",
-				});
-			} catch (e) {
+			// Fetch only the base branch(es) we may branch from, instead of every
+			// remote ref and tag. `git fetch origin` (all refs) can add several
+			// seconds to the critical path before the first model response on repos
+			// with many branches or tags; worktree creation only ever needs the
+			// resolved base branch, with the repo default as a fallback. Fetch each
+			// individually so a missing branch doesn't abort the others, and treat
+			// the remote as usable if any fetch succeeds. See DEV-164.
+			const baseBranchesToFetch = Array.from(
+				new Set([baseBranch, repository.baseBranch].filter(Boolean)),
+			);
+			this.logger.debug(
+				`Fetching base branch(es) from remote: ${baseBranchesToFetch.join(", ")}`,
+			);
+			let hasRemote = false;
+			for (const branch of baseBranchesToFetch) {
+				try {
+					execSync(`git fetch origin --no-tags "${branch}"`, {
+						cwd: repository.repositoryPath,
+						stdio: "pipe",
+					});
+					hasRemote = true;
+				} catch (e) {
+					this.logger.warn(
+						`Warning: git fetch of base branch "${branch}" failed:`,
+						(e as Error).message,
+					);
+				}
+			}
+			if (!hasRemote) {
 				this.logger.warn(
-					"Warning: git fetch failed, proceeding with local branch:",
-					(e as Error).message,
+					"Warning: git fetch failed for all base branches, proceeding with local branch",
 				);
-				hasRemote = false;
 			}
 
 			// Create the worktree - use determined base branch

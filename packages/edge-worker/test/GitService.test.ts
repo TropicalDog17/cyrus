@@ -430,6 +430,50 @@ describe("GitService", () => {
 			);
 		});
 
+		it("fetches only the base branch, not all remote refs, before creating the worktree", async () => {
+			const issue = makeIssue();
+			const repository = makeRepository(); // baseBranch: "main"
+
+			// No cyrus-setup.sh present, so worktree creation returns right after add
+			mockExistsSync.mockReturnValue(false);
+			mockExecSync.mockImplementation((cmd: any) => {
+				const cmdStr = String(cmd);
+				if (cmdStr === "git rev-parse --git-dir") {
+					return Buffer.from(".git\n");
+				}
+				if (cmdStr === "git worktree list --porcelain") {
+					return "";
+				}
+				if (
+					cmdStr.includes(
+						'git rev-parse --verify "cyrustester/eng-97-fix-shader"',
+					)
+				) {
+					// Branch does not exist yet -> create it from the base branch
+					throw new Error("branch not found");
+				}
+				if (cmdStr.includes("git ls-remote")) {
+					return Buffer.from("abc123\trefs/heads/main\n");
+				}
+				return Buffer.from("");
+			});
+
+			const result = await gitService.createGitWorktree(issue, [repository]);
+
+			expect(result.isGitWorktree).toBe(true);
+			// Targeted, tag-free fetch of just the base branch
+			expect(mockExecSync).toHaveBeenCalledWith(
+				'git fetch origin --no-tags "main"',
+				expect.objectContaining({ cwd: "/home/user/repo" }),
+			);
+			// Never the unbounded all-refs fetch
+			expect(
+				mockExecSync.mock.calls.some(
+					([command]) => String(command) === "git fetch origin",
+				),
+			).toBe(false);
+		});
+
 		it("catches 'already used by worktree' error and reuses existing worktree", async () => {
 			const issue = makeIssue();
 			const repository = makeRepository();
