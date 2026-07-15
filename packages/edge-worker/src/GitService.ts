@@ -1087,6 +1087,10 @@ export class GitService {
 		}
 
 		for (const sibling of siblings) {
+			// Bring the sibling's checkout up to its latest default branch first,
+			// so the reference shows current code rather than a stale checkout.
+			this.refreshSiblingDefaultBranch(sibling);
+
 			const linkPath = join(linkDir, sibling.name);
 			// Idempotent, and never clobber an existing entry (e.g. a name
 			// collision between two configured repos).
@@ -1107,6 +1111,66 @@ export class GitService {
 		}
 
 		this.excludeFromGitStatus(workspacePath, CROSS_REPO_DIR);
+	}
+
+	/**
+	 * Best-effort: bring a sibling repo's canonical checkout up to the latest
+	 * `origin/<baseBranch>` before it is exposed as a cross-repo read reference,
+	 * so the agent sees current default-branch code rather than a stale checkout.
+	 *
+	 * Only fast-forwards when the checkout is already on its default branch with a
+	 * clean working tree; anything else (detached HEAD, a feature branch, local
+	 * edits, or divergence that fails `--ff-only`) is left untouched. Every step
+	 * is swallowed on failure — freshness is a nicety, never a reason to abort or
+	 * mutate unexpected state. A no-remote repo simply keeps its current commit.
+	 */
+	private refreshSiblingDefaultBranch(repo: RepositoryConfig): void {
+		const { name, repositoryPath, baseBranch } = repo;
+		try {
+			execSync(`git fetch origin --no-tags "${baseBranch}"`, {
+				cwd: repositoryPath,
+				stdio: "pipe",
+				timeout: 30_000,
+			});
+		} catch {
+			// No reachable remote / branch — leave the checkout as-is.
+			return;
+		}
+
+		try {
+			const currentBranch = execSync("git rev-parse --abbrev-ref HEAD", {
+				cwd: repositoryPath,
+				encoding: "utf-8",
+			}).trim();
+			if (currentBranch !== baseBranch) {
+				this.logger.debug(
+					`Sibling repo '${name}' is on '${currentBranch}', not '${baseBranch}'; leaving its cross-repo reference untouched`,
+				);
+				return;
+			}
+
+			const dirty = execSync("git status --porcelain", {
+				cwd: repositoryPath,
+				encoding: "utf-8",
+			}).trim();
+			if (dirty.length > 0) {
+				this.logger.debug(
+					`Sibling repo '${name}' has local changes; skipping default-branch refresh`,
+				);
+				return;
+			}
+
+			execSync(`git merge --ff-only "origin/${baseBranch}"`, {
+				cwd: repositoryPath,
+				stdio: "pipe",
+				timeout: 30_000,
+			});
+		} catch (error) {
+			this.logger.warn(
+				`Failed to refresh sibling repo '${name}' to latest '${baseBranch}':`,
+				(error as Error).message,
+			);
+		}
 	}
 
 	/**

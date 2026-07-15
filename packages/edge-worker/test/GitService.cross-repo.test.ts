@@ -36,6 +36,16 @@ function initRepo(path: string, markerFile: string): void {
 	execSync("git commit -m init", { cwd: path, stdio: "ignore", env: gitEnv });
 }
 
+function git(cwd: string, args: string): void {
+	execSync(`git ${args}`, { cwd, stdio: "ignore", env: gitEnv });
+}
+
+function commitFile(path: string, file: string, message: string): void {
+	writeFileSync(join(path, file), `${message}\n`);
+	git(path, "add -A");
+	git(path, `commit -m ${message}`);
+}
+
 function makeIssue(identifier: string): Issue {
 	return {
 		id: `id-${identifier}`,
@@ -111,6 +121,66 @@ describe("GitService cross-repo sibling symlinks", () => {
 		);
 		// The routed repo never links to itself.
 		expect(existsSync(join(linkDir, "backend"))).toBe(false);
+	});
+
+	it("fast-forwards the sibling checkout to the latest default branch", async () => {
+		initRepo(join(reposDir, "backend"), "BACKEND.md");
+
+		// `indexer` is a clone of an upstream repo that gains a new default-branch
+		// commit after the clone — the stale checkout must be refreshed to it.
+		const upstream = join(base, "upstream-indexer");
+		initRepo(upstream, "INDEXER.md");
+		const indexerPath = join(reposDir, "indexer");
+		git(base, `clone ${upstream} ${indexerPath}`);
+		commitFile(upstream, "SHIPPED.md", "shipped-after-clone");
+
+		expect(existsSync(join(indexerPath, "SHIPPED.md"))).toBe(false);
+
+		const backend = makeRepo(reposDir, "backend", worktreesDir);
+		const indexer = makeRepo(reposDir, "indexer", worktreesDir);
+
+		const workspace = await gitService.createGitWorktree(
+			makeIssue("DEV-6"),
+			[backend],
+			{ crossRepoSiblingRepositories: [backend, indexer] },
+		);
+
+		// The refresh brought the canonical checkout up to origin/main, so the new
+		// commit is visible through the read-only reference link.
+		const link = join(workspace.path, CROSS_REPO_DIR, "indexer");
+		expect(existsSync(join(link, "SHIPPED.md"))).toBe(true);
+		expect(readFileSync(join(link, "SHIPPED.md"), "utf-8")).toContain(
+			"shipped-after-clone",
+		);
+	});
+
+	it("leaves a sibling with local changes untouched when refreshing", async () => {
+		initRepo(join(reposDir, "backend"), "BACKEND.md");
+
+		const upstream = join(base, "upstream-indexer");
+		initRepo(upstream, "INDEXER.md");
+		const indexerPath = join(reposDir, "indexer");
+		git(base, `clone ${upstream} ${indexerPath}`);
+		commitFile(upstream, "SHIPPED.md", "shipped-after-clone");
+		// Dirty the sibling checkout: a fast-forward must be skipped.
+		writeFileSync(join(indexerPath, "INDEXER.md"), "local uncommitted edit\n");
+
+		const backend = makeRepo(reposDir, "backend", worktreesDir);
+		const indexer = makeRepo(reposDir, "indexer", worktreesDir);
+
+		const workspace = await gitService.createGitWorktree(
+			makeIssue("DEV-7"),
+			[backend],
+			{ crossRepoSiblingRepositories: [backend, indexer] },
+		);
+
+		const link = join(workspace.path, CROSS_REPO_DIR, "indexer");
+		// Link still created, but the dirty checkout was not fast-forwarded.
+		expect(existsSync(link)).toBe(true);
+		expect(existsSync(join(link, "SHIPPED.md"))).toBe(false);
+		expect(readFileSync(join(link, "INDEXER.md"), "utf-8")).toContain(
+			"local uncommitted edit",
+		);
 	});
 
 	it("keeps the link directory out of git status via the worktree exclude", async () => {
