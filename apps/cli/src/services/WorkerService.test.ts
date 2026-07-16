@@ -36,6 +36,8 @@ const EDGE_CONFIG: EdgeConfig = {
 	askUserQuestionTimeoutMinutes: 45,
 	cursorDefaultModel: "cursor-default",
 	cursorDefaultFallbackModel: "cursor-fallback",
+	codexDefaultModel: "gpt-5-codex",
+	codexDefaultFallbackModel: "gpt-5-codex",
 	defaultRunner: "claude",
 	defaultModel: "legacy-model",
 	defaultFallbackModel: "legacy-fallback",
