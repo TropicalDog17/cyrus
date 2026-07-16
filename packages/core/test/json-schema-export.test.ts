@@ -43,6 +43,8 @@ describe("JSON Schema export", () => {
 				"claudeDefaultFallbackModel",
 				"cursorDefaultModel",
 				"cursorDefaultFallbackModel",
+				"codexDefaultModel",
+				"codexDefaultFallbackModel",
 				"defaultRunner",
 				"defaultModel",
 				"defaultFallbackModel",
@@ -71,6 +73,7 @@ describe("JSON Schema export", () => {
 			expect(schema.properties.defaultRunner.enum).toEqual([
 				"claude",
 				"cursor",
+				"codex",
 			]);
 		});
 

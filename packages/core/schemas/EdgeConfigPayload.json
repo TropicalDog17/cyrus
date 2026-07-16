@@ -550,9 +550,15 @@
 		"cursorDefaultFallbackModel": {
 			"type": "string"
 		},
+		"codexDefaultModel": {
+			"type": "string"
+		},
+		"codexDefaultFallbackModel": {
+			"type": "string"
+		},
 		"defaultRunner": {
 			"type": "string",
-			"enum": ["claude", "cursor"]
+			"enum": ["claude", "cursor", "codex"]
 		},
 		"defaultModel": {
 			"type": "string"

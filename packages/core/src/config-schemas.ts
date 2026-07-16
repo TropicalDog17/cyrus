@@ -29,9 +29,10 @@ export const pathRegistry = z.registry<PathFieldMeta>();
 /**
  * Supported runner/harness types for agent execution.
  *
- * This fork runs Claude and Cursor (the gemini/codex runners were removed).
+ * This fork runs Claude, Cursor, and Codex. The Codex runner drives the OpenAI
+ * Codex CLI over the Agent Client Protocol (ACP).
  */
-export const RunnerTypeSchema = z.enum(["claude", "cursor"]);
+export const RunnerTypeSchema = z.enum(["claude", "cursor", "codex"]);
 export type RunnerType = z.infer<typeof RunnerTypeSchema>;
 
 /**
@@ -473,10 +474,16 @@ export const EdgeConfigSchema = z.object({
 	/** Default Cursor fallback model if primary Cursor model is unavailable */
 	cursorDefaultFallbackModel: z.string().optional(),
 
+	/** Default Codex model to use across all repositories (e.g., "gpt-5-codex", "gpt-5") */
+	codexDefaultModel: z.string().optional(),
+
+	/** Default Codex fallback model if primary Codex model is unavailable */
+	codexDefaultFallbackModel: z.string().optional(),
+
 	/**
 	 * Default runner/harness to use when no runner is specified via labels or
-	 * description tags. This fork supports "claude" and "cursor". If omitted,
-	 * falls back to "claude".
+	 * description tags. This fork supports "claude", "cursor", and "codex". If
+	 * omitted, falls back to "claude".
 	 */
 	defaultRunner: RunnerTypeSchema.optional(),
 
