@@ -243,9 +243,14 @@ export class CyrusToolsHost {
 			? "claude"
 			: session.cursorSessionId
 				? "cursor"
-				: null;
+				: session.codexSessionId
+					? "codex"
+					: null;
 		const runnerSessionId =
-			session.claudeSessionId ?? session.cursorSessionId ?? null;
+			session.claudeSessionId ??
+			session.cursorSessionId ??
+			session.codexSessionId ??
+			null;
 
 		const sessionSource = session.id.startsWith("github-")
 			? "github"

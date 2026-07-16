@@ -10,14 +10,23 @@ import type { EdgeWorkerConfig, RunnerType } from "cyrus-core";
 const CURSOR_DEFAULT_MODEL = "composer-2.5";
 
 /**
+ * Built-in default Codex model when none is configured. The Codex ACP adapter
+ * resolves model ids against the OpenAI backend; "gpt-5-codex" is Codex's
+ * flagship coding model. Override via `codexDefaultModel` if your account
+ * exposes a different id.
+ */
+const CODEX_DEFAULT_MODEL = "gpt-5-codex";
+
+/**
  * Resolves the runner type and model for a session.
  *
- * This fork supports two runners: Claude (default) and Cursor. The runner is
- * chosen from an `[agent=...]` description tag, a `cursor`/`claude` label, or an
- * explicit model whose family implies the runner; otherwise it falls back to
- * the configured `defaultRunner` (or Claude). The service also resolves the
- * model + fallback model from labels and the `[model=...]` description tag,
- * with repository/global defaults as the baseline.
+ * This fork supports three runners: Claude (default), Cursor, and Codex. The
+ * runner is chosen from an `[agent=...]` description tag, a
+ * `cursor`/`claude`/`codex` label, or an explicit model whose family implies
+ * the runner; otherwise it falls back to the configured `defaultRunner` (or
+ * Claude). The service also resolves the model + fallback model from labels and
+ * the `[model=...]` description tag, with repository/global defaults as the
+ * baseline.
  */
 export class RunnerSelectionService {
 	private config: EdgeWorkerConfig;
@@ -51,10 +60,18 @@ export class RunnerSelectionService {
 			process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY,
 		);
 		const hasCursor = Boolean(process.env.CURSOR_API_KEY);
+		const hasCodex = Boolean(
+			process.env.CODEX_API_KEY || process.env.OPENAI_API_KEY,
+		);
 
 		// If Cursor is the only runner with credentials configured, default to it.
-		if (hasCursor && !hasClaude) {
+		if (hasCursor && !hasClaude && !hasCodex) {
 			return "cursor";
+		}
+
+		// If Codex is the only runner with credentials configured, default to it.
+		if (hasCodex && !hasClaude && !hasCursor) {
+			return "codex";
 		}
 
 		return "claude";
@@ -67,6 +84,9 @@ export class RunnerSelectionService {
 	public getDefaultModelForRunner(runnerType: RunnerType = "claude"): string {
 		if (runnerType === "cursor") {
 			return this.config.cursorDefaultModel || CURSOR_DEFAULT_MODEL;
+		}
+		if (runnerType === "codex") {
+			return this.config.codexDefaultModel || CODEX_DEFAULT_MODEL;
 		}
 		return this.config.claudeDefaultModel || this.config.defaultModel || "opus";
 	}
@@ -81,6 +101,9 @@ export class RunnerSelectionService {
 	): string {
 		if (runnerType === "cursor") {
 			return this.config.cursorDefaultFallbackModel || CURSOR_DEFAULT_MODEL;
+		}
+		if (runnerType === "codex") {
+			return this.config.codexDefaultFallbackModel || CODEX_DEFAULT_MODEL;
 		}
 		return (
 			this.config.claudeDefaultFallbackModel ||
@@ -112,13 +135,14 @@ export class RunnerSelectionService {
 	 * description tags.
 	 *
 	 * Supported description tags:
-	 * - [agent=claude|cursor]
+	 * - [agent=claude|cursor|codex]
 	 * - [model=<model-name>]
 	 *
 	 * Precedence:
 	 * 1. Description tags override labels
-	 * 2. Agent (`cursor`/`claude`) labels override model labels
-	 * 3. Model labels can infer the agent type (e.g. `composer-*` → cursor)
+	 * 2. Agent (`cursor`/`claude`/`codex`) labels override model labels
+	 * 3. Model labels can infer the agent type (e.g. `composer-*` → cursor,
+	 *    `gpt-*`/`o3`/`*codex*` → codex)
 	 * 4. Falls back to the configured default runner
 	 */
 	public determineRunnerSelection(
@@ -143,10 +167,18 @@ export class RunnerSelectionService {
 		const isCursorModel = (model: string): boolean =>
 			/^composer[a-z0-9.-]*$/i.test(model);
 
+		// Codex/OpenAI model families: gpt-*, the o-series reasoning models
+		// (o1/o3/o4-mini…), and anything carrying the `codex` marker.
+		const isCodexModel = (model: string): boolean =>
+			/^gpt[-0-9]/i.test(model) ||
+			/^o[0-9]/i.test(model) ||
+			/codex/i.test(model);
+
 		const inferRunnerFromModel = (model?: string): RunnerType | undefined => {
 			if (!model) return undefined;
 			const normalizedModel = model.toLowerCase();
 			if (isCursorModel(normalizedModel)) return "cursor";
+			if (isCodexModel(normalizedModel)) return "codex";
 			if (
 				normalizedModel === "fable" ||
 				normalizedModel === "opus" ||
@@ -167,6 +199,9 @@ export class RunnerSelectionService {
 			if (runnerType === "cursor") {
 				return this.getDefaultFallbackModelForRunner("cursor");
 			}
+			if (runnerType === "codex") {
+				return this.getDefaultFallbackModelForRunner("codex");
+			}
 			if (normalizedModel === "fable") return "opus";
 			if (normalizedModel === "opus") return "sonnet";
 			if (normalizedModel === "sonnet") return "haiku";
@@ -179,6 +214,7 @@ export class RunnerSelectionService {
 			lowercaseLabels: string[],
 		): RunnerType | undefined => {
 			if (lowercaseLabels.includes("cursor")) return "cursor";
+			if (lowercaseLabels.includes("codex")) return "codex";
 			if (lowercaseLabels.includes("claude")) return "claude";
 			return undefined;
 		};
@@ -190,6 +226,13 @@ export class RunnerSelectionService {
 				isCursorModel(label),
 			);
 			if (cursorModelLabel) return cursorModelLabel;
+
+			// Exclude the bare `codex` agent-selector label — it routes the runner,
+			// it is not a model id (unlike `gpt-5-codex`, which is).
+			const codexModelLabel = lowercaseLabels.find(
+				(label) => label !== "codex" && isCodexModel(label),
+			);
+			if (codexModelLabel) return codexModelLabel;
 
 			if (lowercaseLabels.includes("fable")) return "fable";
 			if (lowercaseLabels.includes("opus")) return "opus";
@@ -203,9 +246,11 @@ export class RunnerSelectionService {
 		const resolvedAgentFromDescription: RunnerType | undefined =
 			agentFromDescription === "cursor"
 				? "cursor"
-				: agentFromDescription === "claude"
-					? "claude"
-					: undefined;
+				: agentFromDescription === "codex"
+					? "codex"
+					: agentFromDescription === "claude"
+						? "claude"
+						: undefined;
 		const resolvedAgentFromLabels = resolveAgentFromLabel(normalizedLabels);
 
 		const modelFromDescription = descriptionModelTagRaw;

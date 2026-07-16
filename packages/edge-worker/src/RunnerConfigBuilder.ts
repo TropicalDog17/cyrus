@@ -11,6 +11,7 @@ import type {
 	StopHookInput,
 	WarmSessionRegistry,
 } from "cyrus-claude-runner";
+import type { CodexRunnerConfig } from "cyrus-codex-runner";
 import type {
 	AgentMessage,
 	CyrusAgentSession,
@@ -23,12 +24,15 @@ import { compute, nodeDirLister, toSandboxFilesystem } from "cyrus-core";
 import type { CursorRunnerConfig } from "cyrus-cursor-runner";
 
 /**
- * The concrete runner config the builder produces — a Claude or Cursor config.
- * Both extend the neutral `AgentRunnerConfig` base; this union preserves the
- * provider-specific extras without an untyped `& Record<string, unknown>`
+ * The concrete runner config the builder produces — a Claude, Cursor, or Codex
+ * config. All extend the neutral `AgentRunnerConfig` base; this union preserves
+ * the provider-specific extras without an untyped `& Record<string, unknown>`
  * escape hatch.
  */
-export type RunnerConfig = ClaudeRunnerConfig | CursorRunnerConfig;
+export type RunnerConfig =
+	| ClaudeRunnerConfig
+	| CursorRunnerConfig
+	| CodexRunnerConfig;
 
 import { buildIntentToAddHook } from "./hooks/IntentToAddHook.js";
 import { buildPrMarkerHook } from "./hooks/PrMarkerHook.js";
@@ -238,6 +242,11 @@ export class RunnerConfigBuilder {
 			modelOverride = this.runnerSelector.getDefaultModelForRunner("cursor");
 			fallbackModelOverride =
 				this.runnerSelector.getDefaultFallbackModelForRunner("cursor");
+		} else if (input.session.codexSessionId && runnerType !== "codex") {
+			runnerType = "codex";
+			modelOverride = this.runnerSelector.getDefaultModelForRunner("codex");
+			fallbackModelOverride =
+				this.runnerSelector.getDefaultFallbackModelForRunner("codex");
 		}
 
 		// Log model override if found
@@ -287,10 +296,12 @@ export class RunnerConfigBuilder {
 			input.session.workspace.repoPaths ?? {},
 		).filter((p): p is string => typeof p === "string" && p !== cwd);
 
-		// Typed superset: a Claude config plus the optional Cursor-only fields.
-		// The cursor-branch assignments below type-check against the
-		// Partial<CursorRunnerConfig> half; no untyped escape hatch needed.
-		const config: ClaudeRunnerConfig & Partial<CursorRunnerConfig> = {
+		// Typed superset: a Claude config plus the optional Cursor-only and
+		// Codex-only fields. The cursor-/codex-branch assignments below type-check
+		// against the Partial<…> halves; no untyped escape hatch needed.
+		const config: ClaudeRunnerConfig &
+			Partial<CursorRunnerConfig> &
+			Partial<CodexRunnerConfig> = {
 			workingDirectory: cwd,
 			allowedTools: input.allowedTools,
 			disallowedTools: input.disallowedTools,
@@ -351,6 +362,21 @@ export class RunnerConfigBuilder {
 			}
 			if (input.egressCaCertPath) {
 				config.egressCaCertPath = input.egressCaCertPath;
+			}
+		}
+
+		// Codex runner drives OpenAI Codex over ACP. Thread through the Codex/OpenAI
+		// API key and the optional adapter-launch / codex-binary overrides; the
+		// runner spawns the ACP adapter itself and relies on worktree isolation +
+		// the sandbox for containment.
+		if (runnerType === "codex") {
+			config.codexApiKey =
+				process.env.CODEX_API_KEY || process.env.OPENAI_API_KEY || undefined;
+			if (process.env.CODEX_ACP_COMMAND) {
+				config.acpCommand = process.env.CODEX_ACP_COMMAND;
+			}
+			if (process.env.CODEX_PATH) {
+				config.codexPath = process.env.CODEX_PATH;
 			}
 		}
 

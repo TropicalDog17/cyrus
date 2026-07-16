@@ -210,7 +210,7 @@ export interface IAgentRunner {
 	 * `constructor.name` sniff and without reverse-deriving the runner from
 	 * which session-id field happens to be populated.
 	 */
-	readonly provider: "claude" | "cursor";
+	readonly provider: "claude" | "cursor" | "codex";
 
 	/**
 	 * Start a new agent session with a string prompt (legacy/simple mode)

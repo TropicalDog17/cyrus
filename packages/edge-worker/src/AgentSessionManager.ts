@@ -277,6 +277,8 @@ export class AgentSessionManager extends EventEmitter {
 
 		if (linearSession.agentRunner?.provider === "cursor") {
 			linearSession.cursorSessionId = initMessage.sessionId;
+		} else if (linearSession.agentRunner?.provider === "codex") {
+			linearSession.codexSessionId = initMessage.sessionId;
 		} else {
 			linearSession.claudeSessionId = initMessage.sessionId;
 		}
@@ -315,7 +317,9 @@ export class AgentSessionManager extends EventEmitter {
 		const sessionEntry: CyrusAgentSessionEntry = {
 			...(runner?.provider === "cursor"
 				? { cursorSessionId: message.sessionId }
-				: { claudeSessionId: message.sessionId }),
+				: runner?.provider === "codex"
+					? { codexSessionId: message.sessionId }
+					: { claudeSessionId: message.sessionId }),
 			type: message.type,
 			content: this.extractContent(message),
 			metadata: {
@@ -739,7 +743,9 @@ export class AgentSessionManager extends EventEmitter {
 		const resultEntry: CyrusAgentSessionEntry = {
 			...(runner?.provider === "cursor"
 				? { cursorSessionId: resultMessage.sessionId }
-				: { claudeSessionId: resultMessage.sessionId }),
+				: runner?.provider === "codex"
+					? { codexSessionId: resultMessage.sessionId }
+					: { claudeSessionId: resultMessage.sessionId }),
 			type: "result",
 			content,
 			metadata: {

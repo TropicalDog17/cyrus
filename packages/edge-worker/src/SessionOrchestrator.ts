@@ -7,6 +7,7 @@ import type {
 	WarmSessionRegistry,
 } from "cyrus-claude-runner";
 import { ClaudeRunner } from "cyrus-claude-runner";
+import { CodexRunner } from "cyrus-codex-runner";
 import type {
 	AgentMessage,
 	AgentRunnerConfig,
@@ -593,9 +594,11 @@ export class SessionOrchestrator {
 		const labels = await this.deps.fetchIssueLabels(fullIssue);
 
 		// Determine whether to resume based on the existing runner session ID
-		// (Claude or Cursor — whichever originally created the session).
+		// (Claude, Cursor, or Codex — whichever originally created the session).
 		const existingRunnerSessionId =
-			session.claudeSessionId ?? session.cursorSessionId;
+			session.claudeSessionId ??
+			session.cursorSessionId ??
+			session.codexSessionId;
 		const hasExistingSession =
 			!isNewSession && Boolean(existingRunnerSessionId);
 		const needsNewSession = isNewSession || !hasExistingSession;
@@ -918,6 +921,8 @@ export class SessionOrchestrator {
 			}
 			case "cursor":
 				return new CursorRunner(config);
+			case "codex":
+				return new CodexRunner(config);
 			default:
 				throw new Error(`Unknown runner type: ${runnerType satisfies never}`);
 		}

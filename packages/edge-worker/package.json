@@ -30,6 +30,7 @@
 		"chokidar": "^4.0.3",
 		"cyrus-claude-runner": "workspace:*",
 		"cyrus-cloudflare-tunnel-client": "workspace:*",
+		"cyrus-codex-runner": "workspace:*",
 		"cyrus-config-updater": "workspace:*",
 		"cyrus-core": "workspace:*",
 		"cyrus-cursor-runner": "workspace:*",
