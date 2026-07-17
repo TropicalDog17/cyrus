@@ -250,13 +250,20 @@ describe("EdgeWorker - Issue Update Session Delivery (CYPACK-954)", () => {
 			]);
 			cacheRepository();
 
-			await (edgeWorker as any).handleIssueContentUpdate(
-				createIssueUpdateWebhook(),
-			);
+			const webhook = createIssueUpdateWebhook();
+			webhook.data.updatedAt = "2026-07-17T10:00:00.000Z";
+			await (edgeWorker as any).handleIssueContentUpdate(webhook);
 
 			expect(
 				runningSession.agentRunner!.addStreamMessage,
 			).toHaveBeenCalledTimes(1);
+			// The prompt uses the webhook's own updatedAt (deterministic ISO),
+			// not a wall-clock fallback.
+			const streamedPrompt =
+				runningSession.agentRunner!.addStreamMessage.mock.calls[0][0];
+			expect(streamedPrompt).toContain(
+				"<timestamp>2026-07-17T10:00:00.000Z</timestamp>",
+			);
 		});
 
 		it("should NOT resume idle sessions — updates are streaming-only", async () => {

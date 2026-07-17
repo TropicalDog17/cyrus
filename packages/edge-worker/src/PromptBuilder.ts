@@ -698,7 +698,11 @@ ${repoDescriptions.join("\n")}
 			const mentionContent = agentSession.comment?.body || "";
 			const authorName =
 				agentSession.creator?.name || agentSession.creator?.id || "Unknown";
-			const timestamp = agentSession.createdAt || new Date().toISOString();
+			// Use the agent session's own creation timestamp; omit the line when
+			// no source timestamp exists so the prompt stays reproducible.
+			const timestampLine = agentSession.createdAt
+				? `\n  <timestamp>${agentSession.createdAt}</timestamp>`
+				: "";
 
 			// Build a focused prompt with comment metadata
 			let prompt = `You were mentioned in a Linear comment on this issue:
@@ -711,8 +715,7 @@ ${repoDescriptions.join("\n")}
 </linear_issue>
 
 <mention_comment>
-  <author>${authorName}</author>
-  <timestamp>${timestamp}</timestamp>
+  <author>${authorName}</author>${timestampLine}
   <content>
 ${mentionContent}
   </content>
@@ -925,14 +928,20 @@ IMPORTANT: Focus specifically on addressing the new comment above. This is a new
 				);
 
 				// Now replace the new comment variables
-				// We'll need to fetch the comment author
+				// We'll need to fetch the comment author and its creation time.
+				// Use the comment's own createdAt (deterministic) rather than a
+				// wall-clock / locale-dependent value so the prompt is reproducible.
 				let authorName = "Unknown";
+				let commentTimestamp = newComment.createdAt ?? "";
 				if (issueTracker) {
 					try {
 						const fullComment = await issueTracker.fetchComment(newComment.id);
 						const user = await fullComment.user;
 						authorName =
 							user?.displayName || user?.name || user?.email || "Unknown";
+						if (fullComment.createdAt) {
+							commentTimestamp = new Date(fullComment.createdAt).toISOString();
+						}
 					} catch (error) {
 						this.logger.error("Failed to fetch comment author:", error);
 					}
@@ -940,7 +949,7 @@ IMPORTANT: Focus specifically on addressing the new comment above. This is a new
 
 				prompt = prompt
 					.replace(/{{new_comment_author}}/g, authorName)
-					.replace(/{{new_comment_timestamp}}/g, new Date().toLocaleString())
+					.replace(/{{new_comment_timestamp}}/g, commentTimestamp)
 					.replace(/{{new_comment_content}}/g, newComment.body || "");
 			} else {
 				// Remove the new comment section entirely (including preceding newlines)
@@ -1026,13 +1035,17 @@ ${newComment ? `New comment to address:\n${newComment.body}\n\n` : ""}Please ana
 			description?: string;
 			attachments?: unknown;
 		},
+		timestamp?: string,
 	): string {
-		const timestamp = new Date().toISOString();
 		const parts: string[] = [];
 
 		parts.push(`<issue_update>`);
 		parts.push(`  <identifier>${issueIdentifier}</identifier>`);
-		parts.push(`  <timestamp>${timestamp}</timestamp>`);
+		// Use the webhook's own update timestamp; omit the line when no source
+		// timestamp exists so the prompt stays reproducible.
+		if (timestamp) {
+			parts.push(`  <timestamp>${timestamp}</timestamp>`);
+		}
 
 		// Add title change if title was updated
 		if ("title" in updatedFrom) {
@@ -1165,7 +1178,7 @@ ${newComment ? `New comment to address:\n${newComment.body}\n\n` : ""}Please ana
 			const rootUser = await rootComment.user;
 			const rootAuthor =
 				rootUser?.displayName || rootUser?.name || rootUser?.email || "Unknown";
-			const rootTime = new Date(rootComment.createdAt).toLocaleString();
+			const rootTime = new Date(rootComment.createdAt).toISOString();
 
 			let threadText = `<comment_thread>
 	<root_comment>
@@ -1186,7 +1199,7 @@ ${rootComment.body}
 						replyUser?.name ||
 						replyUser?.email ||
 						"Unknown";
-					const replyTime = new Date(reply.createdAt).toLocaleString();
+					const replyTime = new Date(reply.createdAt).toISOString();
 
 					threadText += `
 		<reply>

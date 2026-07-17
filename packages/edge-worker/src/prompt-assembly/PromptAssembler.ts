@@ -195,10 +195,13 @@ export class PromptAssembler {
 			// If we have author/timestamp metadata, include it for multi-player context
 			if (input.commentAuthor || input.commentTimestamp) {
 				const author = input.commentAuthor || "Unknown";
-				const timestamp = input.commentTimestamp || new Date().toISOString();
+				// Use the event's own timestamp; omit the line when no source
+				// timestamp exists so the prompt stays reproducible.
+				const timestampLine = input.commentTimestamp
+					? `\n  <timestamp>${input.commentTimestamp}</timestamp>`
+					: "";
 				parts.push(`<user_comment>
-  <author>${author}</author>
-  <timestamp>${timestamp}</timestamp>
+  <author>${author}</author>${timestampLine}
   <content>
 ${input.userComment}
   </content>
@@ -258,13 +261,16 @@ ${input.userComment}
 			components.push("attachment-manifest");
 		}
 
-		// Wrap comment in XML with author and timestamp for multi-player context
+		// Wrap comment in XML with author and timestamp for multi-player context.
+		// Use the event's own timestamp; omit the line when no source timestamp
+		// exists so the prompt stays reproducible across re-assembly.
 		const author = input.commentAuthor || "Unknown";
-		const timestamp = input.commentTimestamp || new Date().toISOString();
+		const timestampLine = input.commentTimestamp
+			? `\n  <timestamp>${input.commentTimestamp}</timestamp>`
+			: "";
 
 		const commentXml = `<new_comment>
-  <author>${author}</author>
-  <timestamp>${timestamp}</timestamp>
+  <author>${author}</author>${timestampLine}
   <content>
 ${input.userComment}
   </content>

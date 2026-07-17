@@ -4,7 +4,7 @@
  * Tests prompt assembly for continuation (non-streaming, non-new) sessions.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, it } from "vitest";
 import { createTestWorker, scenario } from "./prompt-assembly-utils.js";
 
 describe("Prompt Assembly - Continuation Sessions", () => {
@@ -73,27 +73,23 @@ You can use the Read tool to view these files.
 			.verify();
 	});
 
-	it("should default to Unknown author if not provided", async () => {
+	it("should default to Unknown author and omit the timestamp line when neither is provided", async () => {
 		const worker = createTestWorker();
 
-		const result = await scenario(worker)
+		// With no source timestamp, the <timestamp> line is omitted entirely so
+		// the assembled prompt stays reproducible (no wall-clock fallback).
+		await scenario(worker)
 			.continuationSession()
 			.withUserComment("Update the docs")
-			.build();
-
-		// Verify structure with dynamic timestamp
-		expect(result.userPrompt).toContain("<new_comment>");
-		expect(result.userPrompt).toContain("<author>Unknown</author>");
-		expect(result.userPrompt).toMatch(
-			/<timestamp>[\d-]+T[\d:.]+Z<\/timestamp>/,
-		);
-		expect(result.userPrompt).toContain(
-			"<content>\nUpdate the docs\n  </content>",
-		);
-		expect(result.userPrompt).toContain("</new_comment>");
-
-		expect(result.systemPrompt).toBeUndefined();
-		expect(result.metadata.components).toEqual(["user-comment"]);
-		expect(result.metadata.promptType).toBe("continuation");
+			.expectUserPrompt(`<new_comment>
+  <author>Unknown</author>
+  <content>
+Update the docs
+  </content>
+</new_comment>`)
+			.expectSystemPrompt(undefined)
+			.expectComponents("user-comment")
+			.expectPromptType("continuation")
+			.verify();
 	});
 });
