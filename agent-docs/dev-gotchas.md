@@ -122,6 +122,50 @@ routing to Cyrus itself:
 (If a chat adapter or other surface documents routing syntax, update it in the
 same PR.)
 
+## Model precedence lives ONLY in `RunnerSelectionService`
+
+`RunnerSelectionService.determineRunnerSelection(labels, description, opts?)` is
+the single source of truth for which model (and fallback) a session runs on. It
+folds every source into one ordered chain:
+
+```
+explicitModel = descriptionTag || modelLabel || opts.labelPromptModel || opts.repositoryModel
+```
+
+then resolves the runner from that, applies the runner-family conflict guard, and
+returns `{ runnerType, modelOverride, fallbackModelOverride }`.
+
+Do **not** re-add a `model || repository.model || default` chain anywhere
+downstream. `RunnerConfigBuilder` used to carry exactly that fallback, but because
+the service always returns a resolved `modelOverride`, the `|| repository.model`
+arm was dead — `repository.model` never took effect (DEV-174 revived it by folding
+it into `explicitModel` here and deleting the builder chain). The builder now just
+passes `modelOverride`/`fallbackModelOverride` straight through. A second precedence
+site will silently diverge from this one; keep it here.
+
+The runner-family guard applies to both `labelPromptModel`/`repositoryModel` and
+`repositoryFallbackModel`: an override whose inferred family (`composer-*`→cursor,
+`gpt-*`/`o3`/`codex`→codex, `opus`/`sonnet`/`haiku`→claude) conflicts with the
+already-resolved runner is dropped, not honored — we never switch runner families
+mid-issue.
+
+## Effort (`effort` / `claudeDefaultEffort`)
+
+Reasoning effort is a **Claude-only** scalar (`low|medium|high|xhigh|max`) plumbed
+separately from model. Resolution (narrowest scope wins) lives in
+`SessionOrchestrator` (both `startSession` and `resumeSessionInner`):
+
+```
+effort = labelPrompt.effort ?? repository.effort ?? config.claudeDefaultEffort
+```
+
+It is set on `ClaudeRunnerConfig.effort` **only when `runnerType === "claude"`**
+(guarded in `RunnerConfigBuilder`, same shape as `autoCompactWindow`), then spread
+into the SDK query options in `ClaudeRunner`. There is no separate `thinking` knob —
+`effort` already steers adaptive thinking. Unset means no `effort` is passed and the
+SDK keeps its own default (`high`). Unsupported levels are silently downgraded by the
+SDK, so an out-of-family value is harmless, not an error.
+
 ## Adding a new top-level `EdgeWorkerConfig` field
 
 **Current (schema-driven `ConfigManager.reconcile`):** Adding a property to

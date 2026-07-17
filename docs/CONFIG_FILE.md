@@ -153,6 +153,19 @@ Routes issues to different AI modes based on Linear labels and optionally config
 
 - **Custom array**: Specify exact tools needed, e.g., `["Read", "Edit", "Task"]`
 
+The advanced format also accepts a per-mode **`model`** and **`effort`** (Claude runner only) — see [Model & Effort Selection](#model--effort-selection):
+
+```json
+{
+  "debugger": {
+    "labels": ["Bug"],
+    "allowedTools": "readOnly",
+    "model": "opus",
+    "effort": "high"
+  }
+}
+```
+
 Note: Linear MCP tools (`mcp__linear`) are always included automatically. Slack MCP tools (`mcp__slack`) are included when the `SLACK_BOT_TOKEN` environment variable is set (Linear and Slack sessions only; excluded from GitHub sessions).
 
 ### Atlassian MCP (Jira / Confluence)
@@ -163,6 +176,59 @@ Cyrus can query Jira ticket (or Confluence page) content for context — for exa
 - **`ATLASSIAN_MCP_URL`** *(optional)* — Override the MCP endpoint. Defaults to `https://mcp.atlassian.com/v1/mcp` (the official streamable-HTTP endpoint). A URL whose path ends in `/sse` is treated as the SSE transport, so `https://mcp.atlassian.com/v1/sse` also works. Point this at a self-hosted server for Jira Data Center / Server.
 
 The server is injected only when `ATLASSIAN_MCP_TOKEN` or `ATLASSIAN_MCP_URL` is set; otherwise it is skipped entirely. Whether a session can call these tools is still gated by its allowed-tools list (`mcp__atlassian`), which is granted by default for Linear, GitHub, and read-only sessions.
+
+---
+
+## Model & Effort Selection
+
+Which model a session runs on, and how hard it reasons, can be set at several levels. Cyrus resolves them centrally, so the precedence is the same everywhere.
+
+### Model precedence
+
+For a given session the model is chosen from the first source that is set:
+
+1. **Description tag** — a `model:` (or `cyrus-model:`) tag in the issue description. Highest priority; lets a single issue override everything.
+2. **Model label** — a Linear label whose name maps to a model (e.g. `opus`, `sonnet`).
+3. **Label-prompt `model`** — the `model` on the matched `labelPrompts` entry (advanced format).
+4. **Repository `model`** — the repository-level default below.
+5. **Runner default** — the built-in default for the selected runner (`claudeDefaultModel`, `cursorDefaultModel`, …).
+
+A model implies a runner (a `composer-*` model selects Cursor, a `gpt-*`/`o3`/`codex` model selects Codex, an `opus`/`sonnet`/`haiku` model selects Claude). If a **`model`** or **`fallbackModel`** override names a family that conflicts with the runner already resolved for the session, that override is ignored rather than silently switching runners — Cyrus does not change repositories or runner families mid-issue.
+
+### `model` (string, repository-level)
+
+Default model for sessions on this repository, used when the issue itself doesn't pin one via a tag or label. Accepts a model alias (`opus`, `sonnet`, `haiku`) or a full model id.
+
+```json
+{
+  "repositoryPath": "/path/to/repo",
+  "model": "opus",
+  "fallbackModel": "sonnet"
+}
+```
+
+### `fallbackModel` (string, repository-level)
+
+Model Cyrus falls back to when the primary model is unavailable (e.g. capacity/overload). Subject to the same runner-family guard as `model`.
+
+### `effort` (string)
+
+Reasoning-effort level for **Claude** sessions: one of `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. Steers how much the model reasons before acting; there is no separate `thinking` knob. Cursor and Codex ignore it.
+
+Effort is resolved with the same first-set-wins precedence, narrowest scope first:
+
+1. **Label-prompt `effort`** — the `effort` on the matched `labelPrompts` entry.
+2. **Repository `effort`** — the repository-level default below.
+3. **`claudeDefaultEffort`** — the global default (see [Global Configuration](#claudedefaulteffort-string)).
+
+```json
+{
+  "repositoryPath": "/path/to/repo",
+  "effort": "high"
+}
+```
+
+When none of the three is set, no effort is passed and the SDK keeps its own default (`high`). Levels the running model doesn't support are silently downgraded by the SDK.
 
 ---
 
@@ -436,6 +502,18 @@ By default Claude's built-in auto-compaction only triggers near the model's full
 When omitted, the SDK's default (model-context-sized) behavior is preserved and nothing changes. A value around `120000`–`150000` is a reasonable starting point for long-running issues; lower values compact more aggressively (cheaper, but more summarization of earlier context).
 
 **Valid range: `100000` to `1000000`.** Claude Code silently discards a window outside that range, so the session would compact at the model's native window as though the setting were never there. Cyrus now ignores an out-of-range value and logs a warning rather than letting it look effective.
+
+### `claudeDefaultEffort` (string)
+
+Default reasoning-effort level for all Claude sessions: one of `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. Applies to all repositories; Claude runner only (Cursor and Codex ignore it).
+
+```json
+{
+  "claudeDefaultEffort": "high"
+}
+```
+
+This is the lowest-priority effort source — a repository-level `effort` or a label-prompt `effort` overrides it for the sessions they cover (see [Model & Effort Selection](#effort-string)). When omitted, no effort is passed and the SDK keeps its own default (`high`).
 
 ### `claudeSubagentModel` (string)
 

@@ -112,6 +112,7 @@ export type {
 	EdgeConfig,
 	EdgeConfigPayload,
 	EdgeWorkerConfig,
+	EffortLevel,
 	LinearWorkspaceConfig,
 	NetworkPolicy,
 	OAuthCallbackHandler,
@@ -131,6 +132,7 @@ export {
 	EdgeConfigPayloadSchema,
 	// Zod schemas for runtime validation
 	EdgeConfigSchema,
+	EffortLevelSchema,
 	getReadParentDirectories,
 	LinearWorkspaceConfigSchema,
 	migrateEdgeConfig,

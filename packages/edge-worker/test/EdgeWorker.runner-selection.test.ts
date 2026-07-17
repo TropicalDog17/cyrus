@@ -453,6 +453,132 @@ Issue: {{issue_identifier}}`;
 			expect(runnerSelection.runnerType).toBe("cursor");
 			expect(runnerSelection.modelOverride).toBe("composer-2.5");
 		});
+
+		// Model precedence is centralized here: description tag > model label >
+		// labelPromptModel > repositoryModel. The `opts` sources are the ones a
+		// pre-DEV-174 build ignored entirely.
+		it("folds labelPromptModel and repositoryModel into the precedence chain", () => {
+			const svc = (edgeWorker as any).runnerSelectionService;
+
+			// repository.model alone is honored (would have been ignored before).
+			expect(
+				svc.determineRunnerSelection([], undefined, {
+					repositoryModel: "haiku",
+				}).modelOverride,
+			).toBe("haiku");
+
+			// labelPromptModel outranks repositoryModel.
+			expect(
+				svc.determineRunnerSelection([], undefined, {
+					labelPromptModel: "sonnet",
+					repositoryModel: "haiku",
+				}).modelOverride,
+			).toBe("sonnet");
+
+			// A model label outranks both opts sources.
+			expect(
+				svc.determineRunnerSelection(["opus"], undefined, {
+					labelPromptModel: "sonnet",
+					repositoryModel: "haiku",
+				}).modelOverride,
+			).toBe("opus");
+
+			// A [model=...] description tag outranks everything.
+			expect(
+				svc.determineRunnerSelection(["opus"], "[model=fable]", {
+					labelPromptModel: "sonnet",
+					repositoryModel: "haiku",
+				}).modelOverride,
+			).toBe("fable");
+		});
+
+		it("drops a repositoryModel that conflicts with the resolved runner family", () => {
+			// A `cursor` label forces the Cursor runner; the Claude-family
+			// repository.model is dropped and Cursor's default model is used.
+			const result = (
+				edgeWorker as any
+			).runnerSelectionService.determineRunnerSelection(["cursor"], undefined, {
+				repositoryModel: "haiku",
+			});
+
+			expect(result.runnerType).toBe("cursor");
+			expect(result.modelOverride).toBe("composer-2.5");
+		});
+
+		it("honors repositoryFallbackModel when its family matches the runner", () => {
+			const result = (
+				edgeWorker as any
+			).runnerSelectionService.determineRunnerSelection([], undefined, {
+				repositoryModel: "opus",
+				repositoryFallbackModel: "haiku",
+			});
+
+			expect(result.runnerType).toBe("claude");
+			expect(result.modelOverride).toBe("opus");
+			expect(result.fallbackModelOverride).toBe("haiku");
+		});
+	});
+
+	// End-to-end proof that a configured `repository.model` reaches the runner
+	// config. This is the exact path a pre-DEV-174 build broke: the selector
+	// always returned a truthy model, so RunnerConfigBuilder's
+	// `modelOverride || repository.model || default` chain never fell through to
+	// `repository.model`.
+	describe("Model precedence (repository.model revival)", () => {
+		async function runWithRepository(
+			repository: RepositoryConfig,
+			labels: string[],
+			description = "Test description",
+		) {
+			const worker = composeEdgeWorker({
+				...mockConfig,
+				repositories: [repository],
+			});
+			(worker as any).issueTrackers.set(repository.linearWorkspaceId, {
+				fetchIssue: vi.fn().mockImplementation(async (issueId: string) => {
+					return mockLinearClient.issue(issueId);
+				}),
+				getIssueLabels: vi.fn(),
+				getClient: vi.fn().mockReturnValue({}),
+			});
+			mockLinearClient.issue.mockResolvedValue(
+				createMockIssueWithLabels(labels, description),
+			);
+			await (worker as any).handleAgentSessionCreatedWebhook(createWebhook(), [
+				repository,
+			]);
+		}
+
+		it("uses repository.model when no label/description model is present", async () => {
+			await runWithRepository(
+				{ ...mockRepository, model: "haiku", fallbackModel: "sonnet" },
+				[],
+			);
+
+			expect(capturedRunnerType).toBe("claude");
+			// Pre-fix this resolved to the runner default ("opus"); repository.model
+			// was dead. Post-fix the selector folds it in.
+			expect(capturedRunnerConfig.model).toBe("haiku");
+			expect(capturedRunnerConfig.fallbackModel).toBe("sonnet");
+		});
+
+		it("lets a model label override repository.model", async () => {
+			await runWithRepository({ ...mockRepository, model: "haiku" }, ["opus"]);
+
+			expect(capturedRunnerType).toBe("claude");
+			expect(capturedRunnerConfig.model).toBe("opus");
+		});
+
+		it("lets a [model=...] description tag override repository.model", async () => {
+			await runWithRepository(
+				{ ...mockRepository, model: "haiku" },
+				[],
+				"Fix this [model=sonnet]",
+			);
+
+			expect(capturedRunnerType).toBe("claude");
+			expect(capturedRunnerConfig.model).toBe("sonnet");
+		});
 	});
 
 	describe("Session Continuation", () => {

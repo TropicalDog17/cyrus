@@ -103,7 +103,7 @@ function serializeQueryOptionsReplacer(_key: string, value: unknown): unknown {
  * unbounded prose (env, mcpServers' inner config, the prompt, system prompt
  * append text, hook scripts, additionalEnv) and keeps only the configuration
  * surface useful for triaging "what was Claude invoked with":
- *   - model / fallbackModel / maxTurns / outputFormat
+ *   - model / fallbackModel / maxTurns / effort / outputFormat
  *   - system prompt SHAPE (type/preset/has-append) — not the text
  *   - tool allowlist/denylist (counts + first 50 entries)
  *   - resumeSessionId, workingDirectory, additionalDirectories
@@ -125,6 +125,7 @@ function buildSanitizedQueryOptions(
 	if (typeof o.model === "string") out.model = o.model;
 	if (typeof o.fallbackModel === "string") out.fallbackModel = o.fallbackModel;
 	if (typeof o.maxTurns === "number") out.maxTurns = o.maxTurns;
+	if (typeof o.effort === "string") out.effort = o.effort;
 	if (typeof o.outputFormat === "string") out.outputFormat = o.outputFormat;
 	if (typeof o.cwd === "string") out.cwd = o.cwd;
 	// Per-directory Read grants are surfaced via the `Read(<dir>/**)` entries in
@@ -858,6 +859,10 @@ export class ClaudeRunner
 					// Claude with `--tools ""` and removes Bash, Read, Skill, and editors.
 					...(this.config.tools !== undefined && { tools: this.config.tools }),
 					...(this.config.maxTurns && { maxTurns: this.config.maxTurns }),
+					// Reasoning effort steers the SDK's adaptive thinking. Unset
+					// preserves the SDK default (`high`); unsupported levels are
+					// silently downgraded.
+					...(this.config.effort && { effort: this.config.effort }),
 					...(this.config.outputFormat && {
 						outputFormat: this.config.outputFormat,
 					}),
