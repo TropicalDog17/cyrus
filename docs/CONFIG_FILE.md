@@ -490,11 +490,11 @@ When the agent uses AskUserQuestion, the session blocks until you pick an option
 
 ```json
 {
-  "askUserQuestionTimeoutMinutes": 30
+  "askUserQuestionTimeoutMinutes": 10
 }
 ```
 
-When omitted, defaults to 30 minutes. Set `0` to wait indefinitely (legacy behavior). Applies to questions asked after a config change — no restart needed.
+When omitted, defaults to 10 minutes. Set `0` to wait indefinitely (legacy behavior). Applies to questions asked after a config change — no restart needed.
 
 ---
 

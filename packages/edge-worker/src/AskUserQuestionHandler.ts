@@ -78,10 +78,16 @@ export interface AskUserQuestionHandlerConfig {
 
 /**
  * Default time to wait for a user's response before unblocking the agent.
- * 30 minutes: long enough for an attentive user, short enough to avoid a
- * session hanging for hours on a lost response webhook.
+ * 10 minutes: long enough for an attentive user to reply, short enough to keep
+ * a blocking question from dominating a session's wall-clock time. Trace audits
+ * (DEV-144) found the previous 30-minute default accounted for ~42% of wall
+ * clock while sessions sat idle waiting on a response. Lowering it lets a
+ * session unblock and proceed using its best judgment sooner.
+ *
+ * Override via the `askUserQuestionTimeoutMinutes` config; set that to `0` to
+ * wait indefinitely.
  */
-export const DEFAULT_QUESTION_TIMEOUT_MS = 30 * 60 * 1000;
+export const DEFAULT_QUESTION_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
  * Convert `askUserQuestionTimeoutMinutes` config to milliseconds for the handler.

@@ -815,6 +815,10 @@ describe("AskUserQuestionHandler", () => {
 			vi.useRealTimers();
 		});
 
+		it("defaults to 10 minutes (600_000 ms)", () => {
+			expect(DEFAULT_QUESTION_TIMEOUT_MS).toBe(600_000);
+		});
+
 		it("uses DEFAULT_QUESTION_TIMEOUT_MS when no config or getter is provided", async () => {
 			const defaultHandler = new AskUserQuestionHandler({
 				getIssueTracker: mockGetIssueTracker,
