@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { buildBaseSessionEnv } from "../src/session-env";
+import { buildBaseSessionEnv, buildToolOutputCapEnv } from "../src/session-env";
 
 describe("buildBaseSessionEnv", () => {
 	let originalEnv: NodeJS.ProcessEnv;
@@ -38,5 +38,32 @@ describe("buildBaseSessionEnv", () => {
 	it("lets caller-provided extra env override defaults", () => {
 		const env = buildBaseSessionEnv({ CLAUDE_CODE_ENABLE_TASKS: "false" });
 		expect(env.CLAUDE_CODE_ENABLE_TASKS).toBe("false");
+	});
+});
+
+describe("buildToolOutputCapEnv", () => {
+	it("stringifies both caps when configured", () => {
+		expect(
+			buildToolOutputCapEnv({
+				bashMaxOutputLength: 30000,
+				mcpMaxOutputTokens: 25000,
+			}),
+		).toEqual({
+			BASH_MAX_OUTPUT_LENGTH: "30000",
+			MAX_MCP_OUTPUT_TOKENS: "25000",
+		});
+	});
+
+	it("emits only the configured cap (unset preserves the CLI default)", () => {
+		expect(buildToolOutputCapEnv({ bashMaxOutputLength: 30000 })).toEqual({
+			BASH_MAX_OUTPUT_LENGTH: "30000",
+		});
+		expect(buildToolOutputCapEnv({ mcpMaxOutputTokens: 25000 })).toEqual({
+			MAX_MCP_OUTPUT_TOKENS: "25000",
+		});
+	});
+
+	it("returns an empty object when neither cap is configured", () => {
+		expect(buildToolOutputCapEnv({})).toEqual({});
 	});
 });

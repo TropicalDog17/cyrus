@@ -4,6 +4,7 @@ import { basename, join } from "node:path";
 import type { McpServerConfig, WarmQuery } from "cyrus-claude-runner";
 import {
 	buildBaseSessionEnv,
+	buildToolOutputCapEnv,
 	normalizeMcpHttpTransport,
 } from "cyrus-claude-runner";
 import type {
@@ -256,7 +257,18 @@ export class WarmSessionPool {
 							settingSources: ["user", "project", "local"],
 							// CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is intentionally not set here;
 							// see CYPACK-1108 and ClaudeRunner.start() for context.
-							env: buildBaseSessionEnv(),
+							// Match the live runner's tool-output caps so a warm-resumed
+							// session truncates oversized Bash/MCP output identically to a
+							// cold one; warmup() builds its own startup env and would
+							// otherwise skip them.
+							env: buildBaseSessionEnv(
+								buildToolOutputCapEnv({
+									bashMaxOutputLength:
+										this.deps.getConfig().claudeBashMaxOutputLength,
+									mcpMaxOutputTokens:
+										this.deps.getConfig().claudeMcpMaxOutputTokens,
+								}),
+							),
 						},
 					});
 

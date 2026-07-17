@@ -113,6 +113,18 @@ export interface IssueRunnerConfigInput {
 	 */
 	autoCompactWindow?: number;
 	/**
+	 * Max characters of a single Bash tool result before the CLI truncates it
+	 * (`EdgeWorkerConfig.claudeBashMaxOutputLength`). Claude runner only; ignored
+	 * for Cursor. Undefined preserves the CLI default.
+	 */
+	bashMaxOutputLength?: number;
+	/**
+	 * Max tokens a single MCP tool result may contribute before the CLI
+	 * truncates it (`EdgeWorkerConfig.claudeMcpMaxOutputTokens`). Claude runner
+	 * only; ignored for Cursor. Undefined preserves the CLI default.
+	 */
+	mcpMaxOutputTokens?: number;
+	/**
 	 * Model for the read-only `explore` subagent
 	 * (`EdgeWorkerConfig.claudeSubagentModel`). Claude runner only; ignored for
 	 * Cursor. Undefined registers no such agent, leaving the SDK's built-in
@@ -423,6 +435,15 @@ export class RunnerConfigBuilder {
 		// Codex have no equivalent knob, so this is intentionally not set there.
 		if (runnerType === "claude" && input.effort !== undefined) {
 			config.effort = input.effort;
+		}
+
+		// Claude-only: forward the tool-output caps. Cursor manages its own tool
+		// output, so these are not set there.
+		if (runnerType === "claude" && input.bashMaxOutputLength !== undefined) {
+			config.bashMaxOutputLength = input.bashMaxOutputLength;
+		}
+		if (runnerType === "claude" && input.mcpMaxOutputTokens !== undefined) {
+			config.mcpMaxOutputTokens = input.mcpMaxOutputTokens;
 		}
 
 		// Claude-only: forward the explore-subagent model. Cursor has no

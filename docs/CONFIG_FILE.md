@@ -515,6 +515,24 @@ Default reasoning-effort level for all Claude sessions: one of `"low"`, `"medium
 
 This is the lowest-priority effort source — a repository-level `effort` or a label-prompt `effort` overrides it for the sessions they cover (see [Model & Effort Selection](#effort-string)). When omitted, no effort is passed and the SDK keeps its own default (`high`).
 
+### `claudeBashMaxOutputLength` (number) and `claudeMcpMaxOutputTokens` (number)
+
+Caps on how much a single tool result can contribute to the conversation. Applies to all repositories; Claude runner only (Cursor manages its own tool output).
+
+- `claudeBashMaxOutputLength` — maximum length, in **characters**, of a single Bash tool result (forwarded as `BASH_MAX_OUTPUT_LENGTH`).
+- `claudeMcpMaxOutputTokens` — maximum number of **tokens** a single MCP tool result may contribute (forwarded as `MAX_MCP_OUTPUT_TOKENS`).
+
+A single oversized tool result — a multi-megabyte build log, a `cat` of a huge file, a chatty MCP response — otherwise lands in the transcript verbatim and is re-sent to the prompt cache on **every** subsequent turn, so one giant output keeps being paid for long after it stops being useful. Setting these caps truncates such results at the source, bounding that tax.
+
+```json
+{
+  "claudeBashMaxOutputLength": 30000,
+  "claudeMcpMaxOutputTokens": 25000
+}
+```
+
+When either is omitted, the bundled Claude CLI's own built-in default applies and nothing changes for that tool. `30000` / `25000` are reasonable starting points; lower values truncate more aggressively (cheaper, but a truncated result may drop information the agent needed, so it may re-run the command).
+
 ### `claudeSubagentModel` (string)
 
 Model used by the read-only `explore` subagent, which the agent can hand broad codebase searches to instead of reading every candidate file into the main conversation. Accepts a model alias (`haiku`, `sonnet`, `opus`) or a full model id. Applies to all repositories; Claude runner only.

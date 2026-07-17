@@ -569,6 +569,16 @@
 			"type": "string",
 			"enum": ["low", "medium", "high", "xhigh", "max"]
 		},
+		"claudeBashMaxOutputLength": {
+			"type": "integer",
+			"exclusiveMinimum": 0,
+			"maximum": 9007199254740991
+		},
+		"claudeMcpMaxOutputTokens": {
+			"type": "integer",
+			"exclusiveMinimum": 0,
+			"maximum": 9007199254740991
+		},
 		"claudeSubagentModel": {
 			"type": "string"
 		},
