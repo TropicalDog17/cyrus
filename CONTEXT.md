@@ -24,10 +24,14 @@ one vocabulary. Architecture terms (**module**, **interface**, **seam**,
 > `docs/adr/` (0001–0010) agree on one vocabulary. Do not read them as descriptions
 > of current behavior, and do not "fix" code to match them.
 >
-> What is actually true today: there is no ACP code, no agent-profile registry, and
-> no `agentProfileId`. `IAgentRunner` carries `readonly provider: "claude" | "cursor"`
-> (`packages/core/src/agent-runner-types.ts`), implemented by `ClaudeRunner` and
-> `CursorRunner`. Delete this section's gate only when the code lands.
+> What is actually true today: ACP *transport* exists for one agent — Codex
+> (`packages/codex-runner/`, `acpProcess.ts` + `CodexEventMapper.ts`) — but the
+> **profile-registry abstraction does not**. There is no `agentProfileId`. Runner
+> selection is still a hardcoded union: `IAgentRunner` carries
+> `readonly provider: "claude" | "cursor" | "codex"`
+> (`packages/core/src/agent-runner-types.ts`) and `RunnerSelectionService` dispatches
+> by string-sniffing model/label heuristics. Building the registry (ADR 0009) is
+> Phase C of the modularity program. Delete this section's gate only when it lands.
 
 - **Agent profile** — the stable Cyrus identity and launch configuration for an
   agent. A profile selects its runner protocol, command, environment, and defaults.
@@ -49,8 +53,13 @@ one vocabulary. Architecture terms (**module**, **interface**, **seam**,
 
 ## Seam inventory (target decomposition of EdgeWorker)
 
-EdgeWorker today is a 6,759-line god object across 12 axes of change. It decomposes
-into these deep modules (★ = new extraction, ○ = exists, being deepened/injected):
+EdgeWorker began as a ~6,759-line god object across 12 axes of change. It decomposes
+into these deep modules (★ = new extraction, ○ = exists, being deepened/injected).
+**Phase A of the modularity program (see ADR 0012) has landed**: the six residual
+axes that still lived in EdgeWorker — GitHub webhook routing, GitHub acting spine,
+GitHub system prompts, parent-session resume, repository-config reconciliation, and
+sandbox/cert lifecycle — were folded into the seams below (or into the new
+`SandboxManager`), taking EdgeWorker from 5,293 → ~4,573 lines with the suite green.
 
 | Module | Interface (small surface) | Behind the seam |
 |---|---|---|
@@ -58,11 +67,13 @@ into these deep modules (★ = new extraction, ○ = exists, being deepened/inje
 | **AgentMessage** ★ (core) | neutral discriminated union + `IAgentRunner.provider` | frees runners from impersonating the Claude SDK type |
 | **ActivityMapper** ★ | `map(msg: AgentMessage, ctx) → Activity[]` (pure) | the single per-tool render table; no session state |
 | **AccessPolicy** ★ | `compute(input) → EffectiveAccessPolicy` + `toClaudeToolPatterns / toSandboxFilesystem / toCursorPermissions` | one policy, three adapters |
-| **PromptAssembler** ★ | `assemble(input) → { userPrompt, systemPrompt?, metadata }` | the one owner of "the prompt"; the tested contract goes public |
-| **SessionOrchestrator** ★ | `startSession(req)` / `resumeSession(id, prompt)` | runner creation + message wiring |
+| **PromptAssembler** ★ | `assemble(input) → { userPrompt, systemPrompt?, metadata }` + `buildGitHubSystemPrompt` / `buildGitHubChangeRequestSystemPrompt` | the one owner of "the prompt"; the tested contract goes public; now owns GitHub PR system prompts too |
+| **SessionOrchestrator** ★ | `startSession(req)` / `resumeSession(id, prompt)` / `startGitHubSession(req)` / `handleResumeParentSession(...)` | runner creation + message wiring; now owns GitHub acting spine + parent-session resume |
 | **WarmSessionPool** ★ | `acquireWarm(criteria)` / `warmup(...)` / `release(...)` | warm reuse; warmup calls AccessPolicy (no hand re-derivation) |
 | **ParkedSessionRegistry** ★ | `park(id, reason)` / `wake(id)` / `isParked(id)` | block/park/wake state machine |
-| **WebhookRouter** ★ | `dispatch(webhook)` | created-vs-prompted, mention-vs-delegation, stop, pending-selection branching |
+| **WebhookRouter** ★ | `dispatch(webhook)` + `gateGitHubComment` / `resolveGitHubPushTarget` / `findRepositoryByGitHubUrl` | created-vs-prompted, mention-vs-delegation, stop, pending-selection branching; now owns GitHub webhook routing/gating |
+| **ConfigManager** ○ | (above) + `applyAdded/Modified/RemovedRepositories` / `computeWorkspaceTokenChanges` | now owns repository-map application + workspace-token diff (EdgeWorker keeps only live-object wiring) |
+| **SandboxManager** ★ | `start(cfg)` / `applyConfigChanges(cfg)` / `stop()` / `getSdkSettings()` / `getCaCertPath()` | egress proxy + SDK sandbox settings + cert-trust lifecycle (the one new Phase A module) |
 | **CyrusToolsHost** ★ | `mount()` / `getUrl()` / `createToolsOptions(session)` | in-process cyrus-tools MCP + request context |
 | **EdgeWorker** ○ | thin coordinator; injected collaborators; `composeEdgeWorker(config)` composition root | wiring only, no business logic |
 
