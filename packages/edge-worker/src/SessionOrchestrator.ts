@@ -14,6 +14,7 @@ import type {
 	AgentSessionCreatedWebhook,
 	CyrusAgentSession,
 	EdgeWorkerConfig,
+	EffortLevel,
 	IAgentRunner,
 	ILogger,
 	Issue,
@@ -47,6 +48,10 @@ export interface SystemPromptResult {
 	prompt: string;
 	version?: string;
 	type?: PromptType;
+	/** Model requested by the matched label-prompt config (complex form). */
+	model?: string;
+	/** Reasoning effort requested by the matched label-prompt config (Claude-only). */
+	effort?: EffortLevel;
 }
 
 /** Bundle of everything needed to start a fresh session (was the positional param list of `initializeAgentRunner`). */
@@ -351,12 +356,18 @@ export class SessionOrchestrator {
 			// Get systemPromptVersion for tracking (TODO: add to PromptAssembly metadata)
 			let systemPromptVersion: string | undefined;
 			let promptType: PromptType | undefined;
+			// Model/effort a matched label-prompt requests. Undefined for
+			// mention-triggered sessions that skip label routing.
+			let labelPromptModel: string | undefined;
+			let labelPromptEffort: EffortLevel | undefined;
 
 			if (!isMentionTriggered || isLabelBasedPromptRequested) {
 				const systemPromptResult =
 					await this.deps.determineSystemPromptFromLabels(labels, primaryRepo);
 				systemPromptVersion = systemPromptResult?.version;
 				promptType = systemPromptResult?.type;
+				labelPromptModel = systemPromptResult?.model;
+				labelPromptEffort = systemPromptResult?.effort;
 
 				// Post thought about system prompt selection
 				if (assembly.systemPrompt) {
@@ -390,6 +401,14 @@ export class SessionOrchestrator {
 				);
 			}
 
+			// Reasoning effort precedence: label-prompt → repository → global
+			// default. Undefined preserves the SDK default (`high`). Claude-only;
+			// the config builder guards it per runner type.
+			const effort =
+				labelPromptEffort ??
+				primaryRepo.effort ??
+				this.deps.getConfig().claudeDefaultEffort;
+
 			// Create agent runner with system prompt from assembly
 			// buildAgentRunnerConfig now determines runner type from labels internally
 			const { config: runnerConfig, runnerType } =
@@ -407,6 +426,8 @@ export class SessionOrchestrator {
 					undefined, // maxTurns
 					linearWorkspaceId,
 					this.deps.buildSkillSessionContext(primaryRepo, fullIssue, session),
+					labelPromptModel, // Label-prompt model → selector precedence
+					effort, // Resolved reasoning effort (Claude-only)
 				);
 
 			log.debug(
@@ -611,6 +632,13 @@ export class SessionOrchestrator {
 		);
 		const systemPrompt = systemPromptResult?.prompt;
 		const promptType = systemPromptResult?.type;
+		const labelPromptModel = systemPromptResult?.model;
+		// Reasoning effort precedence: label-prompt → repository → global default.
+		// Undefined preserves the SDK default (`high`). Claude-only.
+		const effort =
+			systemPromptResult?.effort ??
+			repository.effort ??
+			this.deps.getConfig().claudeDefaultEffort;
 
 		// Build allowed and disallowed tools lists
 		const allowedTools = this.deps.buildAllowedTools(repository, promptType);
@@ -665,6 +693,8 @@ export class SessionOrchestrator {
 				maxTurns, // Pass maxTurns if specified
 				resolvedWorkspaceId,
 				this.deps.buildSkillSessionContext(repository, fullIssue, session),
+				labelPromptModel, // Label-prompt model → selector precedence
+				effort, // Resolved reasoning effort (Claude-only)
 			);
 
 		// Create the appropriate runner based on session state
@@ -803,6 +833,17 @@ export class SessionOrchestrator {
 		linearWorkspaceId?: string,
 		skillContext?: SkillSessionContext,
 		/**
+		 * Model from the matched label-prompt config (complex form's `model`).
+		 * Forwarded to the runner-selection service as one model-precedence input;
+		 * the service — not this method — resolves the final model.
+		 */
+		labelPromptModel?: string,
+		/**
+		 * Resolved reasoning effort (label-prompt → repository → `claudeDefaultEffort`).
+		 * Claude runner only; ignored for Cursor/Codex.
+		 */
+		effort?: EffortLevel,
+		/**
 		 * Which platform initiated the session — drives which
 		 * `EdgeWorkerConfig.<platform>McpConfigs` override list applies.
 		 * Defaults to `"linear"` (the pre-platform-aware behavior).
@@ -840,6 +881,10 @@ export class SessionOrchestrator {
 			resumeSessionId,
 			labels,
 			issueDescription,
+			// Label-prompt model, folded into model precedence by the selector.
+			labelPromptModel,
+			// Resolved reasoning effort (Claude runner only; the builder guards it).
+			effort,
 			maxTurns,
 			// Global early auto-compaction window (Claude runner only). Caps the
 			// per-turn re-read context tax on long multi-subroutine sessions by

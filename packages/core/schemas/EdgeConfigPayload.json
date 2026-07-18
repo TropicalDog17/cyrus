@@ -99,6 +99,10 @@
 					"fallbackModel": {
 						"type": "string"
 					},
+					"effort": {
+						"type": "string",
+						"enum": ["low", "medium", "high", "xhigh", "max"]
+					},
 					"labelPrompts": {
 						"type": "object",
 						"properties": {
@@ -150,6 +154,13 @@
 												"items": {
 													"type": "string"
 												}
+											},
+											"model": {
+												"type": "string"
+											},
+											"effort": {
+												"type": "string",
+												"enum": ["low", "medium", "high", "xhigh", "max"]
 											}
 										},
 										"required": ["labels"],
@@ -205,6 +216,13 @@
 												"items": {
 													"type": "string"
 												}
+											},
+											"model": {
+												"type": "string"
+											},
+											"effort": {
+												"type": "string",
+												"enum": ["low", "medium", "high", "xhigh", "max"]
 											}
 										},
 										"required": ["labels"],
@@ -260,6 +278,13 @@
 												"items": {
 													"type": "string"
 												}
+											},
+											"model": {
+												"type": "string"
+											},
+											"effort": {
+												"type": "string",
+												"enum": ["low", "medium", "high", "xhigh", "max"]
 											}
 										},
 										"required": ["labels"],
@@ -315,6 +340,13 @@
 												"items": {
 													"type": "string"
 												}
+											},
+											"model": {
+												"type": "string"
+											},
+											"effort": {
+												"type": "string",
+												"enum": ["low", "medium", "high", "xhigh", "max"]
 											}
 										},
 										"required": ["labels"],
@@ -370,6 +402,13 @@
 												"items": {
 													"type": "string"
 												}
+											},
+											"model": {
+												"type": "string"
+											},
+											"effort": {
+												"type": "string",
+												"enum": ["low", "medium", "high", "xhigh", "max"]
 											}
 										},
 										"required": ["labels"],
@@ -525,6 +564,10 @@
 			"type": "integer",
 			"exclusiveMinimum": 0,
 			"maximum": 9007199254740991
+		},
+		"claudeDefaultEffort": {
+			"type": "string",
+			"enum": ["low", "medium", "high", "xhigh", "max"]
 		},
 		"claudeSubagentModel": {
 			"type": "string"

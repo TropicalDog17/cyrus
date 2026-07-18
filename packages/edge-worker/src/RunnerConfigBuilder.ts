@@ -15,6 +15,7 @@ import type { CodexRunnerConfig } from "cyrus-codex-runner";
 import type {
 	AgentMessage,
 	CyrusAgentSession,
+	EffortLevel,
 	ILogger,
 	OnAskUserQuestion,
 	RepositoryConfig,
@@ -62,6 +63,11 @@ export interface IRunnerSelector {
 	determineRunnerSelection(
 		labels: string[],
 		issueDescription?: string,
+		opts?: {
+			labelPromptModel?: string;
+			repositoryModel?: string;
+			repositoryFallbackModel?: string;
+		},
 	): {
 		runnerType: RunnerType;
 		modelOverride?: string;
@@ -85,6 +91,19 @@ export interface IssueRunnerConfigInput {
 	resumeSessionId?: string;
 	labels?: string[];
 	issueDescription?: string;
+	/**
+	 * Model from the matched label-prompt config (complex form's `model`). Fed
+	 * into `RunnerSelectionService` as one model-precedence source; the service —
+	 * not this builder — resolves the final model. Ranks below description/label
+	 * model tags and above `repository.model`.
+	 */
+	labelPromptModel?: string;
+	/**
+	 * Resolved reasoning effort (label-prompt → repository → `claudeDefaultEffort`).
+	 * Claude runner only; ignored for Cursor/Codex. Undefined preserves the SDK
+	 * default (`high`).
+	 */
+	effort?: EffortLevel;
 	maxTurns?: number;
 	/**
 	 * Effective context-window size (tokens) at which Claude sessions
@@ -219,10 +238,17 @@ export class RunnerConfigBuilder {
 			],
 		};
 
-		// Determine runner type and model override from selectors.
+		// Determine runner type and model override from selectors. Model
+		// precedence (description/label tags → labelPrompt → repository) is
+		// resolved entirely inside the selector; do NOT re-resolve it here.
 		const runnerSelection = this.runnerSelector.determineRunnerSelection(
 			input.labels || [],
 			input.issueDescription,
+			{
+				labelPromptModel: input.labelPromptModel,
+				repositoryModel: input.repository.model,
+				repositoryFallbackModel: input.repository.fallbackModel,
+			},
 		);
 		let runnerType = runnerSelection.runnerType;
 		let modelOverride = runnerSelection.modelOverride;
@@ -254,11 +280,12 @@ export class RunnerConfigBuilder {
 			log.debug(`Model override via selector: ${modelOverride}`);
 		}
 
-		// Determine final model from selectors, repository override, then runner-specific defaults
-		const finalModel =
-			modelOverride ||
-			input.repository.model ||
-			this.runnerSelector.getDefaultModelForRunner(runnerType);
+		// The selector already folded `repository.model` (and the label-prompt
+		// model) into `modelOverride` and guaranteed a runner default when nothing
+		// explicit matched, so this is the final model. Do NOT re-add a
+		// `|| repository.model || default` chain here — that historically shadowed
+		// the selector and left `repository.model` dead (DEV-174).
+		const finalModel = modelOverride;
 
 		const resolvedWorkspaceId =
 			input.linearWorkspaceId ??
@@ -318,12 +345,10 @@ export class RunnerConfigBuilder {
 					),
 				),
 			),
-			// Priority order: label override > repository config > global default
+			// Model + fallback are fully resolved by the selector (see finalModel
+			// above and `determineRunnerSelection`). No local precedence chain.
 			model: finalModel,
-			fallbackModel:
-				fallbackModelOverride ||
-				input.repository.fallbackModel ||
-				this.runnerSelector.getDefaultFallbackModelForRunner(runnerType),
+			fallbackModel: fallbackModelOverride,
 			logger: log,
 			hooks,
 			// Plugins providing managed skills.
@@ -392,6 +417,12 @@ export class RunnerConfigBuilder {
 		// its own context, so this is a no-op there and intentionally not set.
 		if (runnerType === "claude" && input.autoCompactWindow !== undefined) {
 			config.autoCompactWindow = input.autoCompactWindow;
+		}
+
+		// Claude-only: forward the reasoning-effort level to the SDK. Cursor and
+		// Codex have no equivalent knob, so this is intentionally not set there.
+		if (runnerType === "claude" && input.effort !== undefined) {
+			config.effort = input.effort;
 		}
 
 		// Claude-only: forward the explore-subagent model. Cursor has no

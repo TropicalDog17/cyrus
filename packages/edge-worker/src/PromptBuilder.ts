@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import {
 	type BaseBranchResolution,
 	type Comment,
+	type EffortLevel,
 	type GuidanceRule,
 	type IIssueTrackerService,
 	type ILogger,
@@ -40,6 +41,17 @@ export interface SystemPromptResult {
 		| "scoper"
 		| "orchestrator"
 		| "graphite-orchestrator";
+	/**
+	 * Model requested by the matched label-prompt config (complex form's
+	 * `model`). Only the runner-selection service resolves the final model; this
+	 * is just one precedence input it forwards.
+	 */
+	model?: string;
+	/**
+	 * Reasoning effort requested by the matched label-prompt config (complex
+	 * form's `effort`). Claude-only; highest-precedence effort source.
+	 */
+	effort?: EffortLevel;
 }
 
 /**
@@ -256,6 +268,14 @@ export class PromptBuilder {
 			const configuredLabels = Array.isArray(promptConfig)
 				? promptConfig
 				: promptConfig?.labels;
+			// model/effort live only on the complex (object) form; the simple
+			// string[] form carries labels alone.
+			const promptModel = Array.isArray(promptConfig)
+				? undefined
+				: promptConfig?.model;
+			const promptEffort = Array.isArray(promptConfig)
+				? undefined
+				: promptConfig?.effort;
 
 			const matchesLabel =
 				promptType === "orchestrator"
@@ -293,6 +313,8 @@ export class PromptBuilder {
 						prompt: promptContent,
 						version: promptVersion,
 						type: promptType,
+						...(promptModel !== undefined && { model: promptModel }),
+						...(promptEffort !== undefined && { effort: promptEffort }),
 					};
 				} catch (error) {
 					this.logger.error(

@@ -36,6 +36,24 @@ export const RunnerTypeSchema = z.enum(["claude", "cursor", "codex"]);
 export type RunnerType = z.infer<typeof RunnerTypeSchema>;
 
 /**
+ * Reasoning effort levels for the Claude runner.
+ *
+ * Maps to the Claude Agent SDK's `Options.effort`, which steers how much
+ * adaptive thinking the model spends. Unsupported levels are silently
+ * downgraded by the SDK. Unset preserves the SDK default (`high`); Cyrus
+ * intentionally applies no default of its own. Claude-only — Cursor and
+ * Codex ignore it.
+ */
+export const EffortLevelSchema = z.enum([
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+]);
+export type EffortLevel = z.infer<typeof EffortLevelSchema>;
+
+/**
  * User identifier for access control matching.
  * Supports multiple formats for flexibility:
  * - String: treated as user ID (e.g., "usr_abc123")
@@ -96,7 +114,11 @@ const ToolRestrictionSchema = z.union([
  * Label prompt configuration with optional tool restrictions.
  * Accepts either:
  * - Simple form: string[] (e.g., ["Bug", "Fix"])
- * - Complex form: { labels: string[], allowedTools?: ..., disallowedTools?: ... }
+ * - Complex form: { labels: string[], allowedTools?, disallowedTools?, model?, effort? }
+ *
+ * `model` / `effort` let a label steer which runner/model handles the issue and
+ * how much reasoning effort it spends. `effort` is Claude-only. Model precedence
+ * across all sources is resolved centrally in `RunnerSelectionService`.
  */
 const LabelPromptConfigSchema = z.union([
 	// Simple form: just an array of label strings
@@ -106,6 +128,8 @@ const LabelPromptConfigSchema = z.union([
 		labels: z.array(z.string()),
 		allowedTools: ToolRestrictionSchema.optional(),
 		disallowedTools: z.array(z.string()).optional(),
+		model: z.string().optional(),
+		effort: EffortLevelSchema.optional(),
 	}),
 ]);
 
@@ -347,6 +371,13 @@ export const RepositoryConfigSchema = z.object({
 	appendInstruction: z.string().optional(),
 	model: z.string().optional(),
 	fallbackModel: z.string().optional(),
+	/**
+	 * Reasoning effort for the Claude runner on this repository. Claude-only;
+	 * ignored by Cursor/Codex. Overridden by a matching label's `effort`, and
+	 * falls back to `claudeDefaultEffort` when unset. Unset preserves the SDK
+	 * default (`high`).
+	 */
+	effort: EffortLevelSchema.optional(),
 
 	// Label-based system prompt configuration
 	labelPrompts: LabelPromptsSchema.optional(),
@@ -411,6 +442,18 @@ export const EdgeConfigSchema = z.object({
 	 * preserved. Claude runner only; Cursor manages its own context.
 	 */
 	claudeAutoCompactWindow: z.number().int().positive().optional(),
+
+	/**
+	 * Default reasoning effort for the Claude runner across all repositories.
+	 * Forwarded to the Claude SDK as `Options.effort`. Claude runner only;
+	 * Cursor and Codex ignore it.
+	 *
+	 * Lowest-precedence effort source: a matching label's `effort` and a
+	 * repository's `effort` both override it. When unset (and no label/repo
+	 * effort applies), the SDK default (`high`) is preserved — Cyrus applies no
+	 * default of its own.
+	 */
+	claudeDefaultEffort: EffortLevelSchema.optional(),
 
 	/**
 	 * Model for the read-only `explore` subagent Cyrus registers (an alias like

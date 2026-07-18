@@ -9,7 +9,7 @@ import type {
 	SessionStore,
 	WarmQuery,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentMessage, AgentRunnerConfig } from "cyrus-core";
+import type { AgentMessage, AgentRunnerConfig, EffortLevel } from "cyrus-core";
 import type { WarmSessionRegistry } from "./WarmSessionRegistry.js";
 
 export type { OnAskUserQuestion } from "cyrus-core";
@@ -61,6 +61,15 @@ export interface ClaudeRunnerConfig extends AgentRunnerConfig {
 	 * (e.g. 120000) forces earlier compaction to cap per-turn context cost.
 	 */
 	autoCompactWindow?: number;
+	/**
+	 * Reasoning-effort level forwarded to the Claude SDK as `Options.effort`. It
+	 * steers how much adaptive thinking the model spends; unsupported levels are
+	 * silently downgraded by the SDK. When unset, the SDK default (`high`) is
+	 * preserved — this runner adds no default of its own. (`effort` already
+	 * governs adaptive thinking, so Cyrus intentionally does not also plumb a
+	 * separate `thinking` knob.)
+	 */
+	effort?: EffortLevel;
 	/**
 	 * Model for the read-only `explore` subagent Cyrus registers (an alias like
 	 * `haiku` / `sonnet`, or a full model id). When unset, no such agent is

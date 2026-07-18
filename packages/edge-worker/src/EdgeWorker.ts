@@ -15,6 +15,7 @@ import type {
 	AgentSessionPromptedWebhook,
 	CyrusAgentSession,
 	EdgeWorkerConfig,
+	EffortLevel,
 	IAgentRunner,
 	IIssueTrackerService,
 	ILogger,
@@ -1449,6 +1450,8 @@ export class EdgeWorker extends EventEmitter {
 					200, // maxTurns
 					undefined, // linearWorkspaceId
 					this.buildSkillSessionContext(repository, undefined, session),
+					undefined, // labelPromptModel (no Linear labels for GitHub PRs)
+					undefined, // effort (GitHub PR sessions use SDK default)
 					"github", // sessionPlatform → uses githubMcpConfigs override
 				);
 
@@ -4112,6 +4115,8 @@ ${taskSection}`;
 					| "scoper"
 					| "orchestrator"
 					| "graphite-orchestrator";
+				model?: string;
+				effort?: EffortLevel;
 		  }
 		| undefined
 	> {

@@ -94,6 +94,10 @@
 		"fallbackModel": {
 			"type": "string"
 		},
+		"effort": {
+			"type": "string",
+			"enum": ["low", "medium", "high", "xhigh", "max"]
+		},
 		"labelPrompts": {
 			"type": "object",
 			"properties": {
@@ -145,6 +149,13 @@
 									"items": {
 										"type": "string"
 									}
+								},
+								"model": {
+									"type": "string"
+								},
+								"effort": {
+									"type": "string",
+									"enum": ["low", "medium", "high", "xhigh", "max"]
 								}
 							},
 							"required": ["labels"],
@@ -200,6 +211,13 @@
 									"items": {
 										"type": "string"
 									}
+								},
+								"model": {
+									"type": "string"
+								},
+								"effort": {
+									"type": "string",
+									"enum": ["low", "medium", "high", "xhigh", "max"]
 								}
 							},
 							"required": ["labels"],
@@ -255,6 +273,13 @@
 									"items": {
 										"type": "string"
 									}
+								},
+								"model": {
+									"type": "string"
+								},
+								"effort": {
+									"type": "string",
+									"enum": ["low", "medium", "high", "xhigh", "max"]
 								}
 							},
 							"required": ["labels"],
@@ -310,6 +335,13 @@
 									"items": {
 										"type": "string"
 									}
+								},
+								"model": {
+									"type": "string"
+								},
+								"effort": {
+									"type": "string",
+									"enum": ["low", "medium", "high", "xhigh", "max"]
 								}
 							},
 							"required": ["labels"],
@@ -365,6 +397,13 @@
 									"items": {
 										"type": "string"
 									}
+								},
+								"model": {
+									"type": "string"
+								},
+								"effort": {
+									"type": "string",
+									"enum": ["low", "medium", "high", "xhigh", "max"]
 								}
 							},
 							"required": ["labels"],

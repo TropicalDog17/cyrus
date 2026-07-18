@@ -138,16 +138,34 @@ export class RunnerSelectionService {
 	 * - [agent=claude|cursor|codex]
 	 * - [model=<model-name>]
 	 *
-	 * Precedence:
+	 * This is the single source of truth for model precedence. Callers pass any
+	 * configured model sources via `opts`; do NOT re-resolve models downstream.
+	 *
+	 * Explicit-model precedence (highest first):
+	 * 1. `[model=…]` description tag
+	 * 2. Model label (e.g. `opus`, `composer-1`, `gpt-5`)
+	 * 3. `opts.labelPromptModel` — matched label-prompt config's `model`
+	 * 4. `opts.repositoryModel` — repository config's `model`
+	 *
+	 * Runner precedence (highest first):
 	 * 1. Description tags override labels
 	 * 2. Agent (`cursor`/`claude`/`codex`) labels override model labels
-	 * 3. Model labels can infer the agent type (e.g. `composer-*` → cursor,
-	 *    `gpt-*`/`o3`/`*codex*` → codex)
+	 * 3. Model labels / explicit models can infer the agent type (e.g.
+	 *    `composer-*` → cursor, `gpt-*`/`o3`/`*codex*` → codex)
 	 * 4. Falls back to the configured default runner
+	 *
+	 * An explicit model whose inferred runner family conflicts with the resolved
+	 * runner is dropped (the runner falls back to its default model). The same
+	 * guard applies to `opts.repositoryFallbackModel`.
 	 */
 	public determineRunnerSelection(
 		labels: string[],
 		issueDescription?: string,
+		opts?: {
+			labelPromptModel?: string;
+			repositoryModel?: string;
+			repositoryFallbackModel?: string;
+		},
 	): {
 		runnerType: RunnerType;
 		modelOverride?: string;
@@ -255,7 +273,11 @@ export class RunnerSelectionService {
 
 		const modelFromDescription = descriptionModelTagRaw;
 		const modelFromLabels = resolveModelFromLabel(normalizedLabels);
-		const explicitModel = modelFromDescription || modelFromLabels;
+		const explicitModel =
+			modelFromDescription ||
+			modelFromLabels ||
+			opts?.labelPromptModel ||
+			opts?.repositoryModel;
 
 		const runnerType: RunnerType =
 			resolvedAgentFromDescription ||
@@ -274,7 +296,18 @@ export class RunnerSelectionService {
 		const resolvedModelOverride =
 			modelOverride || this.getDefaultModelForRunner(runnerType);
 
+		// Repository-configured fallback model, honored only when its inferred
+		// family matches the resolved runner (mirrors the primary-model guard).
+		let repositoryFallbackOverride = opts?.repositoryFallbackModel;
+		if (repositoryFallbackOverride) {
+			const fallbackRunner = inferRunnerFromModel(repositoryFallbackOverride);
+			if (fallbackRunner && fallbackRunner !== runnerType) {
+				repositoryFallbackOverride = undefined;
+			}
+		}
+
 		const fallbackModelOverride =
+			repositoryFallbackOverride ||
 			inferFallbackModel(resolvedModelOverride, runnerType) ||
 			this.getDefaultFallbackModelForRunner(runnerType);
 
