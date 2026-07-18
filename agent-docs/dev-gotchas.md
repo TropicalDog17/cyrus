@@ -101,6 +101,29 @@ compaction metadata `compactMetadata.{trigger, preTokens, postTokens, durationMs
 cumulativeDroppedTokens}` — **not** the SDK message's `compact_metadata.pre_tokens`.
 Do not reuse SDK field names in transcript-parsing code.
 
+## `SDKResultMessage.usage` / `total_cost_usd` are cumulative-per-process
+
+The `result` message's `usage` (`NonNullableUsage`) and `total_cost_usd` are
+running totals for the **entire query process**, not the last turn — the message
+also carries a monotonically growing `num_turns`. A warm/streaming ClaudeRunner
+(`keepSessionWarm`) emits one `result` per user turn *in the same process*, and
+each repeats the process-cumulative figure (turn 2's `total_cost_usd` includes
+turn 1). A cold resume spawns a fresh process, so its `result` reports only that
+process's own usage starting from zero.
+
+Consequence for per-session accounting: **accumulate deltas, do not sum raw
+`result.usage`.** `AgentSessionManager` keeps a per-session baseline of the last
+`result` cumulative and adds `current − baseline` to `metadata.cumulativeUsage`.
+The baseline is reset in `updateAgentSessionWithRunnerSessionId` (fires on every
+`system/init`, i.e. every new process) so a cold resume's first result deltas
+from zero and a warm session's later results delta from the prior turn. Plain
+summation would double-count every warm follow-up turn. `metadata.usage` /
+`metadata.totalCostUsd` stay as the raw last-`result` value (unchanged behavior).
+
+Determined from the `@anthropic-ai/claude-agent-sdk@0.3.185` `sdk.d.ts` result
+shape (`num_turns` + `total_cost_usd` + cumulative `NonNullableUsage`); the
+delta-with-per-process-reset scheme is correct for both the warm and cold paths.
+
 ## `ClaudeRunner.stop()` is a no-op before the runner starts
 
 Calling `stop()` on a runner that has not started yet does nothing. Two concurrent

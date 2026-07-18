@@ -4,6 +4,7 @@
  */
 
 import type {
+	AgentUsage,
 	IAgentRunner,
 	SDKAssistantMessageError,
 } from "./agent-runner-types.js";
@@ -100,8 +101,18 @@ export interface CyrusAgentSession {
 		tools?: string[];
 		permissionMode?: string;
 		apiKeySource?: string;
+		/** Cost of the most recent turn's `result` (raw last-`result` value). */
 		totalCostUsd?: number;
-		usage?: any;
+		/** Usage from the most recent turn's `result` (raw last-`result` value). */
+		usage?: AgentUsage;
+		/**
+		 * Accumulated usage across every turn of this session. Built by summing
+		 * per-turn deltas, since `result.usage` is cumulative-per-process — see
+		 * `agent-docs/dev-gotchas.md`.
+		 */
+		cumulativeUsage?: AgentUsage;
+		/** Number of completed turns (result messages) accumulated so far. */
+		turnCount?: number;
 		commentId?: string;
 	};
 }

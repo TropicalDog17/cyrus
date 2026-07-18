@@ -10,6 +10,7 @@ import {
 	AgentSessionType,
 	type AgentStatusMessage,
 	type AgentSystemInitMessage,
+	type AgentUsage,
 	type AgentUserMessage,
 	type CyrusAgentSession,
 	type CyrusAgentSessionEntry,
@@ -32,6 +33,12 @@ import {
 	tryParseScheduleWakeupInput,
 } from "./PendingWorkFormatter.js";
 import type { IActivitySink } from "./sinks/index.js";
+import {
+	addUsage,
+	emptyUsage,
+	formatUsageFooter,
+	subtractUsage,
+} from "./usage-footer.js";
 
 /**
  * Payload for {@link AgentSessionManagerEvents.sessionComplete}. Raw session facts; EdgeWorker
@@ -114,6 +121,14 @@ export class AgentSessionManager extends EventEmitter {
 	// deferred tools like ToolSearch, where a tool_use and its tool_result can
 	// arrive back-to-back in the same microtask batch).
 	private messageProcessingQueues: Map<string, Promise<void>> = new Map();
+	// Last `result.usage` seen in the CURRENT runner process, per session. Since
+	// `result.usage` is cumulative-per-process (see agent-docs/dev-gotchas.md),
+	// the delta against this baseline is the true per-turn increment. Reset on
+	// every `system/init` (i.e. every new process) via
+	// updateAgentSessionWithRunnerSessionId.
+	private lastRunnerCumulativeUsage: Map<string, AgentUsage> = new Map();
+	/** When true, append a cumulative usage/cost footer to final responses. */
+	private readonly showUsageFooter: boolean;
 	private getParentSessionId?: (childSessionId: string) => string | undefined;
 	private resumeParentSession?: (
 		parentSessionId: string,
@@ -135,11 +150,13 @@ export class AgentSessionManager extends EventEmitter {
 			childSessionId: string,
 		) => Promise<void>,
 		logger?: ILogger,
+		showUsageFooter = true,
 	) {
 		super();
 		this.logger = logger ?? createLogger({ component: "AgentSessionManager" });
 		this.getParentSessionId = getParentSessionId;
 		this.resumeParentSession = resumeParentSession;
+		this.showUsageFooter = showUsageFooter;
 	}
 
 	/**
@@ -283,6 +300,12 @@ export class AgentSessionManager extends EventEmitter {
 			linearSession.claudeSessionId = initMessage.sessionId;
 		}
 
+		// A new `system/init` means a fresh runner process, whose `result.usage`
+		// counts up from zero again. Drop the per-process baseline so the next
+		// result deltas from zero (a cold resume) rather than from the previous
+		// process's cumulative total. See agent-docs/dev-gotchas.md.
+		this.lastRunnerCumulativeUsage.delete(sessionId);
+
 		linearSession.updatedAt = Date.now();
 		linearSession.metadata = {
 			...linearSession.metadata, // Preserve existing metadata
@@ -369,10 +392,30 @@ export class AgentSessionManager extends EventEmitter {
 				? AgentSessionStatus.Complete
 				: AgentSessionStatus.Error;
 
-		// Update session status and metadata
+		// Accumulate per-session usage. `result.usage` is cumulative *within a
+		// runner process* (see agent-docs/dev-gotchas.md), so the true per-turn
+		// increment is the delta against the last result seen in this process.
+		// The baseline is cleared on every `system/init`, so a cold resume's
+		// first result deltas from zero while a warm session's later results
+		// delta from the prior turn.
+		const turnUsage = resultMessage.usage;
+		const baseline = this.lastRunnerCumulativeUsage.get(sessionId);
+		const delta = baseline ? subtractUsage(turnUsage, baseline) : turnUsage;
+		this.lastRunnerCumulativeUsage.set(sessionId, turnUsage);
+		const cumulativeUsage = addUsage(
+			session.metadata?.cumulativeUsage ?? emptyUsage(),
+			delta,
+		);
+		const turnCount = (session.metadata?.turnCount ?? 0) + 1;
+
+		// Update session status and metadata. `usage`/`totalCostUsd` stay as the
+		// raw last-`result` value; `cumulativeUsage`/`turnCount` carry the
+		// accumulated totals.
 		await this.updateSessionStatus(sessionId, status, {
 			totalCostUsd: resultMessage.usage.costUsd,
 			usage: resultMessage.usage,
+			cumulativeUsage,
+			turnCount,
 		});
 
 		if (wasStopRequested) {
@@ -737,6 +780,19 @@ export class AgentSessionManager extends EventEmitter {
 		// shows the trailing action, and pending work has its own thought).
 		if (!content.trim()) {
 			return;
+		}
+
+		// Append the cumulative usage/cost footer to successful responses. Never
+		// on errors; skipped when every counter is zero or the gate is off.
+		if (this.showUsageFooter && !resultMessage.isError) {
+			const cumulativeUsage =
+				this.sessions.get(sessionId)?.metadata?.cumulativeUsage;
+			const footer = cumulativeUsage
+				? formatUsageFooter(cumulativeUsage)
+				: null;
+			if (footer) {
+				content = `${content}\n\n---\n${footer}`;
+			}
 		}
 
 		const runner = this.sessions.get(sessionId)?.agentRunner;

@@ -636,6 +636,14 @@ export const EdgeConfigSchema = z.object({
 	prReviewTrigger: z.boolean().optional(),
 
 	/**
+	 * Whether to append a cumulative usage/cost footer to final (non-error)
+	 * responses, e.g. `$0.42 · 12.3k in / 3.1k out · 85% cached`. The figures
+	 * are per-session totals across every turn. Defaults to true; set `false`
+	 * to opt out (the footer is also suppressed when every counter is zero).
+	 */
+	showUsageFooter: z.boolean().optional(),
+
+	/**
 	 * Global user access control settings.
 	 * Applied to all repositories unless overridden.
 	 */

@@ -466,6 +466,9 @@ export class EdgeWorker extends EventEmitter {
 					childSessionId,
 				);
 			},
+			undefined,
+			// Usage footer defaults ON; only an explicit `false` opts out.
+			this.config.showUsageFooter !== false,
 		);
 
 		// Initialize repositories. Paths are already normalized by
