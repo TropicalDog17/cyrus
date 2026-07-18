@@ -29,6 +29,10 @@ import {
 	requireLinearWorkspaceId,
 } from "cyrus-core";
 import { CursorRunner } from "cyrus-cursor-runner";
+import type {
+	GitHubAppTokenProvider,
+	GitHubWebhookEvent,
+} from "cyrus-github-event-transport";
 import type { AgentSessionManager } from "./AgentSessionManager.js";
 import type { GitService } from "./GitService.js";
 import type { PromptAssembler } from "./prompt-assembly/PromptAssembler.js";
@@ -194,6 +198,13 @@ export interface SessionOrchestratorDeps {
 		input: AgentActivityCreateInput,
 		label: string,
 	): Promise<string | null>;
+	/**
+	 * Getter (not a snapshot) — the App token provider is assigned lazily at
+	 * runtime once GitHub App credentials are configured, so a value captured
+	 * at construction time would always be null.
+	 */
+	getGitHubAppTokenProvider(): GitHubAppTokenProvider | null;
+	getAllRepositories(): RepositoryConfig[];
 }
 
 /**
@@ -1166,5 +1177,90 @@ export class SessionOrchestrator {
 		// Persist the Error transition so a restart doesn't resurrect a zombie
 		// Active session with no runner.
 		await this.deps.savePersistedState();
+	}
+
+	/**
+	 * Resolve a GitHub API token from (in priority order):
+	 * 1. Forwarded installation token from CYHOST (cloud/proxy mode)
+	 * 2. Self-minted installation token from GitHub App credentials (self-hosted)
+	 * 3. Personal access token from GITHUB_TOKEN env var (fallback)
+	 */
+	async resolveGitHubToken(
+		event: GitHubWebhookEvent,
+	): Promise<string | undefined> {
+		if (event.installationToken) return event.installationToken;
+		const gitHubAppTokenProvider = this.deps.getGitHubAppTokenProvider();
+		if (gitHubAppTokenProvider) {
+			try {
+				return await gitHubAppTokenProvider.getToken();
+			} catch (error) {
+				this.deps.logger.warn(
+					"Failed to mint GitHub App installation token, falling back to GITHUB_TOKEN",
+					error instanceof Error ? error : new Error(String(error)),
+				);
+			}
+		}
+		return process.env.GITHUB_TOKEN;
+	}
+
+	/**
+	 * Create a git worktree for a GitHub PR branch.
+	 * If the worktree already exists for this branch, reuse it.
+	 */
+	async createGitHubWorkspace(
+		repository: RepositoryConfig,
+		branchRef: string,
+		prNumber: number,
+	): Promise<{ path: string; isGitWorktree: boolean } | null> {
+		try {
+			// Use the GitService to create the worktree
+			// Create a synthetic issue-like object for the git service
+			const syntheticIssue = {
+				id: `github-pr-${prNumber}`,
+				identifier: `PR-${prNumber}`,
+				title: `PR #${prNumber}`,
+				description: null,
+				url: "",
+				branchName: branchRef,
+				assigneeId: null,
+				stateId: null,
+				teamId: null,
+				labelIds: [],
+				priority: 0,
+				createdAt: new Date(),
+				updatedAt: new Date(),
+				archivedAt: null,
+				state: Promise.resolve(undefined),
+				assignee: Promise.resolve(undefined),
+				team: Promise.resolve(undefined),
+				parent: Promise.resolve(undefined),
+				project: Promise.resolve(undefined),
+				labels: () => Promise.resolve({ nodes: [] }),
+				comments: () => Promise.resolve({ nodes: [] }),
+				attachments: () => Promise.resolve({ nodes: [] }),
+				children: () => Promise.resolve({ nodes: [] }),
+				inverseRelations: () => Promise.resolve({ nodes: [] }),
+				update: () =>
+					Promise.resolve({
+						success: true,
+						issue: undefined,
+						lastSyncId: 0,
+					}),
+			} as unknown as Issue;
+
+			return await this.deps.gitService.createGitWorktree(
+				syntheticIssue,
+				[repository],
+				{
+					crossRepoSiblingRepositories: this.deps.getAllRepositories(),
+				},
+			);
+		} catch (error) {
+			this.deps.logger.error(
+				`Failed to create GitHub workspace for PR #${prNumber}`,
+				error instanceof Error ? error : new Error(String(error)),
+			);
+			return null;
+		}
 	}
 }

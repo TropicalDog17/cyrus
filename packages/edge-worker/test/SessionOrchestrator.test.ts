@@ -149,6 +149,8 @@ function makeDeps(overrides: Partial<SessionOrchestratorDeps> = {}): {
 		getIssueTracker: vi.fn(() => undefined),
 		postParentResumeAcknowledgment: vi.fn(async () => {}),
 		postActivityDirect: vi.fn(async () => null),
+		getGitHubAppTokenProvider: vi.fn(() => null),
+		getAllRepositories: vi.fn(() => [REPO]),
 		...overrides,
 	};
 	return { deps, buildIssueConfig, warmPool, runnerType };

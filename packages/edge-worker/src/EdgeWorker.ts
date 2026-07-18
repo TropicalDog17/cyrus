@@ -735,6 +735,8 @@ export class EdgeWorker extends EventEmitter {
 				this.postParentResumeAcknowledgment(sessionId, linearWorkspaceId),
 			postActivityDirect: (issueTracker, input, label) =>
 				this.postActivityDirect(issueTracker, input, label),
+			getGitHubAppTokenProvider: () => this.gitHubAppTokenProvider,
+			getAllRepositories: () => Array.from(this.repositories.values()),
 		});
 
 		// Components will be initialized and registered in start() method before server starts
@@ -1089,18 +1091,7 @@ export class EdgeWorker extends EventEmitter {
 	private async resolveGitHubToken(
 		event: GitHubWebhookEvent,
 	): Promise<string | undefined> {
-		if (event.installationToken) return event.installationToken;
-		if (this.gitHubAppTokenProvider) {
-			try {
-				return await this.gitHubAppTokenProvider.getToken();
-			} catch (error) {
-				this.logger.warn(
-					"Failed to mint GitHub App installation token, falling back to GITHUB_TOKEN",
-					error instanceof Error ? error : new Error(String(error)),
-				);
-			}
-		}
-		return process.env.GITHUB_TOKEN;
+		return this.sessionOrchestrator.resolveGitHubToken(event);
 	}
 
 	private async handleGitHubWebhook(
@@ -1613,56 +1604,11 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 		branchRef: string,
 		prNumber: number,
 	): Promise<{ path: string; isGitWorktree: boolean } | null> {
-		try {
-			// Use the GitService to create the worktree
-			// Create a synthetic issue-like object for the git service
-			const syntheticIssue = {
-				id: `github-pr-${prNumber}`,
-				identifier: `PR-${prNumber}`,
-				title: `PR #${prNumber}`,
-				description: null,
-				url: "",
-				branchName: branchRef,
-				assigneeId: null,
-				stateId: null,
-				teamId: null,
-				labelIds: [],
-				priority: 0,
-				createdAt: new Date(),
-				updatedAt: new Date(),
-				archivedAt: null,
-				state: Promise.resolve(undefined),
-				assignee: Promise.resolve(undefined),
-				team: Promise.resolve(undefined),
-				parent: Promise.resolve(undefined),
-				project: Promise.resolve(undefined),
-				labels: () => Promise.resolve({ nodes: [] }),
-				comments: () => Promise.resolve({ nodes: [] }),
-				attachments: () => Promise.resolve({ nodes: [] }),
-				children: () => Promise.resolve({ nodes: [] }),
-				inverseRelations: () => Promise.resolve({ nodes: [] }),
-				update: () =>
-					Promise.resolve({
-						success: true,
-						issue: undefined,
-						lastSyncId: 0,
-					}),
-			} as unknown as Issue;
-
-			return await this.gitService.createGitWorktree(
-				syntheticIssue,
-				[repository],
-				{
-					crossRepoSiblingRepositories: Array.from(this.repositories.values()),
-				},
-			);
-		} catch (error) {
-			this.logger.error(
-				`Failed to create GitHub workspace for PR #${prNumber}`,
-				error instanceof Error ? error : new Error(String(error)),
-			);
-			return null;
-		}
+		return this.sessionOrchestrator.createGitHubWorkspace(
+			repository,
+			branchRef,
+			prNumber,
+		);
 	}
 
 	/**
