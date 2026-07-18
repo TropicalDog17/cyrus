@@ -30,6 +30,7 @@ const EDGE_CONFIG: EdgeConfig = {
 	claudeDefaultModel: "sonnet",
 	claudeDefaultFallbackModel: "haiku",
 	claudeAutoCompactWindow: 120_000,
+	claudeColdResumeSummarizeThresholdTokens: 60_000,
 	claudeDefaultEffort: "high",
 	claudeBashMaxOutputLength: 30_000,
 	claudeMcpMaxOutputTokens: 25_000,

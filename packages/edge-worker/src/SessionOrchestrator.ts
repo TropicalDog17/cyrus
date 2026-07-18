@@ -109,7 +109,25 @@ export interface SessionOrchestratorDeps {
 		attachmentManifest?: string,
 		commentAuthor?: string,
 		commentTimestamp?: string,
+		previousSessionSummary?: string,
 	): Promise<string>;
+	/**
+	 * Cold-resume summarize-and-restart hook. When a Claude session is resumed
+	 * after its keep-alive window and the stored transcript is estimated to be
+	 * larger than `claudeColdResumeSummarizeThresholdTokens`, this summarizes the
+	 * prior transcript with a one-shot Haiku call and returns the summary so the
+	 * caller can start a fresh session seeded with it instead of replaying the
+	 * whole transcript into the prompt cache. Returns `undefined` when the
+	 * feature is disabled, not applicable, or on any failure (so the caller falls
+	 * through to a normal resume — this must never break a resume that would
+	 * otherwise succeed). Never clears `session.claudeSessionId`.
+	 */
+	maybeSummarizeColdResume(
+		session: CyrusAgentSession,
+		linearAgentSessionId: string,
+		claudeSessionId: string,
+		linearWorkspaceId: string,
+	): Promise<string | undefined>;
 	determineSystemPromptFromLabels(
 		labels: string[],
 		repository: RepositoryConfig,
@@ -675,6 +693,34 @@ export class SessionOrchestrator {
 			? undefined
 			: existingRunnerSessionId;
 
+		// Cold-resume summarize-and-restart: when we would resume a Claude session
+		// whose stored transcript is too large, replace the full-transcript resume
+		// with a Haiku summary + fresh session. `maybeSummarizeColdResume` returns
+		// undefined (falling through to a normal resume) unless the feature is
+		// enabled, this is a Claude resume, and the transcript exceeds the
+		// configured threshold. It NEVER clears `session.claudeSessionId` — runner
+		// pinning and the init-message rebind both still depend on it being set.
+		let effectiveResumeSessionId = resumeSessionId;
+		let buildAsNewSession = isNewSession;
+		let previousSessionSummary: string | undefined;
+		if (
+			!needsNewSession &&
+			session.claudeSessionId &&
+			resumeSessionId === session.claudeSessionId
+		) {
+			const summary = await this.deps.maybeSummarizeColdResume(
+				session,
+				sessionId,
+				session.claudeSessionId,
+				resolvedWorkspaceId,
+			);
+			if (summary) {
+				effectiveResumeSessionId = undefined;
+				buildAsNewSession = true;
+				previousSessionSummary = summary;
+			}
+		}
+
 		// Create runner configuration
 		// buildAgentRunnerConfig determines runner type from labels for new sessions
 		// For existing sessions, we still need labels for model override but ignore runner type
@@ -687,7 +733,7 @@ export class SessionOrchestrator {
 				allowedTools,
 				allowedDirectories,
 				disallowedTools,
-				resumeSessionId,
+				effectiveResumeSessionId,
 				labels, // Always pass labels to preserve model override
 				fullIssue.description || undefined, // Description tags can override label selectors
 				maxTurns, // Pass maxTurns if specified
@@ -708,7 +754,7 @@ export class SessionOrchestrator {
 
 		// Prepare the full prompt
 		const fullPrompt = await this.deps.buildSessionPrompt(
-			isNewSession,
+			buildAsNewSession,
 			session,
 			fullIssue,
 			repository,
@@ -716,6 +762,7 @@ export class SessionOrchestrator {
 			attachmentManifest,
 			commentAuthor,
 			commentTimestamp,
+			previousSessionSummary,
 		);
 
 		// Start session - use streaming mode if supported for ability to add messages later

@@ -189,6 +189,16 @@ export class PromptAssembler {
 		parts.push(issueContext.prompt);
 		components.push("issue-context");
 
+		// 5b. Previous-session summary (cold-resume summarize-and-restart).
+		// When a fresh session is seeded from a Haiku summary of an over-threshold
+		// prior session, surface that summary — with the branch(es) worked on and a
+		// note to check current git / PR state — so the agent doesn't redo work.
+		const summaryBlock = this.buildPreviousSessionSummaryBlock(input);
+		if (summaryBlock) {
+			parts.push(summaryBlock);
+			components.push("session-summary");
+		}
+
 		// 4. Add user comment (if present)
 		// Skip for mention-triggered prompts since the comment is already in the mention block
 		if (input.userComment.trim() && !input.isMentionTriggered) {
@@ -228,6 +238,41 @@ ${input.userComment}
 				isStreaming: false,
 			},
 		};
+	}
+
+	/**
+	 * Build the `<previous_session_summary>` block for a cold-resume restart.
+	 *
+	 * Returns `undefined` when there is no summary to include. When present, the
+	 * block lists the branch(es) the prior session worked on and a note telling
+	 * the agent to check the current git / PR state before redoing work, since a
+	 * PR may already be open on those branches.
+	 */
+	private buildPreviousSessionSummaryBlock(
+		input: PromptAssemblyInput,
+	): string | undefined {
+		const summary = input.previousSessionSummary?.trim();
+		if (!summary) {
+			return undefined;
+		}
+
+		const branches = (input.session.repositories ?? [])
+			.map((repo) => repo.branchName)
+			.filter((name): name is string => Boolean(name));
+		const branchLines =
+			branches.length > 0
+				? branches.map((name) => `    <branch>${name}</branch>`).join("\n")
+				: "    <branch>unknown</branch>";
+
+		return `<previous_session_summary>
+  <branches>
+${branchLines}
+  </branches>
+  <summary>
+${summary}
+  </summary>
+  <note>This summary replaces a prior session that grew too large to resume directly. Work may already exist on the branch above and a pull request may already be open — check the current state with git and gh before redoing anything.</note>
+</previous_session_summary>`;
 	}
 
 	/**

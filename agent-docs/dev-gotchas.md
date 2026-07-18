@@ -94,6 +94,37 @@ options and never passes `settings`, so pre-warmed sessions ignore
 `autoCompactWindow`. Only reachable when `CYRUS_ENABLE_WARM_SESSIONS` is set.
 **Open bug — not yet fixed.**
 
+## Cold-resume summarize-and-restart (`claudeColdResumeSummarizeThresholdTokens`)
+
+Opt-in (unset = disabled). When a cold resume's estimated context exceeds the
+configured threshold, `EdgeWorker.maybeSummarizeColdResume` replaces the oversized
+`--resume` with a Haiku-summarized fresh session: it summarizes the prior transcript
+(one-shot Haiku via `summarizeTranscript`) and seeds a new session with a
+`<previous_session_summary>` prompt block instead of replaying the whole transcript
+into prompt cache. The threshold has a hard floor (`MIN_COLD_RESUME_THRESHOLD_TOKENS
+= 20_000`); a smaller configured value warns and disables the feature.
+
+**Never break a resume that would otherwise succeed.** Every failure path — no
+transcript found (`findTranscriptPath` returns null), estimate at/below threshold,
+or `summarizeTranscript` throwing/timing out — returns `undefined` and falls through
+to a normal resume.
+
+**On success you must NOT clear `session.claudeSessionId`.** Two mechanisms depend on
+it still being set at fresh-start time: runner pinning in `RunnerConfigBuilder`
+(`input.session.claudeSessionId && runnerType !== "claude"` keeps the runner pinned
+to `claude` even though we're building a "new" session), and the init-message rebind
+in `AgentSessionManager.updateAgentSessionWithRunnerSessionId` (which overwrites
+`claudeSessionId` with the *new* Claude session's ID once the fresh session
+initializes). The trigger only sets the local `effectiveResumeSessionId = undefined`
+(so the SDK doesn't `--resume` the giant transcript) and `buildAsNewSession = true`
+(so the prompt gets the summary block) — it never touches `session.claudeSessionId`.
+
+The transcript is located by scanning `~/.claude/projects/*/<sessionId>.jsonl`
+(`findTranscriptPath`) rather than reconstructing the path from the cwd, because the
+`projects/<slug>` directory name is derived from an undocumented cwd-sanitization
+rule that has changed between Claude Code versions — a two-level scan is
+version-proof.
+
 ## Transcript JSONL is camelCase, SDK messages are snake_case
 
 The Langfuse exporter parses the transcript, not SDK messages. The transcript spells

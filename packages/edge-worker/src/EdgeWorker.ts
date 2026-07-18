@@ -1,10 +1,15 @@
 import { execSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { LinearClient } from "@linear/sdk";
 import type { SessionStore } from "cyrus-claude-runner";
-import { HttpSessionStore, WarmSessionRegistry } from "cyrus-claude-runner";
+import {
+	findTranscriptPath,
+	HttpSessionStore,
+	summarizeTranscript,
+	WarmSessionRegistry,
+} from "cyrus-claude-runner";
 import { getCyrusAppUrl } from "cyrus-cloudflare-tunnel-client";
 import { ConfigUpdater } from "cyrus-config-updater";
 import type {
@@ -684,6 +689,7 @@ export class EdgeWorker extends EventEmitter {
 				attachmentManifest,
 				commentAuthor,
 				commentTimestamp,
+				previousSessionSummary,
 			) =>
 				this.buildSessionPrompt(
 					isNewSession,
@@ -694,6 +700,19 @@ export class EdgeWorker extends EventEmitter {
 					attachmentManifest,
 					commentAuthor,
 					commentTimestamp,
+					previousSessionSummary,
+				),
+			maybeSummarizeColdResume: (
+				session,
+				linearAgentSessionId,
+				claudeSessionId,
+				linearWorkspaceId,
+			) =>
+				this.maybeSummarizeColdResume(
+					session,
+					linearAgentSessionId,
+					claudeSessionId,
+					linearWorkspaceId,
 				),
 			determineSystemPromptFromLabels: (labels, repository) =>
 				this.determineSystemPromptFromLabels(labels, repository),
@@ -4528,6 +4547,124 @@ ${taskSection}`;
 	 * 1. User comment
 	 * 2. Attachment manifest (if present)
 	 */
+	/**
+	 * Resolve the effective cold-resume summarize threshold (in tokens).
+	 *
+	 * Returns `undefined` when the feature is disabled (config unset) or when the
+	 * configured value is below the 20k minimum — a threshold that small would
+	 * summarize almost every resume, defeating the point, so we warn and ignore
+	 * it rather than silently applying a bad value.
+	 */
+	private resolveColdResumeThreshold(): number | undefined {
+		const configured = this.config.claudeColdResumeSummarizeThresholdTokens;
+		if (configured === undefined) {
+			return undefined;
+		}
+		const MIN_THRESHOLD = 20_000;
+		if (configured < MIN_THRESHOLD) {
+			this.logger.warn(
+				`Ignoring claudeColdResumeSummarizeThresholdTokens=${configured}: below the ${MIN_THRESHOLD} minimum (would summarize nearly every resume). Cold-resume summarization disabled.`,
+			);
+			return undefined;
+		}
+		return configured;
+	}
+
+	/**
+	 * Estimate the size (in tokens) of the context a cold resume would replay.
+	 *
+	 * Prefers the session's recorded usage totals (fresh input + cache read +
+	 * cache creation tokens) when available, since that is what actually gets
+	 * rewritten to the prompt cache on resume. Falls back to a rough
+	 * bytes/4 estimate from the transcript file size when no usage is recorded.
+	 */
+	private async estimateResumeContextTokens(
+		session: CyrusAgentSession,
+		transcriptPath: string,
+	): Promise<number> {
+		const usage = (session as { metadata?: { usage?: Record<string, number> } })
+			.metadata?.usage;
+		if (usage) {
+			return (
+				(usage.input_tokens ?? 0) +
+				(usage.cache_read_input_tokens ?? 0) +
+				(usage.cache_creation_input_tokens ?? 0)
+			);
+		}
+		try {
+			const { size } = await stat(transcriptPath);
+			return Math.floor(size / 4);
+		} catch {
+			return 0;
+		}
+	}
+
+	/**
+	 * Cold-resume summarize-and-restart. When a Claude session is resumed after
+	 * its keep-alive window and the transcript it would replay is estimated to
+	 * exceed `claudeColdResumeSummarizeThresholdTokens`, summarize the prior
+	 * transcript with a one-shot Haiku call and return the summary so the caller
+	 * can seed a fresh session with it instead of rewriting the whole transcript
+	 * to the prompt cache.
+	 *
+	 * Returns `undefined` — meaning "fall through to a normal resume" — when the
+	 * feature is disabled, the estimate is at/below the threshold, no transcript
+	 * is found, or summarization fails/times out. This can NEVER break a resume
+	 * that would otherwise succeed, and it NEVER clears `session.claudeSessionId`
+	 * (runner pinning and the init-message rebind both still depend on it).
+	 */
+	private async maybeSummarizeColdResume(
+		session: CyrusAgentSession,
+		linearAgentSessionId: string,
+		claudeSessionId: string,
+		linearWorkspaceId: string,
+	): Promise<string | undefined> {
+		const threshold = this.resolveColdResumeThreshold();
+		if (!threshold) {
+			return undefined;
+		}
+
+		const transcriptPath = await findTranscriptPath(claudeSessionId);
+		if (!transcriptPath) {
+			this.logger.debug(
+				`Cold-resume summarize: no transcript found for Claude session ${claudeSessionId}; resuming normally`,
+			);
+			return undefined;
+		}
+
+		const estimate = await this.estimateResumeContextTokens(
+			session,
+			transcriptPath,
+		);
+		if (estimate <= threshold) {
+			return undefined;
+		}
+
+		try {
+			const summary = await summarizeTranscript({
+				transcriptPath,
+				logger: this.logger,
+			});
+			await this.postThought(
+				linearAgentSessionId,
+				linearWorkspaceId,
+				`This session was resumed after its keep-alive window with a large stored transcript (~${estimate.toLocaleString()} tokens, over the ${threshold.toLocaleString()}-token threshold). To avoid replaying the whole transcript, I summarized the prior session with Haiku and am continuing from that summary. I'll check the current git / PR state before redoing any work.`,
+			);
+			this.logger.info(
+				`Cold-resume summarize: replaced a ~${estimate}-token resume with a Haiku summary for session ${linearAgentSessionId}`,
+			);
+			return summary;
+		} catch (error) {
+			// Any failure falls through to a normal resume — never break a resume
+			// that would otherwise succeed.
+			this.logger.warn(
+				`Cold-resume summarize failed for session ${linearAgentSessionId}; falling back to a normal resume`,
+				{ error: error instanceof Error ? error.message : String(error) },
+			);
+			return undefined;
+		}
+	}
+
 	private async buildSessionPrompt(
 		isNewSession: boolean,
 		session: CyrusAgentSession,
@@ -4537,6 +4674,7 @@ ${taskSection}`;
 		attachmentManifest?: string,
 		commentAuthor?: string,
 		commentTimestamp?: string,
+		previousSessionSummary?: string,
 	): Promise<string> {
 		// Fetch labels for system prompt determination
 		const labels = await this.fetchIssueLabels(fullIssue);
@@ -4554,6 +4692,7 @@ ${taskSection}`;
 			isNewSession,
 			isStreaming: false, // This path is only for non-streaming prompts
 			labels,
+			previousSessionSummary,
 		};
 
 		// Use unified prompt assembly

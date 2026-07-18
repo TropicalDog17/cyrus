@@ -48,6 +48,18 @@ export {
 	CYRUS_SESSION_ENV,
 	normalizeMcpHttpTransport,
 } from "./session-env.js";
+export { findTranscriptPath } from "./transcript-locator.js";
+export {
+	type ParsedTurn,
+	parseTranscript,
+	readRecords,
+	type TranscriptRecord,
+} from "./transcript-parser.js";
+export {
+	renderCompactTurnLog,
+	type SummarizeTranscriptOptions,
+	summarizeTranscript,
+} from "./transcript-summarizer.js";
 export type {
 	APIAssistantMessage,
 	APIUserMessage,

@@ -487,6 +487,33 @@ Sets default allowed tools for each prompt type across all repositories. Reposit
 
 Path to a script that runs for all repositories when creating new worktrees. See the main README for details on setup scripts.
 
+### `claudeColdResumeSummarizeThresholdTokens` (number)
+
+**Opt-in.** When a Claude session is resumed after its keep-alive window has
+expired (a "cold resume"), resuming the full transcript rewrites the entire
+conversation into the prompt cache — expensive for long sessions. When this
+threshold is set and the resumed transcript's estimated size (in tokens)
+exceeds it, Cyrus instead summarizes the prior transcript with a one-shot
+Haiku call and starts a **fresh** session seeded with that summary, avoiding
+the full-transcript cache rewrite.
+
+- Unset (default) → feature disabled.
+- Recommended value: `60000`.
+- Values below `20000` are ignored with a warning (too small to be useful).
+- Only applies to Claude sessions. On any failure (no transcript found,
+  summarization error or timeout) Cyrus transparently falls back to a normal
+  resume, so enabling it can never break a resume that would otherwise succeed.
+
+```json
+{
+  "claudeColdResumeSummarizeThresholdTokens": 60000
+}
+```
+
+The fresh session's prompt includes a `<previous_session_summary>` block with
+the branch(es) the prior session worked on and a note to check the current git
+/ PR state before redoing work.
+
 ### `claudeAutoCompactWindow` (number)
 
 Effective context-window size, in tokens, at which Claude sessions auto-compact their conversation. Applies to all repositories; Claude runner only (Cursor manages its own context).

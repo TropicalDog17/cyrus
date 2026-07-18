@@ -45,6 +45,7 @@ export interface PromptAssemblyResult {
  */
 export type PromptComponent =
 	| "issue-context" // Issue title, description, comments, history
+	| "session-summary" // Haiku summary of a prior over-threshold session (cold-resume restart)
 	| "user-comment" // User's comment text
 	| "attachment-manifest" // List of attachments
 	| "guidance-rules"; // Linear agent guidance rules
@@ -90,6 +91,15 @@ export interface PromptAssemblyInput {
 
 	/** Attachment manifest string (if any attachments) */
 	attachmentManifest?: string;
+
+	/**
+	 * Haiku-generated summary of a prior session whose transcript exceeded the
+	 * cold-resume threshold. When present on a new-session prompt, a
+	 * `<previous_session_summary>` block is inserted so the fresh session can
+	 * pick up where the summarized session left off. See
+	 * `EdgeWorker.resumeAgentSession` cold-resume-summarize path.
+	 */
+	previousSessionSummary?: string;
 
 	/** Linear agent guidance rules */
 	guidance?: GuidanceRule[];

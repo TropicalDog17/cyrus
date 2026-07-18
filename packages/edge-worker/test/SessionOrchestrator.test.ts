@@ -124,6 +124,7 @@ function makeDeps(overrides: Partial<SessionOrchestratorDeps> = {}): {
 		getEgressCaCertPath: vi.fn(() => undefined),
 		createCyrusAgentSession: vi.fn(async () => makeSessionData(session) as any),
 		buildSessionPrompt: vi.fn(async () => "RESUME_PROMPT"),
+		maybeSummarizeColdResume: vi.fn(async () => undefined),
 		determineSystemPromptFromLabels: vi.fn(async () => undefined),
 		buildAllowedTools: vi.fn(() => ["Read"]),
 		buildDisallowedTools: vi.fn(() => []),
