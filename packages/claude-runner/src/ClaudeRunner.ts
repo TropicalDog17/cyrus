@@ -7,6 +7,7 @@ import {
 	type WriteStream,
 	writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
 	type BackgroundTaskSummary,
@@ -21,23 +22,34 @@ import {
 	type SessionCronSummary,
 	type StopHookInput,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentPendingWork, AskUserQuestionInput } from "cyrus-core";
+import type {
+	AgentMessage,
+	AgentPendingWork,
+	AskUserQuestionInput,
+} from "cyrus-core";
 import {
+	compute,
 	createLogger,
 	type IAgentRunner,
 	type ILogger,
 	LogLevel,
+	nodeDirLister,
 	StreamingPrompt,
+	toClaudeToolPatterns,
 } from "cyrus-core";
 import dotenv from "dotenv";
-import { ClaudeMessageFormatter, type IMessageFormatter } from "./formatter.js";
-import { buildHomeDirectoryDisallowedTools } from "./home-directory-restrictions.js";
+import { toAgentMessage } from "./claude-message-projection.js";
+import {
+	exportTranscriptToLangfuse,
+	resolveLangfuseConfig,
+} from "./langfuse-exporter.js";
 import {
 	checkLinuxSandboxRequirements,
 	logSandboxRequirementFailures,
 } from "./sandbox-requirements.js";
 import {
 	buildBaseSessionEnv,
+	buildToolOutputCapEnv,
 	normalizeMcpHttpTransport,
 } from "./session-env.js";
 import type {
@@ -45,6 +57,7 @@ import type {
 	ClaudeRunnerEvents,
 	ClaudeSessionInfo,
 } from "./types.js";
+import type { WarmIdleSession } from "./WarmSessionRegistry.js";
 
 // AbortError is no longer exported in v1.0.95, so we define it locally
 export class AbortError extends Error {
@@ -91,7 +104,7 @@ function serializeQueryOptionsReplacer(_key: string, value: unknown): unknown {
  * unbounded prose (env, mcpServers' inner config, the prompt, system prompt
  * append text, hook scripts, additionalEnv) and keeps only the configuration
  * surface useful for triaging "what was Claude invoked with":
- *   - model / fallbackModel / maxTurns / outputFormat
+ *   - model / fallbackModel / maxTurns / effort / outputFormat
  *   - system prompt SHAPE (type/preset/has-append) — not the text
  *   - tool allowlist/denylist (counts + first 50 entries)
  *   - resumeSessionId, workingDirectory, additionalDirectories
@@ -113,6 +126,7 @@ function buildSanitizedQueryOptions(
 	if (typeof o.model === "string") out.model = o.model;
 	if (typeof o.fallbackModel === "string") out.fallbackModel = o.fallbackModel;
 	if (typeof o.maxTurns === "number") out.maxTurns = o.maxTurns;
+	if (typeof o.effort === "string") out.effort = o.effort;
 	if (typeof o.outputFormat === "string") out.outputFormat = o.outputFormat;
 	if (typeof o.cwd === "string") out.cwd = o.cwd;
 	// Per-directory Read grants are surfaced via the `Read(<dir>/**)` entries in
@@ -173,6 +187,9 @@ function buildSanitizedQueryOptions(
 		const settings = o.settings as Record<string, unknown>;
 		if (typeof settings.autoMemoryDirectory === "string") {
 			out.settingsAutoMemoryDirectory = settings.autoMemoryDirectory;
+		}
+		if (typeof settings.autoCompactWindow === "number") {
+			out.settingsAutoCompactWindow = settings.autoCompactWindow;
 		}
 	}
 
@@ -253,11 +270,17 @@ export declare interface ClaudeRunner {
 /**
  * Manages Claude SDK sessions and communication
  */
-export class ClaudeRunner extends EventEmitter implements IAgentRunner {
+export class ClaudeRunner
+	extends EventEmitter
+	implements IAgentRunner, WarmIdleSession
+{
 	/**
 	 * ClaudeRunner supports streaming input via startStreaming(), addStreamMessage(), and completeStream()
 	 */
 	readonly supportsStreamingInput = true;
+
+	/** Provider dispatch tag (see IAgentRunner.provider). */
+	readonly provider = "claude" as const;
 
 	private config: ClaudeRunnerConfig;
 	private logger: ILogger;
@@ -265,25 +288,39 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 	private sessionInfo: ClaudeSessionInfo | null = null;
 	private logStream: WriteStream | null = null;
 	private readableLogStream: WriteStream | null = null;
-	private messages: SDKMessage[] = [];
+	private messages: AgentMessage[] = [];
 	private streamingPrompt: StreamingPrompt | null = null;
 	private activeQuery: Query | null = null;
 	private cyrusHome: string;
-	private formatter: IMessageFormatter;
-	private pendingResultMessage: SDKMessage | null = null;
+	private pendingResultMessage: AgentMessage | null = null;
 	private canUseToolCallback: CanUseTool | undefined;
 	private repositoryEnv: Record<string, string> = {};
 	private keepSessionWarm: boolean;
 	private pendingSessionCrons: SessionCronSummary[] = [];
 	private pendingBackgroundTasks: BackgroundTaskSummary[] = [];
+	/** Armed while a warm session sits idle; fires to shut the subprocess down. */
+	private idleKeepAliveTimer: NodeJS.Timeout | null = null;
+	private static instanceCounter = 0;
+
+	/**
+	 * Stable per-instance id used as the LRU key in {@link WarmSessionRegistry}
+	 * (satisfies the `WarmIdleSession` contract). A monotonic counter is enough
+	 * — it only needs to be unique per process and survive before the Claude
+	 * session id is assigned.
+	 */
+	public readonly registryId =
+		`claude-runner-${++ClaudeRunner.instanceCounter}`;
 
 	constructor(config: ClaudeRunnerConfig, keepSessionWarm = false) {
 		super();
 		this.config = config;
-		this.keepSessionWarm = keepSessionWarm;
+		// A configured keep-alive window implies the session is held open after a
+		// turn — the window is what bounds it. The warm-session pool is the other,
+		// independent reason to stay warm (and stays unbounded, as before).
+		this.keepSessionWarm =
+			keepSessionWarm || (config.sessionKeepAliveMs ?? 0) > 0;
 		this.logger = config.logger ?? createLogger({ component: "ClaudeRunner" });
 		this.cyrusHome = config.cyrusHome;
-		this.formatter = new ClaudeMessageFormatter();
 
 		// Create canUseTool callback if onAskUserQuestion is provided
 		if (config.onAskUserQuestion) {
@@ -316,12 +353,14 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 				toolUseID: string;
 			},
 		): Promise<PermissionResult> => {
-			// Only intercept AskUserQuestion tool
+			// Only AskUserQuestion is an interactive permission request Cyrus can
+			// satisfy. `allowedTools` auto-approves configured tools before this
+			// callback; anything else reaching this callback is outside the session
+			// policy and must fail closed.
 			if (toolName !== "AskUserQuestion") {
-				// Allow all other tools to proceed normally
 				return {
-					behavior: "allow",
-					updatedInput: input,
+					behavior: "deny",
+					message: `Tool ${toolName} is not allowed in this session`,
 				};
 			}
 
@@ -431,11 +470,17 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 
 	/**
 	 * Add a message to the streaming prompt (only works when in streaming mode)
+	 *
+	 * If the idle timer fires between this check and `addMessage`, the completed
+	 * StreamingPrompt throws — callers already catch that and fall back to a
+	 * resume, so the race costs a rewrite but never drops the message.
 	 */
 	addStreamMessage(content: string): void {
 		if (!this.streamingPrompt) {
 			throw new Error("Cannot add stream message when not in streaming mode");
 		}
+		// The session is busy again; the idle window restarts when this turn ends.
+		this.clearIdleKeepAliveTimer();
 		this.streamingPrompt.addMessage(content);
 	}
 
@@ -443,9 +488,69 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 	 * Complete the streaming prompt (no more messages will be added)
 	 */
 	completeStream(): void {
+		this.clearIdleKeepAliveTimer();
 		if (this.streamingPrompt) {
 			this.streamingPrompt.complete();
 		}
+	}
+
+	/**
+	 * Start the idle window after a turn ends. When it elapses the prompt is
+	 * completed, the CLI's stdin closes, and the subprocess exits down the same
+	 * path a non-warm session takes on `result` — so a later comment simply
+	 * resumes. No-op when keep-alive is not configured (e.g. warm-pool sessions,
+	 * which stay open indefinitely).
+	 */
+	private armIdleKeepAliveTimer(): void {
+		const idleMs = this.config.sessionKeepAliveMs ?? 0;
+		if (idleMs <= 0) return;
+		this.clearIdleKeepAliveTimer();
+		this.idleKeepAliveTimer = setTimeout(() => {
+			this.idleKeepAliveTimer = null;
+			this.config.warmSessionRegistry?.remove(this.registryId);
+			this.logger.event("session_idle_keepalive_expired", {
+				idleMs,
+				claudeSessionId: this.sessionInfo?.sessionId,
+			});
+			this.completeStream();
+		}, idleMs);
+		// Never hold the process open just to wait out an idle session.
+		this.idleKeepAliveTimer.unref?.();
+		// Register as idle-warm last, so an LRU eviction triggered by this call
+		// (which may complete our stream synchronously) runs against a timer that
+		// is already armed and will be cleared by the resulting completeStream().
+		this.config.warmSessionRegistry?.markIdle(this);
+	}
+
+	private clearIdleKeepAliveTimer(): void {
+		// Whenever the idle timer is cleared the session is no longer idle-warm:
+		// it either became busy again or is shutting down. Drop it from the LRU
+		// registry so the cap reflects only genuinely idle sessions.
+		this.config.warmSessionRegistry?.remove(this.registryId);
+		if (this.idleKeepAliveTimer) {
+			clearTimeout(this.idleKeepAliveTimer);
+			this.idleKeepAliveTimer = null;
+		}
+	}
+
+	// --- WarmIdleSession (WarmSessionRegistry contract) ---
+
+	/** The Claude session id when known — logging only. */
+	getClaudeSessionId(): string | undefined {
+		return this.sessionInfo?.sessionId ?? undefined;
+	}
+
+	/**
+	 * Evict this idle-warm session, called by {@link WarmSessionRegistry} when
+	 * the concurrently-warm cap is exceeded. Completes the streaming prompt down
+	 * the same graceful shutdown path the idle timer takes on expiry, so the
+	 * next comment on this session resumes normally.
+	 */
+	evictWarmSession(): void {
+		this.logger.event("warm_idle_session_evicted_self", {
+			claudeSessionId: this.sessionInfo?.sessionId,
+		});
+		this.completeStream();
 	}
 
 	/**
@@ -523,45 +628,33 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 				promptForQuery = this.streamingPrompt;
 			}
 
-			// Process allowed directories by adding Read patterns to allowedTools
-			let processedAllowedTools = this.config.allowedTools
-				? [...this.config.allowedTools]
-				: undefined;
-			if (
-				this.config.allowedDirectories &&
-				this.config.allowedDirectories.length > 0
-			) {
-				const directoryTools = this.config.allowedDirectories.map((dir) => {
-					// Add extra / prefix for absolute paths to ensure Claude Code recognizes them properly
-					// See: https://docs.anthropic.com/en/docs/claude-code/settings#read-%26-edit
-					const prefixedPath = dir.startsWith("/") ? `/${dir}` : dir;
-					return `Read(${prefixedPath}/**)`;
-				});
-				processedAllowedTools = processedAllowedTools
-					? [...processedAllowedTools, ...directoryTools]
-					: directoryTools;
-			}
-
-			// Build home directory restrictions: deny Read on everything in ~/
-			// that is not an ancestor of the working directory. This prevents
-			// Claude from reading SSH keys, credentials, etc. `Read(~/**)` does
-			// not work as a disallowedTools pattern — `~` is not expanded to the
-			// home directory path, so the pattern never matches.
-			const homeDisallowedTools = this.config.workingDirectory
-				? buildHomeDirectoryDisallowedTools(
-						this.config.workingDirectory,
-						this.config.allowedDirectories ?? [],
-					)
-				: [];
-
-			// Merge config-level denials with home directory denials, deduplicating in case
-			// any paths appear in both (e.g. an allowedDirectory that is also explicitly denied).
-			const processedDisallowedTools = [
-				...new Set([
-					...(this.config.disallowedTools ?? []),
-					...homeDisallowedTools,
-				]),
-			];
+			// Derive the effective access policy once and render it into Claude
+			// Code tool patterns. `compute()` folds together three things that
+			// used to be inline here:
+			//   - allowedDirectories → Read(dir/**) allow patterns
+			//   - the home-directory sibling-exclusion walk → Read(...) denials
+			//     (deny Read on everything in ~/ that is not an ancestor of the
+			//     working directory, preventing reads of SSH keys, credentials,
+			//     etc. — `Read(~/**)` does not work as a disallowedTools pattern
+			//     because `~` is never expanded, so each sibling is named
+			//     concretely via double-slash absolute paths)
+			//   - config-level allowed/disallowed tools, passed through verbatim
+			// This is the COLD path; the warm path (EdgeWorker.warmupSessions)
+			// and the OS sandbox layer call the identical compute() so all three
+			// enforcement layers agree.
+			const {
+				allowedTools: processedAllowedTools,
+				disallowedTools: processedDisallowedTools,
+			} = toClaudeToolPatterns(
+				compute({
+					homeDir: homedir(),
+					dirLister: nodeDirLister,
+					cwd: this.config.workingDirectory ?? "",
+					allowReadDirectories: this.config.allowedDirectories ?? [],
+					toolAllowExtra: this.config.allowedTools,
+					toolDisallow: this.config.disallowedTools,
+				}),
+			);
 
 			// Log disallowed tools if configured
 			if (processedDisallowedTools.length > 0) {
@@ -648,12 +741,46 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 
 			const isDebugLogging = this.logger.getLevel() === LogLevel.DEBUG;
 
+			// SDK "flag settings" layer (the highest-priority user-controlled
+			// settings tier). We drive two independent knobs through it: Claude's
+			// auto-memory directory and the auto-compact window. Build the object
+			// once so both can coexist — a naive per-field
+			// `...(cond && { settings: {...} })` spread would have the later
+			// field's object clobber the earlier field's.
+			const sdkSettings: Record<string, unknown> = {};
+			if (this.config.autoMemoryDirectory) {
+				sdkSettings.autoMemoryDirectory = this.config.autoMemoryDirectory;
+			}
+			if (this.config.autoCompactWindow) {
+				// Smaller effective context window ⇒ the SDK auto-compacts earlier,
+				// capping the re-read context tax on long multi-subroutine sessions
+				// instead of only compacting near the model's full (~1M) window.
+				sdkSettings.autoCompactWindow = this.config.autoCompactWindow;
+			}
+
 			const queryOptions: Parameters<typeof query>[0] = {
 				prompt: promptForQuery,
 				options: {
 					model: this.config.model || "opus",
 					fallbackModel: this.config.fallbackModel || "sonnet",
 					abortController: this.abortController,
+					// A read-only reconnaissance agent pinned to a cheaper model. The
+					// SDK has no global "subagent model" option — an agent's model can
+					// only be set on an agent you define — so cheap delegation means
+					// registering one. Omitted entirely when unconfigured, leaving the
+					// SDK's built-in agents (which inherit the session model) untouched.
+					...(this.config.subagentModel && {
+						agents: {
+							explore: {
+								description:
+									"Read-only codebase reconnaissance. Use to locate code or trace a call path across many files — anything answerable by searching and reading without editing. Returns a compact summary with file:line references instead of pulling every file into the main conversation.",
+								prompt:
+									"You are a read-only code explorer. Search and read to answer the question you were given, then reply with a compact summary citing concrete file:line references. Do not modify anything. Report only what you actually found — if the answer is not in the codebase, say so rather than guessing.",
+								tools: ["Read", "Grep", "Glob"],
+								model: this.config.subagentModel,
+							},
+						},
+					}),
 					// Use Claude Code preset by default to maintain backward compatibility
 					// This can be overridden if systemPrompt is explicitly provided
 					systemPrompt: this.config.systemPrompt || {
@@ -676,6 +803,16 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 						// See: CYPACK-1108.
 						...this.repositoryEnv,
 						...this.config.additionalEnv,
+						// Cap oversized tool output so a single huge Bash/MCP result
+						// doesn't bloat the transcript and get re-written to the prompt
+						// cache every turn. Emitted as first-class env vars AFTER
+						// additionalEnv, never via it: buildSandboxConfig assigns
+						// additionalEnv wholesale and would otherwise clobber these. Only
+						// configured caps appear, so unset preserves the CLI defaults.
+						...buildToolOutputCapEnv({
+							bashMaxOutputLength: this.config.bashMaxOutputLength,
+							mcpMaxOutputTokens: this.config.mcpMaxOutputTokens,
+						}),
 						// When logging at DEBUG level, enable the SDK's own debug output so
 						// --debug-to-stderr and DEBUG=1 propagate to the Claude subprocess.
 						// Explicitly set or unset to override any leaked value from process.env.
@@ -694,7 +831,9 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					...(this.config.additionalDirectories?.length && {
 						additionalDirectories: this.config.additionalDirectories,
 					}),
-					...(processedAllowedTools && { allowedTools: processedAllowedTools }),
+					...(processedAllowedTools.length > 0 && {
+						allowedTools: processedAllowedTools,
+					}),
 					...(processedDisallowedTools.length > 0 && {
 						disallowedTools: processedDisallowedTools,
 					}),
@@ -707,10 +846,8 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					...(this.config.sessionStore && {
 						sessionStore: this.config.sessionStore,
 					}),
-					...(this.config.autoMemoryDirectory && {
-						settings: {
-							autoMemoryDirectory: this.config.autoMemoryDirectory,
-						},
+					...(Object.keys(sdkSettings).length > 0 && {
+						settings: sdkSettings,
 					}),
 					...(Object.keys(mcpServers).length > 0 && { mcpServers }),
 					// Only use MCP servers we explicitly pass via `mcpConfig` /
@@ -728,8 +865,15 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					...(this.config.skills !== undefined && {
 						skills: this.config.skills,
 					}),
+					// `tools` replaces the SDK built-in preset; never derive it from the
+					// permission-oriented `allowedTools` list. An empty override launches
+					// Claude with `--tools ""` and removes Bash, Read, Skill, and editors.
 					...(this.config.tools !== undefined && { tools: this.config.tools }),
 					...(this.config.maxTurns && { maxTurns: this.config.maxTurns }),
+					// Reasoning effort steers the SDK's adaptive thinking. Unset
+					// preserves the SDK default (`high`); unsupported levels are
+					// silently downgraded.
+					...(this.config.effort && { effort: this.config.effort }),
 					...(this.config.outputFormat && {
 						outputFormat: this.config.outputFormat,
 					}),
@@ -795,9 +939,7 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					this.setupLogging();
 				}
 
-				this.messages.push(message);
-
-				// Log to detailed JSON log
+				// Log to detailed JSON log (raw SDK shape, for replay/debugging)
 				if (this.logStream) {
 					const logEntry = {
 						type: "sdk-message",
@@ -807,27 +949,33 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					this.logStream.write(`${JSON.stringify(logEntry)}\n`);
 				}
 
-				// Log to human-readable log
+				// Log to human-readable log (raw SDK shape)
 				if (this.readableLogStream) {
 					this.writeReadableLogEntry(message);
 				}
 
-				// Emit all messages (including result) immediately in-loop.
+				// Project the raw SDK message into the neutral AgentMessage
+				// contract. Informational SDK frames (stream_event, tool_progress,
+				// auth_status, tool_use_summary, prompt_suggestion, …) project to
+				// null and are dropped instead of being surfaced to consumers.
+				// Emit neutral messages (including result) immediately in-loop.
 				// When keepSessionWarm is true, the streamingPrompt stays open for
 				// follow-up messages so the SDK session can be reused. Otherwise we
 				// complete the streaming prompt on result so the for-await loop exits
 				// and the subprocess can shut down (pre-warm-sessions behavior).
-				this.logger.event("message_emitted", {
-					messageType: message.type,
-					claudeSessionId: this.sessionInfo?.sessionId,
-				});
-				this.emit("message", message);
+				const neutral = toAgentMessage(message);
+				if (neutral) {
+					this.messages.push(neutral);
+					this.logger.event("message_emitted", {
+						messageType: neutral.type,
+						claudeSessionId: this.sessionInfo?.sessionId,
+					});
+					this.emit("message", neutral);
+				}
+				// processMessage reads the raw SDK shape to emit text/assistant/
+				// tool-use convenience events.
 				this.processMessage(message);
-				if (
-					message.type === "result" &&
-					!this.keepSessionWarm &&
-					this.streamingPrompt
-				) {
+				if (message.type === "result" && this.streamingPrompt) {
 					// The Stop hook fires before the result message reaches this
 					// loop, so the pending-work snapshot is fresh for this turn.
 					// When a scheduled wakeup or background task is still in
@@ -838,14 +986,21 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 					// pending work, and the result that follows completes the
 					// prompt here. Error results always complete: pending-work
 					// state may be stale when a turn dies mid-flight.
+					//
+					// No idle timer while pending work holds the prompt open: the
+					// wakeup turn that follows arms it once the work has drained.
 					if (message.subtype === "success" && this.hasPendingWork()) {
 						this.logger.event("session_held_open_for_pending_work", {
 							sessionCronCount: this.pendingSessionCrons.length,
 							backgroundTaskCount: this.pendingBackgroundTasks.length,
 							claudeSessionId: this.sessionInfo?.sessionId,
 						});
-					} else {
+					} else if (!this.keepSessionWarm) {
 						this.streamingPrompt.complete();
+					} else {
+						// Warm: hold the session open so a follow-up comment appends
+						// to the live conversation instead of paying to re-write it.
+						this.armIdleKeepAliveTimer();
 					}
 				}
 			}
@@ -860,10 +1015,10 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 			});
 			this.sessionInfo.isRunning = false;
 
-			// Emit deferred result message after marking isRunning = false
+			// Emit deferred result message after marking isRunning = false.
+			// (Already projected to a neutral AgentMessage.)
 			if (this.pendingResultMessage) {
 				this.emit("message", this.pendingResultMessage);
-				this.processMessage(this.pendingResultMessage);
 				this.pendingResultMessage = null;
 			}
 
@@ -908,6 +1063,7 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 			}
 		} finally {
 			// Clean up
+			this.clearIdleKeepAliveTimer();
 			this.abortController = null;
 			this.activeQuery = null;
 			this.pendingResultMessage = null;
@@ -1066,17 +1222,74 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 				},
 			],
 		};
+		// LLMOps: export the session transcript to Langfuse on every Stop. The
+		// SDK's SessionEnd hook does NOT fire during a normal query() loop (it
+		// only fires on explicit session teardown, which doesn't happen for
+		// resumed/warm sessions), so we hook Stop instead — it fires reliably
+		// after each turn with `transcript_path` populated. Object IDs are
+		// deterministic (derived from session/message/tool IDs), so each
+		// re-export upserts the same trace and only adds new turns' observations
+		// — giving progressive visibility without duplication. Export is
+		// fire-and-forget: never blocks the turn, failures logged + swallowed.
+		// No-op (config is null) when Langfuse keys are absent or disabled.
+		const langfuseExporter: HookCallbackMatcher = {
+			matcher: ".*",
+			hooks: [
+				async (input) => {
+					const stopInput = input as StopHookInput;
+					const config = resolveLangfuseConfig();
+					if (!config) return {};
+					this.exportToLangfuse(
+						stopInput.session_id,
+						stopInput.transcript_path,
+					).catch((err) =>
+						this.logger.event("langfuse_export_failed", {
+							claudeSessionId: this.sessionInfo?.sessionId,
+							error: String(err),
+						}),
+					);
+					return {};
+				},
+			],
+		};
 		const configHooks = this.config.hooks ?? {};
 		return {
 			...configHooks,
-			Stop: [...(configHooks.Stop ?? []), recorder],
+			Stop: [...(configHooks.Stop ?? []), recorder, langfuseExporter],
 		};
+	}
+
+	/**
+	 * Export the completed session transcript to Langfuse. Enriches the trace
+	 * with the Cyrus workspace name + cwd so each trace is identifiable in the
+	 * Langfuse UI. Resolving config + the call itself live in
+	 * `langfuse-exporter.ts`; this thin wrapper supplies runner context.
+	 */
+	private async exportToLangfuse(
+		sessionId: string,
+		transcriptPath: string,
+	): Promise<void> {
+		const config = resolveLangfuseConfig();
+		if (!config) return;
+		await exportTranscriptToLangfuse({
+			transcriptPath,
+			sessionId,
+			config,
+			traceName: this.config.workspaceName,
+			metadata: {
+				workspaceName: this.config.workspaceName,
+				cwd: this.config.workingDirectory,
+			},
+			logger: this.logger,
+		});
 	}
 
 	/**
 	 * Stop the current Claude session
 	 */
 	stop(): void {
+		this.clearIdleKeepAliveTimer();
+
 		if (this.abortController) {
 			this.logger.event("session_stop_requested", {
 				claudeSessionId: this.sessionInfo?.sessionId,
@@ -1126,15 +1339,8 @@ export class ClaudeRunner extends EventEmitter implements IAgentRunner {
 	/**
 	 * Get all messages from current session
 	 */
-	getMessages(): SDKMessage[] {
+	getMessages(): AgentMessage[] {
 		return [...this.messages];
-	}
-
-	/**
-	 * Get the message formatter for this runner
-	 */
-	getFormatter(): IMessageFormatter {
-		return this.formatter;
 	}
 
 	/**

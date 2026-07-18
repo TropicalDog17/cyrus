@@ -1,7 +1,6 @@
 import type { CyrusAgentSession, ILogger, RepositoryConfig } from "cyrus-core";
 import { describe, expect, it } from "vitest";
 import {
-	type IChatToolResolver,
 	type IMcpConfigProvider,
 	type IRunnerSelector,
 	RunnerConfigBuilder,
@@ -16,9 +15,6 @@ const silentLogger: ILogger = {
 } as unknown as ILogger;
 
 function makeBuilder(): RunnerConfigBuilder {
-	const chatToolResolver: IChatToolResolver = {
-		buildChatAllowedTools: () => ["Read(**)"],
-	};
 	const mcpConfigProvider: IMcpConfigProvider = {
 		buildMcpConfig: () => ({}),
 		buildMergedMcpConfigPath: () => undefined,
@@ -28,11 +24,7 @@ function makeBuilder(): RunnerConfigBuilder {
 		getDefaultModelForRunner: () => "opus",
 		getDefaultFallbackModelForRunner: () => "sonnet",
 	};
-	return new RunnerConfigBuilder(
-		chatToolResolver,
-		mcpConfigProvider,
-		runnerSelector,
-	);
+	return new RunnerConfigBuilder(mcpConfigProvider, runnerSelector);
 }
 
 function makeRepository(): RepositoryConfig {

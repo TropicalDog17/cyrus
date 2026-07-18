@@ -1,6 +1,7 @@
 {
 	"name": "cyrus-config-updater",
 	"version": "0.2.66",
+	"private": true,
 	"description": "Configuration update handlers for Cyrus agent",
 	"type": "module",
 	"main": "./dist/index.js",

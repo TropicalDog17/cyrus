@@ -8,6 +8,19 @@ import type {
 } from "cyrus-core";
 import { fileTypeFromBuffer } from "file-type";
 
+function escapeXmlText(value: string): string {
+	return value
+		.replaceAll("&", "&amp;")
+		.replaceAll("<", "&lt;")
+		.replaceAll(">", "&gt;");
+}
+
+function escapeXmlAttribute(value: string): string {
+	return escapeXmlText(value)
+		.replaceAll('"', "&quot;")
+		.replaceAll("'", "&apos;");
+}
+
 export class AttachmentService {
 	private logger: ILogger;
 	private cyrusHome: string;
@@ -403,44 +416,18 @@ export class AttachmentService {
 		totalNewAttachments: number;
 		failedCount: number;
 	}): string {
-		const { newAttachmentMap, newImageMap, totalNewAttachments, failedCount } =
-			result;
+		const warnings =
+			result.failedCount > 0
+				? [
+						`${result.failedCount} attachment${result.failedCount === 1 ? "" : "s"} failed to download.`,
+					]
+				: [];
 
-		if (totalNewAttachments === 0) {
-			return "";
-		}
-
-		let manifest = "\n## New Attachments from Comment\n\n";
-
-		manifest += `Downloaded ${totalNewAttachments} new attachment${totalNewAttachments > 1 ? "s" : ""}`;
-		if (failedCount > 0) {
-			manifest += ` (${failedCount} failed)`;
-		}
-		manifest += ".\n\n";
-
-		// List new images
-		if (Object.keys(newImageMap).length > 0) {
-			manifest += "### New Images\n";
-			Object.entries(newImageMap).forEach(([url, localPath], index) => {
-				const filename = basename(localPath);
-				manifest += `${index + 1}. ${filename} - Original URL: ${url}\n`;
-				manifest += `   Local path: ${localPath}\n\n`;
-			});
-			manifest += "You can use the Read tool to view these images.\n\n";
-		}
-
-		// List new other attachments
-		if (Object.keys(newAttachmentMap).length > 0) {
-			manifest += "### New Attachments\n";
-			Object.entries(newAttachmentMap).forEach(([url, localPath], index) => {
-				const filename = basename(localPath);
-				manifest += `${index + 1}. ${filename} - Original URL: ${url}\n`;
-				manifest += `   Local path: ${localPath}\n\n`;
-			});
-			manifest += "You can use the Read tool to view these files.\n\n";
-		}
-
-		return manifest;
+		return this.formatAttachmentContext({
+			imagePaths: Object.values(result.newImageMap),
+			filePaths: Object.values(result.newAttachmentMap),
+			warnings,
+		});
 	}
 
 	/**
@@ -456,77 +443,51 @@ export class AttachmentService {
 		failed: number;
 		nativeAttachments?: Array<{ title: string; url: string }>;
 	}): string {
-		const {
-			attachmentMap,
-			imageMap,
-			totalFound,
-			downloaded,
-			imagesDownloaded,
-			skipped,
-			failed,
-			nativeAttachments = [],
-		} = downloadResult;
-
-		let manifest = "\n## Downloaded Attachments\n\n";
-
-		// Add native Linear attachments section if available
-		if (nativeAttachments.length > 0) {
-			manifest += "### Linear Issue Links\n";
-			nativeAttachments.forEach((attachment, index) => {
-				manifest += `${index + 1}. ${attachment.title}\n`;
-				manifest += `   URL: ${attachment.url}\n\n`;
-			});
+		const warnings: string[] = [];
+		if (downloadResult.skipped > 0) {
+			warnings.push(
+				`${downloadResult.skipped} attachment${downloadResult.skipped === 1 ? " was" : "s were"} skipped because the download limit was reached.`,
+			);
+		}
+		if (downloadResult.failed > 0) {
+			warnings.push(
+				`${downloadResult.failed} attachment${downloadResult.failed === 1 ? "" : "s"} failed to download.`,
+			);
 		}
 
-		if (totalFound === 0 && nativeAttachments.length === 0) {
-			manifest += "No attachments were found in this issue.\n\n";
-			manifest +=
-				"The attachments directory `~/.cyrus/<workspace>/attachments` has been created and is available for any future attachments that may be added to this issue.\n";
-			return manifest;
+		return this.formatAttachmentContext({
+			imagePaths: Object.values(downloadResult.imageMap),
+			filePaths: Object.values(downloadResult.attachmentMap),
+			links: downloadResult.nativeAttachments,
+			warnings,
+		});
+	}
+
+	private formatAttachmentContext(input: {
+		imagePaths?: string[];
+		filePaths?: string[];
+		links?: Array<{ title: string; url: string }>;
+		warnings?: string[];
+	}): string {
+		const lines: string[] = [];
+
+		for (const path of input.imagePaths ?? []) {
+			lines.push(`  <image>${escapeXmlText(path)}</image>`);
+		}
+		for (const path of input.filePaths ?? []) {
+			lines.push(`  <file>${escapeXmlText(path)}</file>`);
+		}
+		for (const link of input.links ?? []) {
+			lines.push(
+				`  <link url="${escapeXmlAttribute(link.url)}">${escapeXmlText(link.title)}</link>`,
+			);
+		}
+		for (const warning of input.warnings ?? []) {
+			lines.push(`  <warning>${escapeXmlText(warning)}</warning>`);
 		}
 
-		manifest += `Found ${totalFound} attachments. Downloaded ${downloaded}`;
-		if (imagesDownloaded > 0) {
-			manifest += ` (including ${imagesDownloaded} images)`;
-		}
-		if (skipped > 0) {
-			manifest += `, skipped ${skipped} due to ${downloaded} attachment limit`;
-		}
-		if (failed > 0) {
-			manifest += `, failed to download ${failed}`;
-		}
-		manifest += ".\n\n";
-
-		if (failed > 0) {
-			manifest +=
-				"**Note**: Some attachments failed to download. This may be due to authentication issues or the files being unavailable. The agent will continue processing the issue with the available information.\n\n";
-		}
-
-		manifest +=
-			"Attachments have been downloaded to the `~/.cyrus/<workspace>/attachments` directory:\n\n";
-
-		// List images first
-		if (Object.keys(imageMap).length > 0) {
-			manifest += "### Images\n";
-			Object.entries(imageMap).forEach(([url, localPath], index) => {
-				const filename = basename(localPath);
-				manifest += `${index + 1}. ${filename} - Original URL: ${url}\n`;
-				manifest += `   Local path: ${localPath}\n\n`;
-			});
-			manifest += "You can use the Read tool to view these images.\n\n";
-		}
-
-		// List other attachments
-		if (Object.keys(attachmentMap).length > 0) {
-			manifest += "### Other Attachments\n";
-			Object.entries(attachmentMap).forEach(([url, localPath], index) => {
-				const filename = basename(localPath);
-				manifest += `${index + 1}. ${filename} - Original URL: ${url}\n`;
-				manifest += `   Local path: ${localPath}\n\n`;
-			});
-			manifest += "You can use the Read tool to view these files.\n\n";
-		}
-
-		return manifest;
+		return lines.length > 0
+			? `<attachments>\n${lines.join("\n")}\n</attachments>`
+			: "";
 	}
 }

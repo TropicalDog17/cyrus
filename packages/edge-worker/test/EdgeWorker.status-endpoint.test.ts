@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { EdgeWorker } from "../src/EdgeWorker.js";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
 
 // Mock fs/promises
@@ -13,8 +13,6 @@ vi.mock("fs/promises", () => ({
 
 // Mock dependencies
 vi.mock("cyrus-claude-runner");
-vi.mock("cyrus-codex-runner");
-vi.mock("cyrus-gemini-runner");
 vi.mock("cyrus-linear-event-transport");
 vi.mock("@linear/sdk");
 vi.mock("../src/SharedApplicationServer.js", () => ({
@@ -119,7 +117,7 @@ describe("EdgeWorker - Status Endpoint", () => {
 
 	describe("computeStatus", () => {
 		it("should return idle when no webhooks are being processed and no runners are active", async () => {
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 
 			// Access the private method via type assertion for testing
 			const status = (edgeWorker as any).computeStatus();
@@ -128,7 +126,7 @@ describe("EdgeWorker - Status Endpoint", () => {
 		});
 
 		it("should return busy when activeWebhookCount > 0", async () => {
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 
 			// Simulate webhook processing
 			(edgeWorker as any).activeWebhookCount = 1;
@@ -139,7 +137,7 @@ describe("EdgeWorker - Status Endpoint", () => {
 		});
 
 		it("should return busy when a runner is running", async () => {
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 
 			// Create a mock runner that is running
 			const mockRunner = {
@@ -161,7 +159,7 @@ describe("EdgeWorker - Status Endpoint", () => {
 		});
 
 		it("should return idle when runner exists but is not running", async () => {
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 
 			// Create a mock runner that is not running
 			const mockRunner = {
@@ -182,7 +180,7 @@ describe("EdgeWorker - Status Endpoint", () => {
 		});
 
 		it("should return busy when multiple runners exist and at least one is running", async () => {
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 
 			// Create mock runners - one running, one not
 			const mockRunner1 = {
@@ -206,7 +204,7 @@ describe("EdgeWorker - Status Endpoint", () => {
 		});
 
 		it("should check all runners from the single session manager", async () => {
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 
 			// Create mock runners - one idle, one busy
 			const mockRunner1 = {
@@ -233,7 +231,7 @@ describe("EdgeWorker - Status Endpoint", () => {
 
 	describe("activeWebhookCount tracking", () => {
 		it("should increment and decrement activeWebhookCount during webhook handling", async () => {
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 
 			// Verify initial state
 			expect((edgeWorker as any).activeWebhookCount).toBe(0);
@@ -247,7 +245,7 @@ describe("EdgeWorker - Status Endpoint", () => {
 		});
 
 		it("should decrement activeWebhookCount even when handler throws an error", async () => {
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 
 			// Mock isIssueUnassignedWebhook to return true and make the handler throw
 			const { isIssueUnassignedWebhook } = await import("cyrus-core");
@@ -291,7 +289,7 @@ describe("EdgeWorker - Status Endpoint", () => {
 				};
 			} as any);
 
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 
 			// Call registerStatusEndpoint
 			(edgeWorker as any).registerStatusEndpoint();
@@ -327,7 +325,7 @@ describe("EdgeWorker - Status Endpoint", () => {
 				};
 			} as any);
 
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 			(edgeWorker as any).registerStatusEndpoint();
 
 			// Mock reply object
@@ -371,7 +369,7 @@ describe("EdgeWorker - Status Endpoint", () => {
 				};
 			} as any);
 
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 			(edgeWorker as any).registerStatusEndpoint();
 
 			// Simulate active webhook

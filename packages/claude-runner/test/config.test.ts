@@ -18,6 +18,7 @@ describe("config", () => {
 				"Edit(**)",
 				"Write(**)",
 				"Bash",
+				"Agent",
 				"Task",
 				"WebFetch",
 				"WebSearch",
@@ -47,7 +48,7 @@ describe("config", () => {
 				"DesignSync",
 				"Workflow",
 			]);
-			expect(availableTools).toHaveLength(32);
+			expect(availableTools).toHaveLength(33);
 		});
 
 		it("should define read-only tools", () => {
@@ -59,6 +60,7 @@ describe("config", () => {
 				"TaskUpdate",
 				"TaskGet",
 				"TaskList",
+				"Agent",
 				"Task",
 				"Skill",
 				"Monitor",
@@ -68,7 +70,7 @@ describe("config", () => {
 				"ExitPlanMode",
 				"ToolSearch",
 			]);
-			expect(readOnlyTools).toHaveLength(15);
+			expect(readOnlyTools).toHaveLength(16);
 		});
 
 		it("should define write tools", () => {

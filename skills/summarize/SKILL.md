@@ -41,8 +41,8 @@ Added retry-with-backoff to the webhook client so transient 5xx responses no lon
 +++
 
 +++Files modified
-- packages/ndjson-client/src/WebhookClient.ts
-- packages/ndjson-client/test/WebhookClient.test.ts
+- packages/linear-event-transport/src/LinearEventTransport.ts
+- packages/linear-event-transport/test/LinearEventTransport.test.ts
 +++
 
 **Status:** Complete and ready for review. The full test suite passes; no follow-up needed.

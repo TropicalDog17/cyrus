@@ -5,6 +5,7 @@ import {
 	type CyrusToolsOptions,
 	createCyrusToolsServer,
 } from "cyrus-mcp-tools";
+import { buildAtlassianMcpServerConfig } from "./AtlassianMcpConfig.js";
 
 type CyrusToolsMcpContextEntry = {
 	contextId: string;
@@ -35,12 +36,9 @@ export interface McpConfigServiceDeps {
  * Single source of truth for MCP server configuration assembly.
  *
  * Handles:
- * - Building inline MCP server configs (Linear, cyrus-tools, Slack)
+ * - Building inline MCP server configs (Linear, cyrus-tools)
  * - Merging file-based MCP config paths from repositories
  * - Cyrus-tools MCP context lifecycle management
- *
- * Both EdgeWorker (issue sessions) and ChatSessionHandler (chat sessions)
- * consume this service instead of duplicating MCP config logic.
  */
 export class McpConfigService {
 	private deps: McpConfigServiceDeps;
@@ -104,6 +102,28 @@ export class McpConfigService {
 
 		// Workspace-level MCP servers — configured once regardless of repo count
 		// https://linear.app/docs/mcp
+		//
+		// `alwaysLoad: true` on `linear` opts it out of the
+		// SDK's MCP tool-search auto mode. That mode (enabled by default once the
+		// combined MCP tool descriptions exceed ~10% of the context window —
+		// which the official Linear MCP's ~50 verbose tools do on their own)
+		// otherwise DEFERS every Linear tool behind the `ToolSearch` tool, so the
+		// agent burns ~a minute of round-trips to the remote `mcp.linear.app`
+		// discovering schemas on turn 1 before it can read or update the issue.
+		// Every Linear/GitHub session needs the core Linear issue/comment tools
+		// immediately, so load that server up front. `cyrus-tools`, `cyrus-docs`,
+		// and the optional slack/atlassian servers stay deferred: their tools are
+		// used rarely, so keeping them behind local/on-demand tool search keeps the
+		// turn-1 context lean. See CYPACK-716 / DEV-140.
+		//
+		// Eager-loading the Linear server pulls in ALL ~47 of its tools, so the
+		// verbose, rarely-used ones (releases, milestones, attachments, diffs,
+		// documents, agent skills, …) are pruned back out of context via
+		// `disallowedTools` — see `LINEAR_MCP_PRUNED_TOOLS` /
+		// `withLinearMcpPruned` in cyrus-core, applied at
+		// `EdgeWorker.buildDisallowedTools`. What stays loaded is the essential
+		// Linear surface Cyrus uses every session (issues, comments, teams,
+		// users, statuses, labels, projects).
 		const mcpConfig: Record<string, McpServerConfig> = {
 			linear: {
 				type: "http",
@@ -111,6 +131,7 @@ export class McpConfigService {
 				headers: {
 					Authorization: `Bearer ${linearToken}`,
 				},
+				alwaysLoad: true,
 			},
 			"cyrus-tools": {
 				type: "http",
@@ -142,6 +163,17 @@ export class McpConfigService {
 					SLACK_MCP_XOXB_TOKEN: slackBotToken,
 				},
 			};
+		}
+
+		// Inject the Atlassian MCP server (Jira/Confluence) when configured, so
+		// sessions can pull Jira ticket content for context — e.g. a Jira ticket
+		// referenced by a Linear issue. Gated on env config (ATLASSIAN_MCP_TOKEN /
+		// ATLASSIAN_MCP_URL); per-platform availability is enforced upstream by the
+		// allowed-tools array (`mcp__atlassian`).
+		// https://www.atlassian.com/platform/remote-mcp-server
+		const atlassianServer = buildAtlassianMcpServerConfig();
+		if (atlassianServer) {
+			mcpConfig.atlassian = atlassianServer;
 		}
 
 		return mcpConfig;

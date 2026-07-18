@@ -1,592 +1,303 @@
-import crypto from "node:crypto";
-import { cwd } from "node:process";
 import type {
-	SDKAssistantMessage,
-	SDKMessage,
-	SDKResultMessage,
-	SDKUserMessage,
+	ContentBlock,
+	Plan,
+	SessionUpdate,
+	ToolCall,
+	ToolCallContent,
+	ToolCallUpdate,
+	ToolKind,
+} from "@agentclientprotocol/sdk";
+import type {
+	AgentAssistantMessage,
+	AgentMessage,
+	AgentUserMessage,
 } from "cyrus-core";
-import type {
-	NormalizedCodexEvent,
-	NormalizedCodexItem,
-	NormalizedUsage,
-} from "./backend/types.js";
 
-export const DEFAULT_CODEX_MODEL = "gpt-5.5";
+export interface CodexEventMapperOptions {
+	/** Resolve the current runner session id for stamping emitted messages. */
+	getSessionId: () => string;
+	/** Sink for projected neutral messages (runner pushes them onto its stream). */
+	emit: (message: AgentMessage) => void;
+}
 
-type SDKSystemInitMessage = Extract<
-	SDKMessage,
-	{ type: "system"; subtype: "init" }
->;
-
-type ToolInput = Record<string, unknown>;
-
-interface ToolProjection {
-	toolUseId: string;
-	toolName: string;
-	toolInput: ToolInput;
-	result: string;
-	isError: boolean;
+interface TrackedToolCall {
+	name: string;
+	input: unknown;
+	resultEmitted: boolean;
 }
 
 /**
- * Dependencies the mapper needs from its owner (the runner). Keeps the mapper
- * free of session-lifecycle ownership while letting it read session identity
- * and push messages out.
- */
-export interface MapperContext {
-	workingDirectory?: string;
-	model?: string;
-	/** Current session id, or "pending" before the thread id is known. */
-	getSessionId(): string;
-	/** Skills staged for this run (surfaced in the init message). */
-	getStagedSkillNames(): string[];
-	/** Emit a message to listeners (and append to the session list). */
-	emitMessage(message: SDKMessage): void;
-	/** Called when the backend reports the thread id, before the init message. */
-	onThreadStarted(threadId: string): void;
-}
-
-function safeStringify(value: unknown): string {
-	try {
-		return JSON.stringify(value, null, 2);
-	} catch {
-		return String(value);
-	}
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-	if (value && typeof value === "object") {
-		return value as Record<string, unknown>;
-	}
-	return null;
-}
-
-function normalizeError(error: unknown): string {
-	if (error instanceof Error) {
-		return error.message;
-	}
-	if (typeof error === "string") {
-		return error;
-	}
-	return "Codex execution failed";
-}
-
-function inferCommandToolName(command: string): string {
-	const normalized = command.toLowerCase();
-	if (/\brg\b|\bgrep\b/.test(normalized)) {
-		return "Grep";
-	}
-	if (/\bglob\.glob\b|\bfind\b.+\s-name\s/.test(normalized)) {
-		return "Glob";
-	}
-	if (/\bcat\b/.test(normalized) && !/>/.test(normalized)) {
-		return "Read";
-	}
-	if (
-		/<<\s*['"]?eof['"]?\s*>/i.test(command) ||
-		/\becho\b.+>/.test(normalized)
-	) {
-		return "Write";
-	}
-	return "Bash";
-}
-
-function normalizeFilePath(path: string, workingDirectory?: string): string {
-	if (!path) {
-		return path;
-	}
-	if (workingDirectory && path.startsWith(workingDirectory)) {
-		// Lazy relative: strip the working-directory prefix without importing path.
-		const rel = path.slice(workingDirectory.length).replace(/^[/\\]+/, "");
-		if (rel && rel !== ".") {
-			return rel;
-		}
-	}
-	return path;
-}
-
-function summarizeFileChanges(
-	item: Extract<NormalizedCodexItem, { type: "file_change" }>,
-	workingDirectory?: string,
-): string {
-	if (!item.changes.length) {
-		return item.status === "failed" ? "Patch failed" : "No file changes";
-	}
-	return item.changes
-		.map((change) => {
-			const filePath = normalizeFilePath(change.path, workingDirectory);
-			return `${change.kind} ${filePath}`;
-		})
-		.join("\n");
-}
-
-function toMcpResultString(
-	item: Extract<NormalizedCodexItem, { type: "mcp_tool_call" }>,
-): string {
-	if (item.error?.message) {
-		return item.error.message;
-	}
-
-	const textBlocks: string[] = [];
-	for (const block of item.result?.content || []) {
-		const text = asRecord(block)?.text;
-		if (typeof text === "string" && text.trim().length > 0) {
-			textBlocks.push(text);
-		}
-	}
-
-	if (textBlocks.length > 0) {
-		return textBlocks.join("\n");
-	}
-
-	if (item.result?.structured_content !== undefined) {
-		return safeStringify(item.result.structured_content);
-	}
-
-	return item.status === "failed"
-		? "MCP tool call failed"
-		: "MCP tool call completed";
-}
-
-function normalizeMcpIdentifier(value: string): string {
-	const normalized = value
-		.toLowerCase()
-		.replace(/[^a-z0-9_]+/g, "_")
-		.replace(/^_+|_+$/g, "");
-	return normalized || "unknown";
-}
-
-function emptyUsageBlock(): SDKAssistantMessage["message"]["usage"] {
-	return {
-		input_tokens: 0,
-		output_tokens: 0,
-		cache_creation_input_tokens: 0,
-		cache_read_input_tokens: 0,
-		output_tokens_details: null,
-		cache_creation: null,
-		inference_geo: null,
-		iterations: null,
-		server_tool_use: null,
-		service_tier: null,
-		speed: null,
-	};
-}
-
-function createAssistantToolUseMessage(
-	toolUseId: string,
-	toolName: string,
-	toolInput: ToolInput,
-	messageId: string = crypto.randomUUID(),
-): SDKAssistantMessage["message"] {
-	const contentBlocks = [
-		{ type: "tool_use", id: toolUseId, name: toolName, input: toolInput },
-	] as unknown as SDKAssistantMessage["message"]["content"];
-
-	return {
-		id: messageId,
-		type: "message",
-		role: "assistant",
-		content: contentBlocks,
-		model: DEFAULT_CODEX_MODEL,
-		stop_reason: null,
-		stop_sequence: null,
-		stop_details: null,
-		usage: emptyUsageBlock(),
-		container: null,
-		context_management: null,
-		diagnostics: null,
-	};
-}
-
-function createUserToolResultMessage(
-	toolUseId: string,
-	result: string,
-	isError: boolean,
-): SDKUserMessage["message"] {
-	const contentBlocks = [
-		{
-			type: "tool_result",
-			tool_use_id: toolUseId,
-			content: result,
-			is_error: isError,
-		},
-	] as unknown as SDKUserMessage["message"]["content"];
-
-	return { role: "user", content: contentBlocks };
-}
-
-function createAssistantBetaMessage(
-	content: string,
-	messageId: string = crypto.randomUUID(),
-): SDKAssistantMessage["message"] {
-	const contentBlocks = [
-		{ type: "text", text: content },
-	] as unknown as SDKAssistantMessage["message"]["content"];
-
-	return {
-		id: messageId,
-		type: "message",
-		role: "assistant",
-		content: contentBlocks,
-		model: DEFAULT_CODEX_MODEL,
-		stop_reason: null,
-		stop_sequence: null,
-		stop_details: null,
-		usage: emptyUsageBlock(),
-		container: null,
-		context_management: null,
-		diagnostics: null,
-	};
-}
-
-function createResultUsage(parsed: NormalizedUsage): SDKResultMessage["usage"] {
-	return {
-		input_tokens: parsed.input_tokens,
-		output_tokens: parsed.output_tokens,
-		cache_creation_input_tokens: 0,
-		cache_read_input_tokens: parsed.cached_input_tokens,
-		output_tokens_details: { thinking_tokens: 0 },
-		cache_creation: {
-			ephemeral_1h_input_tokens: 0,
-			ephemeral_5m_input_tokens: 0,
-		},
-		inference_geo: "unknown",
-		iterations: [],
-		server_tool_use: { web_fetch_requests: 0, web_search_requests: 0 },
-		service_tier: "standard",
-		speed: "standard",
-	};
-}
-
-/**
- * Translates backend-neutral {@link NormalizedCodexEvent}s into Cyrus
- * `SDKMessage`s and accumulates the session message list. Single responsibility:
- * event → message mapping. Knows nothing about transports or session lifecycle.
+ * Projects ACP `session/update` notifications into the neutral
+ * {@link AgentMessage} stream Cyrus consumes.
+ *
+ * ACP streams assistant text and reasoning as incremental chunks, and tool
+ * calls as a `tool_call` (creation) followed by one or more `tool_call_update`
+ * (status/output) notifications. This mapper coalesces the chunk streams into
+ * whole assistant messages and correlates tool-call updates back to their
+ * originating call so a `tool_use`/`tool_result` pair is emitted per tool.
  */
 export class CodexEventMapper {
-	private messages: SDKMessage[] = [];
-	private hasInitMessage = false;
-	private pendingResultMessage: SDKResultMessage | null = null;
+	private textBuffer = "";
+	private textMessageId: string | null = null;
+	private thoughtBuffer = "";
+	private thoughtMessageId: string | null = null;
+	private readonly toolCalls = new Map<string, TrackedToolCall>();
 	private lastAssistantText: string | null = null;
-	private lastUsage: NormalizedUsage = {
-		input_tokens: 0,
-		output_tokens: 0,
-		cached_input_tokens: 0,
-	};
-	private errorMessages: string[] = [];
-	private startTimestampMs = 0;
-	private emittedToolUseIds = new Set<string>();
+	private planCounter = 0;
 
-	constructor(private readonly ctx: MapperContext) {}
+	constructor(private readonly opts: CodexEventMapperOptions) {}
 
-	reset(): void {
-		this.messages = [];
-		this.hasInitMessage = false;
-		this.pendingResultMessage = null;
-		this.lastAssistantText = null;
-		this.lastUsage = {
-			input_tokens: 0,
-			output_tokens: 0,
-			cached_input_tokens: 0,
-		};
-		this.errorMessages = [];
-		this.startTimestampMs = Date.now();
-		this.emittedToolUseIds.clear();
+	/** The most recent flushed assistant text, used to build the result message. */
+	getLastAssistantText(): string | null {
+		return this.lastAssistantText;
 	}
 
-	getMessages(): SDKMessage[] {
-		return [...this.messages];
-	}
-
-	handle(event: NormalizedCodexEvent): void {
-		switch (event.kind) {
-			case "thread-started": {
-				this.ctx.onThreadStarted(event.threadId);
-				this.emitSystemInitMessage(event.threadId);
-				break;
-			}
-			case "item-completed": {
-				if (event.item.type === "agent_message") {
-					this.emitAssistantMessage(event.item.text);
-				} else {
-					this.emitToolMessagesForItem(event.item, true);
-				}
-				break;
-			}
-			case "item-started": {
-				this.emitToolMessagesForItem(event.item, false);
-				break;
-			}
-			case "turn-completed": {
-				this.lastUsage = event.usage;
-				this.pendingResultMessage = this.createSuccessResultMessage(
-					this.lastAssistantText || "Codex session completed successfully",
+	/** Route a single ACP session update to its projection handler. */
+	handleUpdate(update: SessionUpdate): void {
+		switch (update.sessionUpdate) {
+			case "agent_message_chunk":
+				this.appendText(textFromContentBlock(update.content), update.messageId);
+				return;
+			case "agent_thought_chunk":
+				this.appendThought(
+					textFromContentBlock(update.content),
+					update.messageId,
 				);
-				break;
-			}
-			case "turn-failed": {
-				const message =
-					event.message ||
-					this.errorMessages.at(-1) ||
-					"Codex execution failed";
-				this.errorMessages.push(message);
-				this.pendingResultMessage = this.createErrorResultMessage(message);
-				break;
-			}
-			case "error": {
-				this.errorMessages.push(event.message);
-				break;
-			}
-		}
-	}
-
-	/**
-	 * Build and emit the terminal result message (and init, if a turn never
-	 * started). Returns the full message list for the runner's `complete` event.
-	 */
-	finalize(opts: { caughtError?: unknown; wasStopped: boolean }): SDKMessage[] {
-		if (!this.hasInitMessage) {
-			this.emitSystemInitMessage(this.ctx.getSessionId());
-		}
-
-		if (opts.caughtError && !opts.wasStopped) {
-			this.errorMessages.push(normalizeError(opts.caughtError));
-		}
-
-		if (!this.pendingResultMessage && !opts.wasStopped) {
-			this.pendingResultMessage = opts.caughtError
-				? this.createErrorResultMessage(
-						this.errorMessages.at(-1) || "Codex execution failed",
-					)
-				: this.createSuccessResultMessage(
-						this.lastAssistantText || "Codex session completed successfully",
-					);
-		}
-
-		if (this.pendingResultMessage) {
-			this.pushAndEmit(this.pendingResultMessage);
-			this.pendingResultMessage = null;
-		}
-
-		return this.getMessages();
-	}
-
-	private pushAndEmit(message: SDKMessage): void {
-		this.messages.push(message);
-		this.ctx.emitMessage(message);
-	}
-
-	private projectItemToTool(item: NormalizedCodexItem): ToolProjection | null {
-		switch (item.type) {
-			case "command_execution": {
-				const isError =
-					item.status === "failed" ||
-					(typeof item.exit_code === "number" && item.exit_code !== 0);
-				const result =
-					item.aggregated_output?.trim() ||
-					(isError
-						? `Command failed (exit code ${item.exit_code ?? "unknown"})`
-						: "Command completed with no output");
-				return {
-					toolUseId: item.id,
-					toolName: inferCommandToolName(item.command),
-					toolInput: { command: item.command },
-					result,
-					isError,
-				};
-			}
-			case "file_change": {
-				const primaryPath =
-					item.changes[0]?.path &&
-					normalizeFilePath(item.changes[0].path, this.ctx.workingDirectory);
-				return {
-					toolUseId: item.id,
-					toolName: "Edit",
-					toolInput: {
-						...(primaryPath ? { file_path: primaryPath } : {}),
-						changes: item.changes.map((change) => ({
-							kind: change.kind,
-							path: normalizeFilePath(change.path, this.ctx.workingDirectory),
-						})),
-					},
-					result: summarizeFileChanges(item, this.ctx.workingDirectory),
-					isError: item.status === "failed",
-				};
-			}
-			case "web_search": {
-				const action = asRecord(item.action);
-				const actionType =
-					typeof action?.type === "string" ? action.type : undefined;
-				const isFetch = actionType === "open_page";
-				const url = typeof action?.url === "string" ? action.url : undefined;
-				const pattern =
-					typeof action?.pattern === "string" ? action.pattern : undefined;
-				return {
-					toolUseId: item.id,
-					toolName: isFetch ? "WebFetch" : "WebSearch",
-					toolInput: isFetch
-						? { url: url || item.query, ...(pattern ? { pattern } : {}) }
-						: { query: item.query },
-					result:
-						action && Object.keys(action).length > 0
-							? safeStringify(action)
-							: `Search completed for query: ${item.query}`,
-					isError: false,
-				};
-			}
-			case "mcp_tool_call": {
-				return {
-					toolUseId: item.id,
-					toolName: `mcp__${normalizeMcpIdentifier(item.server)}__${normalizeMcpIdentifier(item.tool)}`,
-					toolInput: asRecord(item.arguments) || { arguments: item.arguments },
-					result: toMcpResultString(item),
-					isError: item.status === "failed" || Boolean(item.error),
-				};
-			}
-			case "todo_list": {
-				return {
-					toolUseId: item.id,
-					toolName: "TodoWrite",
-					toolInput: {
-						todos: item.items.map((todo) => ({
-							content: todo.text,
-							status: todo.completed ? "completed" : "pending",
-						})),
-					},
-					result: `Updated todo list (${item.items.length} items)`,
-					isError: false,
-				};
-			}
+				return;
+			case "tool_call":
+				this.flush();
+				this.handleToolCall(update);
+				return;
+			case "tool_call_update":
+				this.flush();
+				this.handleToolCallUpdate(update);
+				return;
+			case "plan":
+				this.flush();
+				this.handlePlan(update);
+				return;
 			default:
-				return null;
+				// user_message_chunk (echoed prompt), plan_update/removed, mode/config
+				// updates, usage — not projected into the timeline here.
+				return;
 		}
 	}
 
-	private emitToolMessagesForItem(
-		item: NormalizedCodexItem,
-		includeResult: boolean,
+	/** Emit any buffered assistant reasoning/text as discrete messages. */
+	flush(): void {
+		const thought = this.thoughtBuffer;
+		this.thoughtBuffer = "";
+		this.thoughtMessageId = null;
+		if (thought.trim().length > 0) {
+			this.pushAssistant([{ type: "thinking", thinking: thought }]);
+		}
+
+		const text = this.textBuffer;
+		this.textBuffer = "";
+		this.textMessageId = null;
+		if (text.trim().length > 0) {
+			this.lastAssistantText = text;
+			this.pushAssistant([{ type: "text", text }]);
+		}
+	}
+
+	private appendText(text: string, messageId?: string | null): void {
+		if (!text) return;
+		if (
+			this.textMessageId !== null &&
+			messageId != null &&
+			messageId !== this.textMessageId &&
+			this.textBuffer.length > 0
+		) {
+			// A new message started — flush the previous one before appending.
+			const prev = this.textBuffer;
+			this.textBuffer = "";
+			this.lastAssistantText = prev;
+			this.pushAssistant([{ type: "text", text: prev }]);
+		}
+		if (messageId != null) this.textMessageId = messageId;
+		this.textBuffer += text;
+	}
+
+	private appendThought(text: string, messageId?: string | null): void {
+		if (!text) return;
+		if (
+			this.thoughtMessageId !== null &&
+			messageId != null &&
+			messageId !== this.thoughtMessageId &&
+			this.thoughtBuffer.length > 0
+		) {
+			const prev = this.thoughtBuffer;
+			this.thoughtBuffer = "";
+			this.pushAssistant([{ type: "thinking", thinking: prev }]);
+		}
+		if (messageId != null) this.thoughtMessageId = messageId;
+		this.thoughtBuffer += text;
+	}
+
+	private handleToolCall(update: ToolCall): void {
+		const name = toolNameFromKind(update.kind, update.title);
+		const input = normalizeToolInput(update.rawInput, update.title);
+		const tracked: TrackedToolCall = { name, input, resultEmitted: false };
+		this.toolCalls.set(update.toolCallId, tracked);
+		this.pushToolUse(update.toolCallId, name, input);
+
+		// Some tool calls arrive already terminal with their output attached. Mark
+		// the result as emitted so a later redundant `completed` update for the
+		// same call does not double-post the tool_result.
+		if (update.status === "completed" || update.status === "failed") {
+			this.emitToolResult(
+				update.toolCallId,
+				flattenToolContent(update.content),
+				update.status === "failed",
+			);
+			tracked.resultEmitted = true;
+		}
+	}
+
+	private handleToolCallUpdate(update: ToolCallUpdate): void {
+		let tracked = this.toolCalls.get(update.toolCallId);
+		if (!tracked) {
+			// Update arrived without a preceding creation — synthesize the tool_use.
+			const name = toolNameFromKind(
+				update.kind ?? undefined,
+				update.title ?? undefined,
+			);
+			const input = normalizeToolInput(update.rawInput, update.title);
+			tracked = { name, input, resultEmitted: false };
+			this.toolCalls.set(update.toolCallId, tracked);
+			this.pushToolUse(update.toolCallId, name, input);
+		}
+
+		if (
+			(update.status === "completed" || update.status === "failed") &&
+			!tracked.resultEmitted
+		) {
+			this.emitToolResult(
+				update.toolCallId,
+				flattenToolContent(update.content),
+				update.status === "failed",
+			);
+			tracked.resultEmitted = true;
+		}
+	}
+
+	private handlePlan(plan: Plan): void {
+		const todos = plan.entries.map((entry) => ({
+			content: entry.content,
+			status: entry.status,
+			activeForm: entry.content,
+		}));
+		// Project the plan as a TodoWrite tool_use so it renders as a checklist in
+		// the Linear timeline, mirroring how the Claude runner surfaces plans.
+		this.planCounter += 1;
+		this.pushToolUse(`codex-plan-${this.planCounter}`, "TodoWrite", { todos });
+	}
+
+	private emitToolResult(
+		toolCallId: string,
+		result: string,
+		isError: boolean,
 	): void {
-		const projection = this.projectItemToTool(item);
-		if (!projection) {
-			return;
-		}
-
-		if (!this.emittedToolUseIds.has(projection.toolUseId)) {
-			const assistantMessage: SDKAssistantMessage = {
-				type: "assistant",
-				message: createAssistantToolUseMessage(
-					projection.toolUseId,
-					projection.toolName,
-					projection.toolInput,
-				),
-				parent_tool_use_id: null,
-				uuid: crypto.randomUUID(),
-				session_id: this.ctx.getSessionId(),
-			};
-			this.pushAndEmit(assistantMessage);
-			this.emittedToolUseIds.add(projection.toolUseId);
-		}
-
-		if (!includeResult) {
-			return;
-		}
-
-		const userMessage: SDKUserMessage = {
+		const message: AgentUserMessage = {
 			type: "user",
-			message: createUserToolResultMessage(
-				projection.toolUseId,
-				projection.result,
-				projection.isError,
-			),
-			parent_tool_use_id: null,
-			uuid: crypto.randomUUID(),
-			session_id: this.ctx.getSessionId(),
+			sessionId: this.opts.getSessionId(),
+			parentToolUseId: toolCallId,
+			content: [
+				{
+					type: "tool_result",
+					toolUseId: toolCallId,
+					isError,
+					content: result || (isError ? "Tool failed" : "Tool completed"),
+				},
+			],
 		};
-		this.pushAndEmit(userMessage);
-		this.emittedToolUseIds.delete(projection.toolUseId);
+		this.opts.emit(message);
 	}
 
-	private emitAssistantMessage(text: string): void {
-		const normalized = text.trim();
-		if (!normalized) {
-			return;
-		}
-		this.lastAssistantText = normalized;
-		const assistantMessage: SDKAssistantMessage = {
+	private pushToolUse(id: string, name: string, input: unknown): void {
+		this.pushAssistant([{ type: "tool_use", id, name, input }]);
+	}
+
+	private pushAssistant(content: AgentAssistantMessage["content"]): void {
+		const message: AgentAssistantMessage = {
 			type: "assistant",
-			message: createAssistantBetaMessage(normalized),
-			parent_tool_use_id: null,
-			uuid: crypto.randomUUID(),
-			session_id: this.ctx.getSessionId(),
+			sessionId: this.opts.getSessionId(),
+			parentToolUseId: null,
+			content,
 		};
-		this.pushAndEmit(assistantMessage);
+		this.opts.emit(message);
 	}
+}
 
-	private emitSystemInitMessage(sessionId: string): void {
-		if (this.hasInitMessage) {
-			return;
+/** Extract displayable text from an ACP content block. */
+export function textFromContentBlock(block: ContentBlock): string {
+	if (!block || typeof block !== "object") return "";
+	if (block.type === "text") return block.text ?? "";
+	if (block.type === "resource_link") return block.uri ?? block.name ?? "";
+	if (block.type === "resource") {
+		const resource = block.resource as { text?: string } | undefined;
+		return typeof resource?.text === "string" ? resource.text : "";
+	}
+	return "";
+}
+
+/**
+ * Map an ACP tool kind to a Cyrus/Claude-style tool name so the timeline picks
+ * appropriate rendering. Falls back to the tool's human-readable title, then a
+ * generic label.
+ */
+export function toolNameFromKind(
+	kind?: ToolKind,
+	title?: string | null,
+): string {
+	switch (kind) {
+		case "read":
+			return "Read";
+		case "edit":
+			return "Edit";
+		case "delete":
+			return "Edit";
+		case "move":
+			return "Bash";
+		case "search":
+			return "Grep";
+		case "execute":
+			return "Bash";
+		case "fetch":
+			return "WebFetch";
+		case "think":
+			return "Task";
+		default:
+			return title?.trim() || "Tool";
+	}
+}
+
+/** Coerce ACP `rawInput` into an object; fall back to the title as a label. */
+export function normalizeToolInput(
+	rawInput: unknown,
+	title?: string | null,
+): unknown {
+	if (rawInput && typeof rawInput === "object") return rawInput;
+	if (title?.trim()) return { title };
+	return {};
+}
+
+/** Flatten an ACP tool-call content array into a single result string. */
+export function flattenToolContent(content?: ToolCallContent[] | null): string {
+	if (!content || content.length === 0) return "";
+	const parts: string[] = [];
+	for (const item of content) {
+		if (!item || typeof item !== "object") continue;
+		if (item.type === "content") {
+			parts.push(textFromContentBlock(item.content));
+		} else if (item.type === "diff") {
+			const header =
+				item.oldText != null ? `Edited ${item.path}` : `Created ${item.path}`;
+			parts.push(`${header}\n${item.newText}`);
+		} else if (item.type === "terminal") {
+			parts.push(`[terminal ${item.terminalId}]`);
 		}
-		this.hasInitMessage = true;
-
-		const initMessage: SDKSystemInitMessage = {
-			type: "system",
-			subtype: "init",
-			agents: undefined,
-			apiKeySource: "user",
-			claude_code_version: "codex-cli",
-			cwd: this.ctx.workingDirectory || cwd(),
-			tools: [],
-			mcp_servers: [],
-			model: this.ctx.model || DEFAULT_CODEX_MODEL,
-			permissionMode: "default",
-			slash_commands: [],
-			output_style: "default",
-			skills: this.ctx.getStagedSkillNames(),
-			plugins: [],
-			uuid: crypto.randomUUID(),
-			session_id: sessionId,
-		};
-		this.pushAndEmit(initMessage);
 	}
-
-	private createSuccessResultMessage(result: string): SDKResultMessage {
-		const durationMs = Math.max(Date.now() - this.startTimestampMs, 0);
-		return {
-			type: "result",
-			subtype: "success",
-			duration_ms: durationMs,
-			duration_api_ms: 0,
-			is_error: false,
-			num_turns: 1,
-			result,
-			stop_reason: null,
-			total_cost_usd: 0,
-			usage: createResultUsage(this.lastUsage),
-			modelUsage: {},
-			permission_denials: [],
-			uuid: crypto.randomUUID(),
-			session_id: this.ctx.getSessionId(),
-		};
-	}
-
-	private createErrorResultMessage(errorMessage: string): SDKResultMessage {
-		const durationMs = Math.max(Date.now() - this.startTimestampMs, 0);
-		return {
-			type: "result",
-			subtype: "error_during_execution",
-			duration_ms: durationMs,
-			duration_api_ms: 0,
-			is_error: true,
-			num_turns: 1,
-			stop_reason: null,
-			errors: [errorMessage],
-			total_cost_usd: 0,
-			usage: createResultUsage(this.lastUsage),
-			modelUsage: {},
-			permission_denials: [],
-			uuid: crypto.randomUUID(),
-			session_id: this.ctx.getSessionId(),
-		};
-	}
+	return parts.filter((part) => part.length > 0).join("\n");
 }

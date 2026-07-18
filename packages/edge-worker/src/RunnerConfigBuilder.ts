@@ -1,28 +1,46 @@
 import { execSync } from "node:child_process";
-import { join } from "node:path";
+import { homedir } from "node:os";
 import type {
+	ClaudeRunnerConfig,
 	HookCallbackMatcher,
 	HookEvent,
 	McpServerConfig,
 	PostToolUseHookInput,
 	SandboxSettings,
-	SDKMessage,
 	SdkPluginConfig,
 	StopHookInput,
+	WarmSessionRegistry,
 } from "cyrus-claude-runner";
+import type { CodexRunnerConfig } from "cyrus-codex-runner";
 import type {
-	AgentRunnerConfig,
+	AgentMessage,
 	CyrusAgentSession,
+	EffortLevel,
 	ILogger,
 	OnAskUserQuestion,
 	RepositoryConfig,
 	RunnerType,
 } from "cyrus-core";
+import { compute, nodeDirLister, toSandboxFilesystem } from "cyrus-core";
+import type { CursorRunnerConfig } from "cyrus-cursor-runner";
+
+/**
+ * The concrete runner config the builder produces — a Claude, Cursor, or Codex
+ * config. All extend the neutral `AgentRunnerConfig` base; this union preserves
+ * the provider-specific extras without an untyped `& Record<string, unknown>`
+ * escape hatch.
+ */
+export type RunnerConfig =
+	| ClaudeRunnerConfig
+	| CursorRunnerConfig
+	| CodexRunnerConfig;
+
 import { buildIntentToAddHook } from "./hooks/IntentToAddHook.js";
 import { buildPrMarkerHook } from "./hooks/PrMarkerHook.js";
+import { appendAskUserQuestionAddendum } from "./prompts/askUserQuestionPromptAddendum.js";
 import { appendBrowserUseAddendum } from "./prompts/browserUsePromptAddendum.js";
 import { appendCloudRuntimeAddendum } from "./prompts/cloudRuntimePromptAddendum.js";
-import { appendFailureModeAddendum } from "./prompts/failureModePromptAddendum.js";
+import { appendContextDisciplineAddendum } from "./prompts/contextDisciplinePromptAddendum.js";
 
 /**
  * Subset of McpConfigService consumed by RunnerConfigBuilder.
@@ -39,22 +57,17 @@ export interface IMcpConfigProvider {
 }
 
 /**
- * Subset of ToolPermissionResolver consumed by RunnerConfigBuilder.
- */
-export interface IChatToolResolver {
-	buildChatAllowedTools(
-		mcpConfigKeys?: string[],
-		userMcpTools?: string[],
-	): string[];
-}
-
-/**
  * Subset of RunnerSelectionService consumed by RunnerConfigBuilder.
  */
 export interface IRunnerSelector {
 	determineRunnerSelection(
 		labels: string[],
 		issueDescription?: string,
+		opts?: {
+			labelPromptModel?: string;
+			repositoryModel?: string;
+			repositoryFallbackModel?: string;
+		},
 	): {
 		runnerType: RunnerType;
 		modelOverride?: string;
@@ -62,49 +75,6 @@ export interface IRunnerSelector {
 	};
 	getDefaultModelForRunner(runnerType: RunnerType): string;
 	getDefaultFallbackModelForRunner(runnerType: RunnerType): string;
-}
-
-/**
- * Input for building a chat session runner config.
- */
-export interface ChatRunnerConfigInput {
-	workspacePath: string;
-	workspaceName: string | undefined;
-	systemPrompt: string;
-	sessionId: string;
-	resumeSessionId?: string;
-	cyrusHome: string;
-	/** Chat platform name (e.g. "slack") — used to namespace the shared auto-memory dir */
-	platformName: string;
-	/** Linear workspace ID for building fresh MCP config at session start */
-	linearWorkspaceId?: string;
-	/** Repository whose MCP runtime servers (Linear MCP, Cyrus tools, etc.) get
-	 * spun up for this chat session — chat sessions are repo-agnostic at the
-	 * session level, so this just picks one repo to seed those native servers. */
-	repository?: RepositoryConfig;
-	/** Repository paths the chat session can read */
-	repositoryPaths?: string[];
-	/**
-	 * Filesystem paths to custom-integration `.mcp.json` files to load for
-	 * this chat session (sourced from `EdgeWorkerConfig.slackMcpConfigs` for
-	 * Slack). Chat sessions are repo-agnostic, so `repository.mcpConfigPath`
-	 * is not consulted here — only this list determines which custom MCP
-	 * files the session loads. When empty/omitted, no custom `.mcp.json`
-	 * files are loaded (native servers built via `mcpConfigProvider` still
-	 * run as usual).
-	 */
-	platformMcpConfigOverrides?: readonly string[];
-	/** Plugins to load for the chat session (provides managed skills). */
-	plugins?: SdkPluginConfig[];
-	/**
-	 * Allow-list of skill names enabled for the chat session after scope
-	 * filtering. Claude passes this to the SDK directly; Codex stages only
-	 * these skills into its repository discovery layout.
-	 */
-	skills?: string[] | "all";
-	logger: ILogger;
-	onMessage: (message: SDKMessage) => void | Promise<void>;
-	onError: (error: Error) => void;
 }
 
 /**
@@ -121,11 +91,63 @@ export interface IssueRunnerConfigInput {
 	resumeSessionId?: string;
 	labels?: string[];
 	issueDescription?: string;
+	/**
+	 * Model from the matched label-prompt config (complex form's `model`). Fed
+	 * into `RunnerSelectionService` as one model-precedence source; the service —
+	 * not this builder — resolves the final model. Ranks below description/label
+	 * model tags and above `repository.model`.
+	 */
+	labelPromptModel?: string;
+	/**
+	 * Resolved reasoning effort (label-prompt → repository → `claudeDefaultEffort`).
+	 * Claude runner only; ignored for Cursor/Codex. Undefined preserves the SDK
+	 * default (`high`).
+	 */
+	effort?: EffortLevel;
 	maxTurns?: number;
+	/**
+	 * Effective context-window size (tokens) at which Claude sessions
+	 * auto-compact (`EdgeWorkerConfig.claudeAutoCompactWindow`). Claude runner
+	 * only; ignored for Cursor. Undefined preserves the SDK's default
+	 * (model-context-sized) auto-compaction behavior.
+	 */
+	autoCompactWindow?: number;
+	/**
+	 * Max characters of a single Bash tool result before the CLI truncates it
+	 * (`EdgeWorkerConfig.claudeBashMaxOutputLength`). Claude runner only; ignored
+	 * for Cursor. Undefined preserves the CLI default.
+	 */
+	bashMaxOutputLength?: number;
+	/**
+	 * Max tokens a single MCP tool result may contribute before the CLI
+	 * truncates it (`EdgeWorkerConfig.claudeMcpMaxOutputTokens`). Claude runner
+	 * only; ignored for Cursor. Undefined preserves the CLI default.
+	 */
+	mcpMaxOutputTokens?: number;
+	/**
+	 * Model for the read-only `explore` subagent
+	 * (`EdgeWorkerConfig.claudeSubagentModel`). Claude runner only; ignored for
+	 * Cursor. Undefined registers no such agent, leaving the SDK's built-in
+	 * agents (which inherit the session model) in place.
+	 */
+	subagentModel?: string;
+	/**
+	 * Idle window (ms) a finished Claude session stays alive waiting for a
+	 * follow-up, derived from `EdgeWorkerConfig.claudeSessionKeepAliveMinutes`.
+	 * Claude runner only; ignored for Cursor. Undefined or `0` shuts the session
+	 * down when its turn ends, so the next comment resumes it.
+	 */
+	sessionKeepAliveMs?: number;
+	/**
+	 * Shared LRU registry that bounds the number of concurrently-warm idle
+	 * Claude sessions. Claude runner only; ignored for Cursor. Undefined leaves
+	 * accumulation governed solely by the keep-alive window.
+	 */
+	warmSessionRegistry?: WarmSessionRegistry;
 	/**
 	 * Filesystem paths to custom-integration `.mcp.json` files for this
 	 * issue session: `EdgeWorkerConfig.linearMcpConfigs` for Linear, or
-	 * `githubMcpConfigs` for GitHub/GitLab. The list is NOT a blanket
+	 * `githubMcpConfigs` for GitHub. The list is NOT a blanket
 	 * override — it's only consulted when the routed repo does NOT have its
 	 * own `allowedTools` override. If the repo has its own allow-list set,
 	 * the agent uses `repository.mcpConfigPath` instead so the repo's
@@ -136,7 +158,7 @@ export interface IssueRunnerConfigInput {
 	linearWorkspaceId?: string;
 	cyrusHome: string;
 	logger: ILogger;
-	onMessage: (message: SDKMessage) => void | Promise<void>;
+	onMessage: (message: AgentMessage) => void | Promise<void>;
 	onError: (error: Error) => void;
 	/** Factory to create AskUserQuestion callback (Claude runner only) */
 	createAskUserQuestionCallback?: (
@@ -150,8 +172,7 @@ export interface IssueRunnerConfigInput {
 	/**
 	 * Allow-list of skill names enabled for the session (after scope filtering),
 	 * or `"all"` to enable every discovered skill, or `undefined` to defer to
-	 * provider defaults. Claude passes this to the SDK directly; Codex uses it
-	 * to stage the same scoped skills into its native repository discovery layout.
+	 * provider defaults. Claude passes this to the SDK directly.
 	 */
 	skills?: string[] | "all";
 	/** SDK sandbox settings (enabled, network proxy ports) for Claude runner */
@@ -186,122 +207,30 @@ export function resolveIssueMcpConfigPath(
 }
 
 /**
- * Shared runner config assembly for both issue and chat sessions.
+ * Runner config assembly for issue sessions.
  *
- * Eliminates duplication between EdgeWorker.buildAgentRunnerConfig() and
- * ChatSessionHandler.buildRunnerConfig() by providing focused factory methods
- * that produce AgentRunnerConfig objects using injected services.
+ * Produces AgentRunnerConfig objects for EdgeWorker.buildAgentRunnerConfig()
+ * using injected services.
  */
 export class RunnerConfigBuilder {
-	private chatToolResolver: IChatToolResolver;
 	private mcpConfigProvider: IMcpConfigProvider;
 	private runnerSelector: IRunnerSelector;
 
 	constructor(
-		chatToolResolver: IChatToolResolver,
 		mcpConfigProvider: IMcpConfigProvider,
 		runnerSelector: IRunnerSelector,
 	) {
-		this.chatToolResolver = chatToolResolver;
 		this.mcpConfigProvider = mcpConfigProvider;
 		this.runnerSelector = runnerSelector;
 	}
 
 	/**
-	 * Build a runner config for chat sessions (Slack, GitHub chat, etc.).
-	 *
-	 * Chat sessions get read-only tools + MCP tool prefixes, and a simplified
-	 * config without hooks or model selection.
-	 */
-	buildChatConfig(input: ChatRunnerConfigInput): AgentRunnerConfig {
-		// MCP config paths for chat sessions come exclusively from the
-		// platform override list (e.g. `slackMcpConfigs`). Chat sessions
-		// are repo-agnostic at the session level — we do NOT fall back to
-		// "first repo wins" `repository.mcpConfigPath` (the prior V1
-		// default), because that arbitrarily privileged whichever repo
-		// loaded first. When the platform list is empty, the chat
-		// session simply loads no per-repo `.mcp.json` files.
-		const mcpConfigPath =
-			input.platformMcpConfigOverrides &&
-			input.platformMcpConfigOverrides.length > 0
-				? input.platformMcpConfigOverrides.length === 1
-					? input.platformMcpConfigOverrides[0]
-					: [...input.platformMcpConfigOverrides]
-				: undefined;
-
-		// Build fresh MCP config at session start (reads current token from config)
-		// This follows the same pattern as buildIssueConfig — never use a pre-baked config
-		const mcpConfig =
-			input.linearWorkspaceId && input.repository
-				? this.mcpConfigProvider.buildMcpConfig(
-						input.repository.id,
-						input.linearWorkspaceId,
-						input.sessionId,
-					)
-				: undefined;
-
-		// Extract MCP tool entries from the repository's allowedTools config
-		const userMcpTools = (input.repository?.allowedTools ?? []).filter((tool) =>
-			tool.startsWith("mcp__"),
-		);
-
-		const mcpConfigKeys = mcpConfig ? Object.keys(mcpConfig) : undefined;
-		const allowedTools = this.chatToolResolver.buildChatAllowedTools(
-			mcpConfigKeys,
-			userMcpTools,
-		);
-
-		const repositoryPaths = Array.from(
-			new Set((input.repositoryPaths ?? []).filter(Boolean)),
-		);
-
-		input.logger.debug("Chat session allowed tools:", allowedTools);
-
-		// Shared auto-memory across all chat threads on this platform. Lives
-		// under cyrusHome (not the per-thread workspace) so memory built up in
-		// one Slack thread is available to every other Slack thread.
-		const autoMemoryDirectory = join(
-			input.cyrusHome,
-			`${input.platformName}-memory`,
-		);
-
-		return {
-			workingDirectory: input.workspacePath,
-			allowedTools,
-			disallowedTools: [] as string[],
-			allowedDirectories: [
-				input.workspacePath,
-				autoMemoryDirectory,
-				...repositoryPaths,
-			],
-			workspaceName: input.workspaceName,
-			cyrusHome: input.cyrusHome,
-			autoMemoryDirectory,
-			appendSystemPrompt: appendCloudRuntimeAddendum(
-				appendBrowserUseAddendum(appendFailureModeAddendum(input.systemPrompt)),
-			),
-			...(mcpConfig ? { mcpConfig } : {}),
-			...(mcpConfigPath ? { mcpConfigPath } : {}),
-			...(input.resumeSessionId
-				? { resumeSessionId: input.resumeSessionId }
-				: {}),
-			...(input.plugins?.length ? { plugins: input.plugins } : {}),
-			...(input.skills !== undefined ? { skills: input.skills } : {}),
-			logger: input.logger,
-			maxTurns: 200,
-			onMessage: input.onMessage,
-			onError: input.onError,
-		};
-	}
-
-	/**
 	 * Build a runner config for issue sessions (Linear issues, GitHub PRs).
 	 *
-	 * Issue sessions get full tool sets, runner type selection, model overrides,
-	 * hooks, and runner-specific configuration (Chrome, Cursor, etc.).
+	 * Issue sessions get full tool sets, model overrides, and hooks.
 	 */
 	buildIssueConfig(input: IssueRunnerConfigInput): {
-		config: AgentRunnerConfig;
+		config: RunnerConfig;
 		runnerType: RunnerType;
 	} {
 		const log = input.logger;
@@ -321,36 +250,41 @@ export class RunnerConfigBuilder {
 			],
 		};
 
-		// Determine runner type and model override from selectors
+		// Determine runner type and model override from selectors. Model
+		// precedence (description/label tags → labelPrompt → repository) is
+		// resolved entirely inside the selector; do NOT re-resolve it here.
 		const runnerSelection = this.runnerSelector.determineRunnerSelection(
 			input.labels || [],
 			input.issueDescription,
+			{
+				labelPromptModel: input.labelPromptModel,
+				repositoryModel: input.repository.model,
+				repositoryFallbackModel: input.repository.fallbackModel,
+			},
 		);
 		let runnerType = runnerSelection.runnerType;
 		let modelOverride = runnerSelection.modelOverride;
 		let fallbackModelOverride = runnerSelection.fallbackModelOverride;
 
-		// If the labels have changed, and we are resuming a session. Use the existing runner for the session.
+		// When resuming a session, keep the runner that originally created it —
+		// even if the labels/tags now select a different one — so a session never
+		// switches harness mid-flight. The runner-specific session id recorded on
+		// the session tells us which one to stick with.
 		if (input.session.claudeSessionId && runnerType !== "claude") {
 			runnerType = "claude";
 			modelOverride = this.runnerSelector.getDefaultModelForRunner("claude");
 			fallbackModelOverride =
 				this.runnerSelector.getDefaultFallbackModelForRunner("claude");
-		} else if (input.session.geminiSessionId && runnerType !== "gemini") {
-			runnerType = "gemini";
-			modelOverride = this.runnerSelector.getDefaultModelForRunner("gemini");
-			fallbackModelOverride =
-				this.runnerSelector.getDefaultFallbackModelForRunner("gemini");
-		} else if (input.session.codexSessionId && runnerType !== "codex") {
-			runnerType = "codex";
-			modelOverride = this.runnerSelector.getDefaultModelForRunner("codex");
-			fallbackModelOverride =
-				this.runnerSelector.getDefaultFallbackModelForRunner("codex");
 		} else if (input.session.cursorSessionId && runnerType !== "cursor") {
 			runnerType = "cursor";
 			modelOverride = this.runnerSelector.getDefaultModelForRunner("cursor");
 			fallbackModelOverride =
 				this.runnerSelector.getDefaultFallbackModelForRunner("cursor");
+		} else if (input.session.codexSessionId && runnerType !== "codex") {
+			runnerType = "codex";
+			modelOverride = this.runnerSelector.getDefaultModelForRunner("codex");
+			fallbackModelOverride =
+				this.runnerSelector.getDefaultFallbackModelForRunner("codex");
 		}
 
 		// Log model override if found
@@ -358,11 +292,12 @@ export class RunnerConfigBuilder {
 			log.debug(`Model override via selector: ${modelOverride}`);
 		}
 
-		// Determine final model from selectors, repository override, then runner-specific defaults
-		const finalModel =
-			modelOverride ||
-			input.repository.model ||
-			this.runnerSelector.getDefaultModelForRunner(runnerType);
+		// The selector already folded `repository.model` (and the label-prompt
+		// model) into `modelOverride` and guaranteed a runner default when nothing
+		// explicit matched, so this is the final model. Do NOT re-add a
+		// `|| repository.model || default` chain here — that historically shadowed
+		// the selector and left `repository.model` dead (DEV-174).
+		const finalModel = modelOverride;
 
 		const resolvedWorkspaceId =
 			input.linearWorkspaceId ??
@@ -400,7 +335,12 @@ export class RunnerConfigBuilder {
 			input.session.workspace.repoPaths ?? {},
 		).filter((p): p is string => typeof p === "string" && p !== cwd);
 
-		const config: AgentRunnerConfig & Record<string, unknown> = {
+		// Typed superset: a Claude config plus the optional Cursor-only and
+		// Codex-only fields. The cursor-/codex-branch assignments below type-check
+		// against the Partial<…> halves; no untyped escape hatch needed.
+		const config: ClaudeRunnerConfig &
+			Partial<CursorRunnerConfig> &
+			Partial<CodexRunnerConfig> = {
 			workingDirectory: cwd,
 			allowedTools: input.allowedTools,
 			disallowedTools: input.disallowedTools,
@@ -411,22 +351,23 @@ export class RunnerConfigBuilder {
 			mcpConfigPath,
 			mcpConfig,
 			appendSystemPrompt: appendCloudRuntimeAddendum(
-				appendBrowserUseAddendum(appendFailureModeAddendum(input.systemPrompt)),
+				appendBrowserUseAddendum(
+					appendContextDisciplineAddendum(
+						appendAskUserQuestionAddendum(input.systemPrompt),
+					),
+				),
 			),
-			// Priority order: label override > repository config > global default
+			// Model + fallback are fully resolved by the selector (see finalModel
+			// above and `determineRunnerSelection`). No local precedence chain.
 			model: finalModel,
-			fallbackModel:
-				fallbackModelOverride ||
-				input.repository.fallbackModel ||
-				this.runnerSelector.getDefaultFallbackModelForRunner(runnerType),
+			fallbackModel: fallbackModelOverride,
 			logger: log,
 			hooks,
 			// Plugins providing managed skills.
 			...(this.runnerSupportsManagedSkills(runnerType) &&
 				input.plugins?.length && { plugins: input.plugins }),
 			// Skill scope allow-list. Claude passes this through to the SDK's
-			// `query()` `skills` option; Codex uses it to stage only allowed skill
-			// directories into the session worktree for repository-scope discovery.
+			// `query()` `skills` option.
 			...(this.runnerSupportsManagedSkills(runnerType) &&
 				input.skills !== undefined && { skills: input.skills }),
 			// SDK sandbox settings (Claude runner only):
@@ -447,12 +388,10 @@ export class RunnerConfigBuilder {
 			onError: input.onError,
 		};
 
-		// Cursor runner uses @cursor/sdk. Pass through API key, the same
+		// Cursor runner uses @cursor/sdk. Pass through the API key, the same
 		// sandboxSettings shape Claude consumes (the runner translates it to
-		// Cursor's `.cursor/sandbox.json` schema), and the egress CA bundle
-		// path for MITM TLS trust in sandboxed children. SDK ≥1.0.11
-		// auto-discovers the bundled `cursorsandbox` helper from the
-		// platform-specific optionalDependency.
+		// Cursor's `.cursor/sandbox.json` schema), and the egress CA bundle path
+		// for MITM TLS trust in sandboxed children.
 		if (runnerType === "cursor") {
 			config.cursorApiKey = process.env.CURSOR_API_KEY || undefined;
 			if (input.sandboxSettings) {
@@ -463,16 +402,19 @@ export class RunnerConfigBuilder {
 			}
 		}
 
-		// When the egress sandbox is enabled, give Codex the same filesystem
-		// posture Claude gets (see buildSandboxConfig): writes restricted to the
-		// worktree, reads restricted to the worktree + allowed directories (home
-		// is denied by omission). The Codex runner turns this into a per-thread
-		// app-server permission profile (read/write allow-list).
-		if (runnerType === "codex" && input.sandboxSettings) {
-			config.sandboxSettings = {
-				allowWrite: [input.session.workspace.path],
-				allowRead: [input.session.workspace.path, ...input.allowedDirectories],
-			};
+		// Codex runner drives OpenAI Codex over ACP. Thread through the Codex/OpenAI
+		// API key and the optional adapter-launch / codex-binary overrides; the
+		// runner spawns the ACP adapter itself and relies on worktree isolation +
+		// the sandbox for containment.
+		if (runnerType === "codex") {
+			config.codexApiKey =
+				process.env.CODEX_API_KEY || process.env.OPENAI_API_KEY || undefined;
+			if (process.env.CODEX_ACP_COMMAND) {
+				config.acpCommand = process.env.CODEX_ACP_COMMAND;
+			}
+			if (process.env.CODEX_PATH) {
+				config.codexPath = process.env.CODEX_PATH;
+			}
 		}
 
 		if (input.resumeSessionId) {
@@ -481,6 +423,45 @@ export class RunnerConfigBuilder {
 
 		if (input.maxTurns !== undefined) {
 			config.maxTurns = input.maxTurns;
+		}
+
+		// Claude-only: forward the early auto-compaction window. Cursor manages
+		// its own context, so this is a no-op there and intentionally not set.
+		if (runnerType === "claude" && input.autoCompactWindow !== undefined) {
+			config.autoCompactWindow = input.autoCompactWindow;
+		}
+
+		// Claude-only: forward the reasoning-effort level to the SDK. Cursor and
+		// Codex have no equivalent knob, so this is intentionally not set there.
+		if (runnerType === "claude" && input.effort !== undefined) {
+			config.effort = input.effort;
+		}
+
+		// Claude-only: forward the tool-output caps. Cursor manages its own tool
+		// output, so these are not set there.
+		if (runnerType === "claude" && input.bashMaxOutputLength !== undefined) {
+			config.bashMaxOutputLength = input.bashMaxOutputLength;
+		}
+		if (runnerType === "claude" && input.mcpMaxOutputTokens !== undefined) {
+			config.mcpMaxOutputTokens = input.mcpMaxOutputTokens;
+		}
+
+		// Claude-only: forward the explore-subagent model. Cursor has no
+		// equivalent agent registration, so this is not set there.
+		if (runnerType === "claude" && input.subagentModel !== undefined) {
+			config.subagentModel = input.subagentModel;
+		}
+
+		// Claude-only: forward the idle keep-alive window. Cursor owns its own
+		// session lifetime, so this is not set there.
+		if (runnerType === "claude" && input.sessionKeepAliveMs !== undefined) {
+			config.sessionKeepAliveMs = input.sessionKeepAliveMs;
+		}
+
+		// Claude-only: forward the shared warm-session LRU registry so the runner
+		// can register itself as idle and be evicted when the cap is exceeded.
+		if (runnerType === "claude" && input.warmSessionRegistry !== undefined) {
+			config.warmSessionRegistry = input.warmSessionRegistry;
 		}
 
 		return { config, runnerType };
@@ -500,7 +481,7 @@ export class RunnerConfigBuilder {
 	}
 
 	private runnerSupportsManagedSkills(runnerType: RunnerType): boolean {
-		return runnerType === "claude" || runnerType === "codex";
+		return runnerType === "claude";
 	}
 
 	/**
@@ -511,8 +492,10 @@ export class RunnerConfigBuilder {
 	 */
 	private buildSandboxConfig(
 		input: IssueRunnerConfigInput,
-	): Record<string, unknown> {
-		const result: Record<string, unknown> = {};
+	): Partial<Pick<ClaudeRunnerConfig, "sandbox" | "additionalEnv">> {
+		const result: Partial<
+			Pick<ClaudeRunnerConfig, "sandbox" | "additionalEnv">
+		> = {};
 
 		if (input.sandboxSettings) {
 			result.sandbox = {
@@ -526,14 +509,25 @@ export class RunnerConfigBuilder {
 				enableWeakerNetworkIsolation: true,
 				filesystem: {
 					...input.sandboxSettings.filesystem,
-					// "." resolves to the cwd of the primary folder Claude is working in.
+					// Derive the OS-sandbox filesystem allow/deny from the SAME
+					// AccessPolicy.compute() the cold + warm Claude tool-permission
+					// paths use, guaranteeing the sandbox layer and the tool layer
+					// agree. "." resolves to the cwd of the primary folder Claude is
+					// working in; allowedDirectories contains the attachments dir,
+					// repo paths, and git metadata dirs — all of which need OS-level
+					// read access alongside the worktree. `denyRead` keeps the literal
+					// "~/" token, which bubblewrap / macOS sandbox honor as a true
+					// deny+whitelist root. Writes are restricted to the worktree.
 					// See: https://code.claude.com/docs/en/settings#sandbox-path-prefixes
-					// allowedDirectories contains the attachments dir, repo paths, and git
-					// metadata dirs — all of which need OS-level read access alongside the worktree.
-					allowRead: [".", ...input.allowedDirectories],
-					denyRead: ["~/"],
-					// Restrict subprocess writes to the session worktree only
-					allowWrite: [input.session.workspace.path],
+					...toSandboxFilesystem(
+						compute({
+							homeDir: homedir(),
+							dirLister: nodeDirLister,
+							cwd: input.session.workspace.path,
+							allowReadDirectories: input.allowedDirectories,
+							writeDirectories: [input.session.workspace.path],
+						}),
+					),
 				},
 			};
 		}

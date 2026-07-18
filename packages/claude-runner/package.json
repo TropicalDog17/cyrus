@@ -1,6 +1,7 @@
 {
 	"name": "cyrus-claude-runner",
 	"version": "0.2.66",
+	"private": true,
 	"description": "Claude CLI execution wrapper for Cyrus",
 	"type": "module",
 	"main": "dist/index.js",
@@ -22,6 +23,7 @@
 		"cyrus-core": "workspace:*",
 		"dotenv": "^16.4.5",
 		"fs-extra": "^11.3.2",
+		"langfuse": "^3.38.0",
 		"zod": "^4.3.6"
 	},
 	"devDependencies": {
@@ -30,8 +32,5 @@
 		"tsx": "^4.19.2",
 		"typescript": "^5.3.3",
 		"vitest": "^4.1.0"
-	},
-	"publishConfig": {
-		"access": "public"
 	}
 }

@@ -1,10 +1,57 @@
+import { dirname } from "node:path";
 import { z } from "zod";
 
 /**
- * Supported runner/harness types for agent execution.
+ * Metadata attached to schema fields whose string / string[] values are
+ * filesystem paths that must be tilde-expanded and resolved to absolute
+ * paths before use (e.g. before `fs.readFileSync`).
  */
-export const RunnerTypeSchema = z.enum(["claude", "gemini", "codex", "cursor"]);
+export interface PathFieldMeta {
+	path: true;
+}
+
+/**
+ * Typed registry that tags path-bearing schema fields, colocated with the
+ * schema definition. A single registry-driven walker (`normalizeConfigPaths`)
+ * consumes these tags so a new path field cannot bypass normalization.
+ *
+ * IMPORTANT: this is a dedicated `z.registry()` — NOT `.meta()`. Verified that
+ * a custom registry produces byte-identical `toJSONSchema()` output (so the
+ * committed JSON Schemas and `json-schema-export.test.ts` stay in sync),
+ * whereas `.meta()` would inject the tag into the JSON Schema `properties`.
+ *
+ * Tags MUST be applied to the OUTERMOST schema instance that ends up in
+ * `.shape` (i.e. after any `.optional()` / `.union()` wrap) — `.register()`
+ * keys on the exact instance and does not survive a later wrap.
+ */
+export const pathRegistry = z.registry<PathFieldMeta>();
+
+/**
+ * Supported runner/harness types for agent execution.
+ *
+ * This fork runs Claude, Cursor, and Codex. The Codex runner drives the OpenAI
+ * Codex CLI over the Agent Client Protocol (ACP).
+ */
+export const RunnerTypeSchema = z.enum(["claude", "cursor", "codex"]);
 export type RunnerType = z.infer<typeof RunnerTypeSchema>;
+
+/**
+ * Reasoning effort levels for the Claude runner.
+ *
+ * Maps to the Claude Agent SDK's `Options.effort`, which steers how much
+ * adaptive thinking the model spends. Unsupported levels are silently
+ * downgraded by the SDK. Unset preserves the SDK default (`high`); Cyrus
+ * intentionally applies no default of its own. Claude-only — Cursor and
+ * Codex ignore it.
+ */
+export const EffortLevelSchema = z.enum([
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+]);
+export type EffortLevel = z.infer<typeof EffortLevelSchema>;
 
 /**
  * User identifier for access control matching.
@@ -67,7 +114,11 @@ const ToolRestrictionSchema = z.union([
  * Label prompt configuration with optional tool restrictions.
  * Accepts either:
  * - Simple form: string[] (e.g., ["Bug", "Fix"])
- * - Complex form: { labels: string[], allowedTools?: ..., disallowedTools?: ... }
+ * - Complex form: { labels: string[], allowedTools?, disallowedTools?, model?, effort? }
+ *
+ * `model` / `effort` let a label steer which runner/model handles the issue and
+ * how much reasoning effort it spends. `effort` is Claude-only. Model precedence
+ * across all sources is resolved centrally in `RunnerSelectionService`.
  */
 const LabelPromptConfigSchema = z.union([
 	// Simple form: just an array of label strings
@@ -77,6 +128,8 @@ const LabelPromptConfigSchema = z.union([
 		labels: z.array(z.string()),
 		allowedTools: ToolRestrictionSchema.optional(),
 		disallowedTools: z.array(z.string()).optional(),
+		model: z.string().optional(),
+		effort: EffortLevelSchema.optional(),
 	}),
 ]);
 
@@ -275,10 +328,9 @@ export const RepositoryConfigSchema = z.object({
 	name: z.string(),
 
 	// Git configuration
-	repositoryPath: z.string(),
+	repositoryPath: z.string().register(pathRegistry, { path: true }),
 	baseBranch: z.string(),
 	githubUrl: z.string().optional(),
-	gitlabUrl: z.string().optional(),
 
 	// Linear configuration (optional — repos may operate without Linear, e.g. via Slack or GitHub)
 	linearWorkspaceId: z.string().optional(),
@@ -294,17 +346,38 @@ export const RepositoryConfigSchema = z.object({
 	linearWorkspaceName: z.string().optional(),
 
 	// Workspace configuration
-	workspaceBaseDir: z.string(),
+	workspaceBaseDir: z.string().register(pathRegistry, { path: true }),
 
 	// Optional settings
 	isActive: z.boolean().optional(),
-	promptTemplatePath: z.string().optional(),
+	promptTemplatePath: z
+		.string()
+		.optional()
+		.register(pathRegistry, { path: true }),
 	allowedTools: z.array(z.string()).optional(),
 	disallowedTools: z.array(z.string()).optional(),
-	mcpConfigPath: z.union([z.string(), z.array(z.string())]).optional(),
+	/**
+	 * Opt-in: grant sessions READ-ONLY access to the repository's parent
+	 * directory (`dirname(repositoryPath)`), i.e. every sibling folder next to
+	 * the repo checkout (sibling repos, shared specs). Off by default so the
+	 * secure home-directory read denial stays intact. Writes remain confined to
+	 * the worktree regardless of this flag.
+	 */
+	readParentDirectory: z.boolean().optional(),
+	mcpConfigPath: z
+		.union([z.string(), z.array(z.string())])
+		.optional()
+		.register(pathRegistry, { path: true }),
 	appendInstruction: z.string().optional(),
 	model: z.string().optional(),
 	fallbackModel: z.string().optional(),
+	/**
+	 * Reasoning effort for the Claude runner on this repository. Claude-only;
+	 * ignored by Cursor/Codex. Overridden by a matching label's `effort`, and
+	 * falls back to `claudeDefaultEffort` when unset. Unset preserves the SDK
+	 * default (`high`).
+	 */
+	effort: EffortLevelSchema.optional(),
 
 	// Label-based system prompt configuration
 	labelPrompts: LabelPromptsSchema.optional(),
@@ -312,6 +385,14 @@ export const RepositoryConfigSchema = z.object({
 	// Repository-specific user access control
 	userAccessControl: UserAccessControlConfigSchema.optional(),
 });
+
+/**
+ * Idle window a finished Claude session is kept alive for, when
+ * `claudeSessionKeepAliveMinutes` is not configured. Sits under Anthropic's
+ * 1-hour prompt-cache TTL so a follow-up comment appends to a still-cached
+ * conversation instead of paying to re-write it.
+ */
+export const DEFAULT_CLAUDE_SESSION_KEEP_ALIVE_MINUTES = 50;
 
 /**
  * Edge configuration - the serializable configuration stored in ~/.cyrus/config.json
@@ -360,22 +441,130 @@ export const EdgeConfigSchema = z.object({
 		.positive()
 		.optional(),
 
-	/** Default Gemini model to use across all repositories (e.g., "gemini-2.5-pro") */
-	geminiDefaultModel: z.string().optional(),
+	/**
+	 * Effective context-window size (in tokens) at which Claude sessions
+	 * auto-compact. Forwarded to the Claude SDK as `settings.autoCompactWindow`.
+	 *
+	 * The SDK's auto-compaction normally fires only near the *model's* full
+	 * context window — for a 1M-token model that means a session can accumulate
+	 * hundreds of thousands of tokens of re-read conversation history before it
+	 * ever compacts. Since re-reading accumulated context is the dominant cost
+	 * driver, setting a smaller window (e.g. 120000) makes the SDK compact much
+	 * earlier, capping the per-turn context tax on long multi-subroutine
+	 * sessions. When unset, the SDK's default (model-context-sized) behavior is
+	 * preserved. Claude runner only; Cursor manages its own context.
+	 */
+	claudeAutoCompactWindow: z.number().int().positive().optional(),
 
-	/** Default Codex model to use across all repositories (e.g., "gpt-5.5", "gpt-5.4", "gpt-5.3-codex") */
-	codexDefaultModel: z.string().optional(),
+	/**
+	 * Default reasoning effort for the Claude runner across all repositories.
+	 * Forwarded to the Claude SDK as `Options.effort`. Claude runner only;
+	 * Cursor and Codex ignore it.
+	 *
+	 * Lowest-precedence effort source: a matching label's `effort` and a
+	 * repository's `effort` both override it. When unset (and no label/repo
+	 * effort applies), the SDK default (`high`) is preserved — Cyrus applies no
+	 * default of its own.
+	 */
+	claudeDefaultEffort: EffortLevelSchema.optional(),
 
-	/** Default Cursor model to use across all repositories (e.g., "composer-2", "gpt-5.4") */
+	/**
+	 * Maximum length, in characters, of a single Bash tool result before the
+	 * bundled Claude CLI truncates it. Forwarded to the CLI subprocess as the
+	 * `BASH_MAX_OUTPUT_LENGTH` env var.
+	 *
+	 * A giant command output (a build log, `cat` of a huge file) otherwise lands
+	 * in the transcript verbatim and is re-written to the prompt cache on every
+	 * subsequent turn — dead weight that grows the per-turn context tax. Capping
+	 * per-command output keeps that bounded. When unset, the CLI's built-in
+	 * default applies. Claude runner only; Cursor manages its own tool output.
+	 */
+	claudeBashMaxOutputLength: z.number().int().positive().optional(),
+
+	/**
+	 * Maximum number of tokens a single MCP tool result may contribute before the
+	 * bundled Claude CLI truncates it. Forwarded to the CLI subprocess as the
+	 * `MAX_MCP_OUTPUT_TOKENS` env var.
+	 *
+	 * Same transcript- and cache-bloat motivation as
+	 * `claudeBashMaxOutputLength`, applied to oversized MCP responses. When
+	 * unset, the CLI's built-in default applies. Claude runner only; Cursor
+	 * manages its own tool output.
+	 */
+	claudeMcpMaxOutputTokens: z.number().int().positive().optional(),
+
+	/**
+	 * Model for the read-only `explore` subagent Cyrus registers (an alias like
+	 * `haiku` / `sonnet`, or a full model id). Claude runner only.
+	 *
+	 * Delegating a broad file sweep to a subagent keeps the main conversation
+	 * small, but it is not free: a subagent re-sends its own accumulated context
+	 * every turn just like the main thread, so an agent that inherits the session
+	 * model (Opus) *moves* the cost rather than removing it. Pinning
+	 * reconnaissance to a cheaper model is what makes delegation pay — Opus 4.8
+	 * cache reads are $0.50/Mtok against Haiku 4.5's $0.10/Mtok.
+	 *
+	 * When unset, no `explore` agent is registered and delegation falls back to
+	 * the SDK's built-in agents (which inherit the session model) — i.e. unset is
+	 * exactly today's behavior.
+	 */
+	claudeSubagentModel: z.string().optional(),
+
+	/**
+	 * How long (in minutes) a finished Claude session stays alive waiting for a
+	 * follow-up comment before it shuts down. Defaults to
+	 * {@link DEFAULT_CLAUDE_SESSION_KEEP_ALIVE_MINUTES}; set `0` to disable.
+	 *
+	 * When the session process has already exited, a follow-up comment has to
+	 * *resume* it: the SDK replays the stored transcript into a new process,
+	 * which re-writes the entire conversation to the prompt cache (150–250k
+	 * tokens, ~$1+ on a long issue). If the process is still alive the comment is
+	 * simply appended to the running stream, costing about a thousand tokens.
+	 *
+	 * Capped at 55 minutes because the appended turn only stays cheap while the
+	 * conversation is still in Anthropic's 1-hour prompt cache; a longer idle
+	 * window would pay the full re-read anyway. Claude runner only; Cursor
+	 * manages its own session lifetime.
+	 */
+	claudeSessionKeepAliveMinutes: z.number().int().min(0).max(55).optional(),
+
+	/**
+	 * Maximum number of concurrently-warm *idle* Claude sessions kept alive by
+	 * `claudeSessionKeepAliveMinutes`. When the number of idle sessions exceeds
+	 * this cap, the least-recently-used idle session is shut down gracefully
+	 * (its next comment resumes normally). Sessions with pending scheduled work
+	 * are never evicted.
+	 *
+	 * `0` (the default when unset) means unbounded — the keep-alive window alone
+	 * governs how many warm sessions accumulate. Only meaningful when
+	 * `claudeSessionKeepAliveMinutes` is non-zero. Claude runner only.
+	 */
+	claudeMaxWarmIdleSessions: z.number().int().min(0).optional(),
+
+	/**
+	 * How long (in minutes) an AskUserQuestion elicitation waits for the user's
+	 * answer in Linear before unblocking the agent with a "no response" denial.
+	 * `0` waits indefinitely; unset defaults to 10 minutes. Claude runner only.
+	 * Hot-reloaded: applies to questions asked after a config change.
+	 */
+	askUserQuestionTimeoutMinutes: z.number().int().min(0).optional(),
+
+	/** Default Cursor model to use across all repositories (e.g., "composer-2.5", "composer-2") */
 	cursorDefaultModel: z.string().optional(),
 
 	/** Default Cursor fallback model if primary Cursor model is unavailable */
 	cursorDefaultFallbackModel: z.string().optional(),
 
+	/** Default Codex model to use across all repositories (e.g., "gpt-5-codex", "gpt-5") */
+	codexDefaultModel: z.string().optional(),
+
+	/** Default Codex fallback model if primary Codex model is unavailable */
+	codexDefaultFallbackModel: z.string().optional(),
+
 	/**
-	 * Default runner/harness to use when no runner is specified via labels or description tags.
-	 * If omitted, auto-detected from available API keys (if exactly one is configured),
-	 * otherwise falls back to "claude".
+	 * Default runner/harness to use when no runner is specified via labels or
+	 * description tags. This fork supports "claude", "cursor", and "codex". If
+	 * omitted, falls back to "claude".
 	 */
 	defaultRunner: RunnerTypeSchema.optional(),
 
@@ -397,7 +586,7 @@ export const EdgeConfigSchema = z.object({
 	/**
 	 * Allowed tools for Linear-triggered agent sessions. Renamed from the
 	 * old `defaultAllowedTools` to make the platform scope explicit alongside
-	 * `slackAllowedTools` and `githubAllowedTools`.
+	 * `githubAllowedTools`.
 	 */
 	linearAllowedTools: z.array(z.string()).optional(),
 
@@ -412,36 +601,11 @@ export const EdgeConfigSchema = z.object({
 	defaultDisallowedTools: z.array(z.string()).optional(),
 
 	/**
-	 * Allowed tools for Slack @mention chat sessions. When set, overrides the
-	 * built-in read-only chat tool set used by ToolPermissionResolver. The
-	 * workspace MCP tool prefixes (mcp__linear, mcp__cyrus-tools, etc.) are
-	 * still appended automatically.
-	 */
-	slackAllowedTools: z.array(z.string()).optional(),
-
-	/**
 	 * Allowed tools for GitHub-triggered agent sessions. When set, overrides
 	 * `linearAllowedTools` specifically for sessions originating from GitHub
 	 * (PR comments, automated fix-on-failure flows, etc.).
 	 */
 	githubAllowedTools: z.array(z.string()).optional(),
-
-	/**
-	 * Filesystem paths to custom-integration MCP config JSON files (Claude
-	 * Code `.mcp.json` format) the runtime should load for Slack `@mention`
-	 * chat sessions. Chat sessions are repo-agnostic, so
-	 * `repository.mcpConfigPath` is not consulted here — only this list
-	 * determines which custom `.mcp.json` files load for Slack. When
-	 * omitted/empty, no custom files load (native MCP servers — Linear,
-	 * Cyrus tools, Slack MCP, Cyrus docs — still run as usual).
-	 *
-	 * The per-platform lists let cyrus-hosted route custom MCP server
-	 * availability per surface — e.g. expose `slack-mcp-server` only on
-	 * Slack, or scope a Supabase MCP to GitHub PR sessions but not Linear
-	 * issue work. Each entry is passed as-is to Claude Code's
-	 * `--mcp-config` mechanism.
-	 */
-	slackMcpConfigs: z.array(z.string()).optional(),
 
 	/**
 	 * Filesystem paths to custom-integration MCP config JSON files for
@@ -453,16 +617,22 @@ export const EdgeConfigSchema = z.object({
 	 * When omitted/empty AND the repo has no override, no custom `.mcp.json`
 	 * files load.
 	 */
-	linearMcpConfigs: z.array(z.string()).optional(),
+	linearMcpConfigs: z
+		.array(z.string())
+		.optional()
+		.register(pathRegistry, { path: true }),
 
 	/**
 	 * Filesystem paths to custom-integration MCP config JSON files for
-	 * GitHub/GitLab-triggered agent sessions. Same repo-override-coupling
+	 * GitHub-triggered agent sessions. Same repo-override-coupling
 	 * semantics as `linearMcpConfigs`: only consulted when the routed repo
 	 * does not have its own `allowedTools` override; otherwise the repo's
 	 * `mcpConfigPath` is used.
 	 */
-	githubMcpConfigs: z.array(z.string()).optional(),
+	githubMcpConfigs: z
+		.array(z.string())
+		.optional()
+		.register(pathRegistry, { path: true }),
 
 	/**
 	 * Whether to trigger agent sessions when issue title, description, or attachments are updated.
@@ -472,20 +642,19 @@ export const EdgeConfigSchema = z.object({
 	issueUpdateTrigger: z.boolean().optional(),
 
 	/**
-	 * Whether Cyrus follows along with all subsequent replies in a Slack thread
-	 * it has been @mentioned in (treating each reply as a follow-up prompt).
-	 * When false, Cyrus only responds to explicit @mentions. Defaults to true if
-	 * not specified. Can also be force-disabled at runtime via the
-	 * `CYRUS_SLACK_THREAD_FOLLOWING_DISABLED` environment variable.
-	 */
-	slackThreadFollowing: z.boolean().optional(),
-
-	/**
 	 * Whether to trigger agent sessions when a pull request review requests changes.
 	 * When disabled, a `pull_request_review` event produces no acknowledgement comment
 	 * and no agent session. Defaults to true if not specified.
 	 */
 	prReviewTrigger: z.boolean().optional(),
+
+	/**
+	 * Whether to append a cumulative usage/cost footer to final (non-error)
+	 * responses, e.g. `$0.42 · 12.3k in / 3.1k out · 85% cached`. The figures
+	 * are per-session totals across every turn. Defaults to true; set `false`
+	 * to opt out (the footer is also suppressed when every counter is zero).
+	 */
+	showUsageFooter: z.boolean().optional(),
 
 	/**
 	 * Global user access control settings.
@@ -638,4 +807,32 @@ export function requireLinearWorkspaceId(repo: RepositoryConfig): string {
 		);
 	}
 	return repo.linearWorkspaceId;
+}
+
+/**
+ * Opt-in per-repo read expansion. For each repository whose config sets
+ * `readParentDirectory`, return the repository's parent directory
+ * (`dirname(repositoryPath)`) so a session can READ every sibling folder next
+ * to the checkout (sibling repos, shared specs). Repos without the flag
+ * contribute nothing, preserving the secure home-directory read denial.
+ *
+ * These directories are only ever meant to be added to a session's READ
+ * allow-list — writes stay confined to the worktree. Callers pass the result
+ * into the read-directory set consumed by AccessPolicy.compute(); all session
+ * paths (new, resumed, and pre-warmed) MUST route through this single helper so
+ * the read scope cannot drift between them.
+ *
+ * The paths are deduplicated so several repos that share a parent do not emit
+ * duplicate grants.
+ */
+export function getReadParentDirectories(
+	repositories: RepositoryConfig[],
+): string[] {
+	return [
+		...new Set(
+			repositories
+				.filter((repo) => repo.readParentDirectory)
+				.map((repo) => dirname(repo.repositoryPath)),
+		),
+	];
 }

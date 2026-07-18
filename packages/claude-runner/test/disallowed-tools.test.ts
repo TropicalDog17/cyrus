@@ -79,6 +79,52 @@ describe("ClaudeRunner - disallowedTools", () => {
 		expect(callArgs.options.allowedTools).toContain("Edit");
 	});
 
+	it("preserves the SDK built-in preset when allowedTools is configured", async () => {
+		const config: ClaudeRunnerConfig = {
+			workingDirectory: "/test",
+			allowedTools: ["Read(**)", "Agent", "mcp__linear"],
+			cyrusHome: "/test/cyrus",
+		};
+
+		const runner = new ClaudeRunner(config);
+		await runner.start("Test prompt");
+
+		const callArgs = queryMock.mock.calls[0][0];
+		expect(callArgs.options.tools).toBeUndefined();
+	});
+
+	it("fails closed when an unapproved tool reaches canUseTool", async () => {
+		const config: ClaudeRunnerConfig = {
+			workingDirectory: "/test",
+			allowedTools: ["Read", "AskUserQuestion"],
+			cyrusHome: "/test/cyrus",
+			onAskUserQuestion: async () => ({ answered: false }),
+		};
+
+		const runner = new ClaudeRunner(config);
+		await runner.start("Test prompt");
+
+		const callArgs = queryMock.mock.calls[0][0];
+		const canUseTool = callArgs.options.canUseTool as
+			| claudeCode.CanUseTool
+			| undefined;
+		if (!canUseTool) throw new Error("Expected canUseTool to be configured");
+
+		await expect(
+			canUseTool(
+				"Bash",
+				{ command: "pwd" },
+				{
+					signal: new AbortController().signal,
+					toolUseID: "tool-1",
+				},
+			),
+		).resolves.toEqual({
+			behavior: "deny",
+			message: "Tool Bash is not allowed in this session",
+		});
+	});
+
 	it("should not pass disallowedTools when not configured", async () => {
 		const config: ClaudeRunnerConfig = {
 			workingDirectory: "/test",

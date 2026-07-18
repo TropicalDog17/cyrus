@@ -6,11 +6,10 @@ import {
 	isAgentSessionCreatedWebhook,
 	isAgentSessionPromptedWebhook,
 } from "cyrus-core";
-import { GeminiRunner } from "cyrus-gemini-runner";
 import { LinearEventTransport } from "cyrus-linear-event-transport";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
-import { EdgeWorker } from "../src/EdgeWorker.js";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker.js";
 import { SharedApplicationServer } from "../src/SharedApplicationServer.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
 import { TEST_CYRUS_HOME } from "./test-dirs.js";
@@ -25,8 +24,6 @@ vi.mock("fs/promises", () => ({
 
 // Mock dependencies
 vi.mock("cyrus-claude-runner");
-vi.mock("cyrus-codex-runner");
-vi.mock("cyrus-gemini-runner");
 vi.mock("cyrus-linear-event-transport");
 vi.mock("@linear/sdk");
 vi.mock("../src/SharedApplicationServer.js");
@@ -63,7 +60,6 @@ describe("EdgeWorker - Screenshot Upload Guidance Hooks", () => {
 	let mockConfig: EdgeWorkerConfig;
 	let mockLinearClient: any;
 	let mockClaudeRunner: any;
-	let mockGeminiRunner: any;
 	let mockAgentSessionManager: any;
 	let capturedRunnerConfig: any = null;
 
@@ -138,22 +134,6 @@ describe("EdgeWorker - Screenshot Upload Guidance Hooks", () => {
 			return mockClaudeRunner;
 		});
 
-		// Mock GeminiRunner
-		mockGeminiRunner = {
-			supportsStreamingInput: false,
-			start: vi.fn().mockResolvedValue({ sessionId: "gemini-session-123" }),
-			startStreaming: vi
-				.fn()
-				.mockResolvedValue({ sessionId: "gemini-session-123" }),
-			stop: vi.fn(),
-			isStreaming: vi.fn().mockReturnValue(false),
-			addStreamMessage: vi.fn(),
-			updatePromptVersions: vi.fn(),
-		};
-		vi.mocked(GeminiRunner).mockImplementation(function (_config: any) {
-			return mockGeminiRunner;
-		});
-
 		// Mock AgentSessionManager
 		mockAgentSessionManager = {
 			createCyrusAgentSession: vi.fn(),
@@ -222,7 +202,7 @@ Issue: {{issue_identifier}}`;
 			},
 		};
 
-		edgeWorker = new EdgeWorker(mockConfig);
+		edgeWorker = composeEdgeWorker(mockConfig);
 
 		// Inject mock issue tracker
 		const mockIssueTracker = {

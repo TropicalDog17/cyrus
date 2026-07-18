@@ -1,21 +1,113 @@
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
-import type { IAgentRunner, IMessageFormatter, SDKMessage } from "cyrus-core";
-import { AppServerCodexBackend } from "./backend/AppServerCodexBackend.js";
+import {
+	createWriteStream,
+	mkdirSync,
+	readFileSync,
+	type WriteStream,
+	writeFileSync,
+} from "node:fs";
+import { dirname, resolve } from "node:path";
+import { cwd } from "node:process";
+import {
+	type Client,
+	ClientSideConnection,
+	type McpServer,
+	PROTOCOL_VERSION,
+	type PromptResponse,
+	type ReadTextFileRequest,
+	type ReadTextFileResponse,
+	type RequestPermissionRequest,
+	type RequestPermissionResponse,
+	type SessionNotification,
+	type Usage,
+	type WriteTextFileRequest,
+} from "@agentclientprotocol/sdk";
 import type {
-	CodexBackend,
-	CodexUserInput,
-	NormalizedCodexEvent,
-} from "./backend/types.js";
-import { CodexEventMapper, type MapperContext } from "./CodexEventMapper.js";
-import { CodexSkillStager } from "./CodexSkillStager.js";
-import { CodexConfigBuilder } from "./config/CodexConfigBuilder.js";
-import { CodexMessageFormatter } from "./formatter.js";
+	AgentMessage,
+	AgentResultMessage,
+	AgentSystemInitMessage,
+	AgentUsage,
+	IAgentRunner,
+} from "cyrus-core";
+import { spawnCodexAcp } from "./acpProcess.js";
+import { CodexEventMapper } from "./CodexEventMapper.js";
 import type {
 	CodexRunnerConfig,
 	CodexRunnerEvents,
 	CodexSessionInfo,
 } from "./types.js";
+
+/** Built-in default Codex model when none is configured. */
+const CODEX_DEFAULT_MODEL = "gpt-5-codex";
+
+function normalizeError(error: unknown): string {
+	if (error instanceof Error) return error.message;
+	if (typeof error === "string") return error;
+	return "Codex execution failed";
+}
+
+function toFiniteNumber(value: unknown): number {
+	return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function createResultUsage(usage?: Usage | null): AgentUsage {
+	return {
+		inputTokens: toFiniteNumber(usage?.inputTokens),
+		outputTokens: toFiniteNumber(usage?.outputTokens),
+		cacheReadTokens: toFiniteNumber(usage?.cachedReadTokens),
+		cacheWriteTokens: toFiniteNumber(usage?.cachedWriteTokens),
+		costUsd: 0,
+	};
+}
+
+/**
+ * Translate the Cyrus inline MCP config into ACP `McpServer` entries. In-process
+ * SDK server instances (which expose `listTools`/`callTool` closures) cannot be
+ * serialized across the stdio boundary and are skipped.
+ */
+export function mapMcpServersToAcp(
+	mcpConfig: CodexRunnerConfig["mcpConfig"] | undefined,
+): McpServer[] {
+	const servers: McpServer[] = [];
+	if (!mcpConfig) return servers;
+
+	for (const [name, raw] of Object.entries(mcpConfig)) {
+		const cfg = raw as Record<string, unknown>;
+		if (
+			typeof cfg.listTools === "function" ||
+			typeof cfg.callTool === "function"
+		) {
+			continue;
+		}
+
+		if (typeof cfg.url === "string" && cfg.url.length > 0) {
+			const headers =
+				cfg.headers &&
+				typeof cfg.headers === "object" &&
+				!Array.isArray(cfg.headers)
+					? Object.entries(cfg.headers as Record<string, string>).map(
+							([key, value]) => ({ name: key, value: String(value) }),
+						)
+					: [];
+			servers.push({ type: "http", name, url: cfg.url, headers });
+			continue;
+		}
+
+		if (typeof cfg.command === "string" && cfg.command.length > 0) {
+			const args = Array.isArray(cfg.args) ? (cfg.args as string[]) : [];
+			const env =
+				cfg.env && typeof cfg.env === "object" && !Array.isArray(cfg.env)
+					? Object.entries(cfg.env as Record<string, string>).map(
+							([key, value]) => ({ name: key, value: String(value) }),
+						)
+					: [];
+			servers.push({ name, command: cfg.command, args, env });
+		}
+	}
+
+	return servers;
+}
 
 export declare interface CodexRunner {
 	on<K extends keyof CodexRunnerEvents>(
@@ -29,46 +121,42 @@ export declare interface CodexRunner {
 }
 
 /**
- * Adapts Codex to Cyrus's {@link IAgentRunner} contract.
+ * Drives an OpenAI Codex session over the Agent Client Protocol (ACP).
  *
- * The runner is a thin orchestrator: it owns session lifecycle and delegates
- * configuration assembly ({@link CodexConfigBuilder}), skill staging
- * ({@link CodexSkillStager}), event→message mapping ({@link CodexEventMapper}),
- * and transport ({@link CodexBackend}) to dedicated collaborators. Codex is
- * driven exclusively through the app-server backend, which supports mid-turn
- * input injection (`turn/steer`).
+ * The runner spawns the Codex ACP adapter as a child process, speaks ACP over
+ * its stdio as the *client*, and projects the agent's `session/update`
+ * notifications into the neutral {@link AgentMessage} stream Cyrus consumes.
+ * ACP is turn-based (one `session/prompt` per turn), so streaming input is not
+ * supported — the runner mirrors the Cursor runner's single-prompt model.
+ *
+ * Permission requests are auto-approved: Cyrus runs unattended and relies on
+ * worktree isolation and the sandbox for containment.
  */
 export class CodexRunner extends EventEmitter implements IAgentRunner {
-	readonly supportsStreamingInput = true;
+	readonly supportsStreamingInput = false;
 
-	private readonly config: CodexRunnerConfig;
-	private readonly formatter: IMessageFormatter;
-	private readonly skillStager: CodexSkillStager;
-	private readonly mapper: CodexEventMapper;
+	/** Provider dispatch tag (see IAgentRunner.provider). */
+	readonly provider = "codex" as const;
 
+	private config: CodexRunnerConfig;
 	private sessionInfo: CodexSessionInfo | null = null;
-	private backend: CodexBackend | null = null;
+	private messages: AgentMessage[] = [];
+	private mapper: CodexEventMapper;
+	private acpSessionId: string | null = null;
+	private child: ReturnType<typeof spawnCodexAcp>["child"] | null = null;
+	private connection: ClientSideConnection | null = null;
+	private hasInitMessage = false;
 	private wasStopped = false;
-	/** Set once the turn reaches a terminal state; gates {@link isStreaming}. */
-	private turnFinished = false;
-	/**
-	 * Follow-up messages that arrived before the turn became steerable (during
-	 * config build / process spawn / thread start). Flushed via `steer` once the
-	 * turn starts, so a fast follow-up is never lost or wrongly deferred.
-	 */
-	private pendingFollowups: string[] = [];
+	private startTimestampMs = 0;
+	private logStream: WriteStream | null = null;
 
 	constructor(config: CodexRunnerConfig) {
 		super();
 		this.config = config;
-		this.formatter = new CodexMessageFormatter();
-		this.skillStager = new CodexSkillStager({
-			workingDirectory: config.workingDirectory,
-			additionalDirectories: config.additionalDirectories,
-			skills: config.skills,
-			plugins: config.plugins,
+		this.mapper = new CodexEventMapper({
+			getSessionId: () => this.sessionInfo?.sessionId || "pending",
+			emit: (message) => this.pushMessage(message),
 		});
-		this.mapper = new CodexEventMapper(this.buildMapperContext());
 
 		if (config.onMessage) this.on("message", config.onMessage);
 		if (config.onError) this.on("error", config.onError);
@@ -76,187 +164,268 @@ export class CodexRunner extends EventEmitter implements IAgentRunner {
 	}
 
 	async start(prompt: string): Promise<CodexSessionInfo> {
-		return this.startWithPrompt(prompt);
+		if (this.isRunning()) {
+			throw new Error("Codex session already running");
+		}
+
+		const initialSessionId = this.config.resumeSessionId || crypto.randomUUID();
+		this.sessionInfo = {
+			sessionId: initialSessionId,
+			startedAt: new Date(),
+			isRunning: true,
+		};
+		this.messages = [];
+		this.hasInitMessage = false;
+		this.wasStopped = false;
+		this.startTimestampMs = Date.now();
+		this.setupLogging(initialSessionId);
+
+		const workspace = resolve(this.config.workingDirectory || cwd());
+
+		// Test/CI fallback for environments without the Codex adapter or auth.
+		if (process.env.CYRUS_CODEX_MOCK === "1") {
+			this.emitInitMessage();
+			this.mapper.handleUpdate({
+				sessionUpdate: "agent_message_chunk",
+				content: { type: "text", text: "Codex mock session completed" },
+			});
+			this.mapper.flush();
+			this.finalizeSuccess("end_turn", null);
+			return this.sessionInfo;
+		}
+
+		try {
+			const { child, stream } = spawnCodexAcp(this.config, (chunk) =>
+				this.log(`[stderr] ${chunk.trimEnd()}`),
+			);
+			this.child = child;
+
+			const client = this.createClient();
+			const connection = new ClientSideConnection(() => client, stream);
+			this.connection = connection;
+
+			child.on("error", (error) => this.log(`[spawn-error] ${error.message}`));
+
+			await connection.initialize({
+				protocolVersion: PROTOCOL_VERSION,
+				clientCapabilities: {
+					fs: { readTextFile: true, writeTextFile: true },
+				},
+			});
+
+			const { sessionId } = await connection.newSession({
+				cwd: workspace,
+				mcpServers: mapMcpServersToAcp(this.config.mcpConfig),
+			});
+			this.acpSessionId = sessionId;
+			if (this.sessionInfo) this.sessionInfo.sessionId = sessionId;
+			this.emitInitMessage();
+
+			const response: PromptResponse = await connection.prompt({
+				sessionId,
+				prompt: [{ type: "text", text: prompt }],
+			});
+
+			this.mapper.flush();
+			if (response.stopReason === "cancelled" || this.wasStopped) {
+				this.finalizeError("Codex session cancelled", response.usage);
+			} else {
+				this.finalizeSuccess(response.stopReason, response.usage);
+			}
+		} catch (error) {
+			this.mapper.flush();
+			this.finalizeError(normalizeError(error), null);
+		} finally {
+			this.teardownProcess();
+		}
+
+		return this.sessionInfo;
 	}
 
-	async startStreaming(initialPrompt?: string): Promise<CodexSessionInfo> {
-		return this.startWithPrompt(initialPrompt);
+	async startStreaming(_initialPrompt?: string): Promise<CodexSessionInfo> {
+		throw new Error("CodexRunner does not support streaming input");
 	}
 
-	/**
-	 * Inject a message mid-session. While a turn is steerable it is sent
-	 * immediately (`turn/steer`); during the startup window (before the turn
-	 * begins) it is buffered and flushed once the turn starts. Throws only once
-	 * the turn has finished, where the caller should resume with a new turn.
-	 */
-	addStreamMessage(content: string): void {
-		if (this.backend?.isTurnActive()) {
-			this.steer(content);
-			return;
-		}
-		if (this.isRunning() && !this.turnFinished) {
-			this.pendingFollowups.push(content);
-			return;
-		}
-		throw new Error("Cannot stream message: no active Codex turn");
+	addStreamMessage(_content: string): void {
+		throw new Error("CodexRunner does not support streaming input messages");
 	}
 
 	completeStream(): void {
-		// No-op: each turn's input is delivered up front (or via steer); there is
-		// no open input stream to close.
-	}
-
-	isStreaming(): boolean {
-		// True for the whole running, not-yet-finished window — including the
-		// startup gap before the turn is active — so callers stream follow-ups in
-		// (buffered if needed) rather than deferring them.
-		return (
-			this.supportsStreamingInput && this.isRunning() && !this.turnFinished
-		);
+		// No-op: CodexRunner does not support streaming input.
 	}
 
 	stop(): void {
-		if (this.sessionInfo?.isRunning) {
-			this.wasStopped = true;
+		this.wasStopped = true;
+		const connection = this.connection;
+		const sessionId = this.acpSessionId;
+		if (connection && sessionId) {
+			void connection.cancel({ sessionId }).catch(() => {});
 		}
-		this.cleanupRuntimeState();
+		this.teardownProcess();
+		if (this.sessionInfo) this.sessionInfo.isRunning = false;
 	}
 
 	isRunning(): boolean {
 		return this.sessionInfo?.isRunning ?? false;
 	}
 
-	getMessages(): SDKMessage[] {
-		return this.mapper.getMessages();
+	getMessages(): AgentMessage[] {
+		return [...this.messages];
 	}
 
-	getFormatter(): IMessageFormatter {
-		return this.formatter;
-	}
+	// ---------- ACP client handler ----------
 
-	// ---- internals ----------------------------------------------------------
-
-	private async startWithPrompt(
-		prompt?: string | null,
-	): Promise<CodexSessionInfo> {
-		if (this.isRunning()) {
-			throw new Error("Codex session already running");
-		}
-
-		this.sessionInfo = {
-			sessionId: this.config.resumeSessionId || crypto.randomUUID(),
-			startedAt: new Date(),
-			isRunning: true,
-		};
-		this.wasStopped = false;
-		this.turnFinished = false;
-		this.pendingFollowups = [];
-		this.mapper.reset();
-
-		// Create the backend up front (before the slow config build / process
-		// spawn) so addStreamMessage can buffer follow-ups that arrive during the
-		// startup window rather than throwing.
-		const backend = this.createBackend();
-		this.backend = backend;
-		backend.on("event", (event) => this.handleBackendEvent(event));
-
-		const resolved = await new CodexConfigBuilder(this.config).build();
-		this.skillStager.stage();
-
-		const input: CodexUserInput[] = prompt?.trim()
-			? [{ type: "text", text: prompt.trim() }]
-			: [];
-
-		let caughtError: unknown;
-		try {
-			await backend.open(resolved);
-			await backend.runTurn(input);
-		} catch (error) {
-			caughtError = error;
-		} finally {
-			this.finalizeSession(caughtError);
-		}
-
-		return this.sessionInfo;
-	}
-
-	private createBackend(): CodexBackend {
-		return new AppServerCodexBackend();
-	}
-
-	private handleBackendEvent(event: NormalizedCodexEvent): void {
-		if (event.kind === "turn-started") {
-			// Turn is now steerable — deliver anything buffered during startup.
-			this.flushPendingFollowups();
-		} else if (
-			event.kind === "turn-completed" ||
-			event.kind === "turn-failed"
-		) {
-			this.turnFinished = true;
-		}
-		this.mapper.handle(event);
-	}
-
-	private steer(content: string): void {
-		void this.backend
-			?.steer?.([{ type: "text", text: content }])
-			.catch((error) => {
-				this.emit(
-					"error",
-					error instanceof Error ? error : new Error(String(error)),
-				);
-			});
-	}
-
-	private flushPendingFollowups(): void {
-		const queued = this.pendingFollowups;
-		this.pendingFollowups = [];
-		for (const content of queued) {
-			this.steer(content);
-		}
-	}
-
-	private buildMapperContext(): MapperContext {
-		const self = this;
+	private createClient(): Client {
 		return {
-			get workingDirectory(): string | undefined {
-				return self.config.workingDirectory;
+			sessionUpdate: (params: SessionNotification): void => {
+				if (this.wasStopped) return;
+				this.mapper.handleUpdate(params.update);
 			},
-			get model(): string | undefined {
-				return self.config.model;
-			},
-			getSessionId: () => self.sessionInfo?.sessionId || "pending",
-			getStagedSkillNames: () => self.skillStager.getStagedSkillNames(),
-			emitMessage: (message) => self.emit("message", message),
-			onThreadStarted: (threadId) => {
-				if (self.sessionInfo) {
-					self.sessionInfo.sessionId = threadId;
+			requestPermission: (
+				params: RequestPermissionRequest,
+			): RequestPermissionResponse => {
+				// Auto-approve: prefer a durable "allow always" option so the agent is
+				// not re-prompted for the same tool, else a one-shot allow.
+				const options = params.options ?? [];
+				const chosen =
+					options.find((option) => option.kind === "allow_always") ??
+					options.find((option) => option.kind === "allow_once") ??
+					options[0];
+				if (!chosen) {
+					return { outcome: { outcome: "cancelled" } };
 				}
+				return {
+					outcome: { outcome: "selected", optionId: chosen.optionId },
+				};
+			},
+			readTextFile: (params: ReadTextFileRequest): ReadTextFileResponse => {
+				const raw = readFileSync(params.path, "utf8");
+				const content = sliceTextFile(raw, params.line, params.limit);
+				return { content };
+			},
+			writeTextFile: (params: WriteTextFileRequest): void => {
+				mkdirSync(dirname(params.path), { recursive: true });
+				writeFileSync(params.path, params.content, "utf8");
 			},
 		};
 	}
 
-	private finalizeSession(caughtError?: unknown): void {
-		if (!this.sessionInfo) {
-			this.cleanupRuntimeState();
-			return;
-		}
+	// ---------- Internal helpers ----------
 
-		this.sessionInfo.isRunning = false;
-		const messages = this.mapper.finalize({
-			caughtError,
-			wasStopped: this.wasStopped,
-		});
-		this.emit("complete", messages);
-		this.cleanupRuntimeState();
+	private emitInitMessage(): void {
+		if (this.hasInitMessage) return;
+		this.hasInitMessage = true;
+		const sessionId = this.sessionInfo?.sessionId || crypto.randomUUID();
+		const initMessage: AgentSystemInitMessage = {
+			type: "system",
+			subtype: "init",
+			sessionId,
+			model: this.config.model || CODEX_DEFAULT_MODEL,
+			tools: this.config.allowedTools || [],
+			permissionMode: "default",
+			apiKeySource:
+				this.config.codexApiKey ||
+				process.env.CODEX_API_KEY ||
+				process.env.OPENAI_API_KEY
+					? "user"
+					: "project",
+		};
+		this.pushMessage(initMessage);
 	}
 
-	private cleanupRuntimeState(): void {
-		const backend = this.backend;
-		this.backend = null;
-		if (backend) {
-			void backend.close();
-		}
-		this.skillStager.cleanup();
+	private finalizeSuccess(_stopReason: string, usage?: Usage | null): void {
+		const result: AgentResultMessage = {
+			type: "result",
+			subtype: "success",
+			sessionId: this.sessionInfo?.sessionId || "pending",
+			result: this.mapper.getLastAssistantText() || "Codex session completed",
+			isError: false,
+			durationMs: Math.max(Date.now() - this.startTimestampMs, 0),
+			usage: createResultUsage(usage),
+		};
+		this.finalize(result);
 	}
+
+	private finalizeError(message: string, usage?: Usage | null): void {
+		const result: AgentResultMessage = {
+			type: "result",
+			subtype: "error",
+			sessionId: this.sessionInfo?.sessionId || "pending",
+			errors: [message],
+			isError: true,
+			durationMs: Math.max(Date.now() - this.startTimestampMs, 0),
+			usage: createResultUsage(usage),
+		};
+		this.finalize(result, new Error(message));
+	}
+
+	private finalize(result: AgentResultMessage, error?: Error): void {
+		if (this.sessionInfo) this.sessionInfo.isRunning = false;
+		this.emitInitMessage();
+		this.pushMessage(result);
+		this.emit("complete", [...this.messages]);
+		if (error) this.emit("error", error);
+		this.closeLog();
+	}
+
+	private teardownProcess(): void {
+		const child = this.child;
+		if (child && !child.killed) {
+			try {
+				child.kill();
+			} catch {}
+		}
+		this.child = null;
+		this.connection = null;
+	}
+
+	private pushMessage(message: AgentMessage): void {
+		this.messages.push(message);
+		this.log(JSON.stringify(message));
+		this.emit("message", message);
+	}
+
+	private setupLogging(sessionId: string): void {
+		try {
+			const logsDir = resolve(this.config.cyrusHome, "logs");
+			mkdirSync(logsDir, { recursive: true });
+			const stream = createWriteStream(
+				resolve(logsDir, `codex-${sessionId}.jsonl`),
+				{ flags: "a" },
+			);
+			stream.on("error", () => {});
+			this.logStream = stream;
+		} catch {
+			this.logStream = null;
+		}
+	}
+
+	private log(line: string): void {
+		if (!this.logStream) return;
+		try {
+			this.logStream.write(`${line}\n`);
+		} catch {}
+	}
+
+	private closeLog(): void {
+		if (this.logStream) {
+			try {
+				this.logStream.end();
+			} catch {}
+			this.logStream = null;
+		}
+	}
+}
+
+/** Apply ACP `readTextFile` line/limit windowing to a file's contents. */
+export function sliceTextFile(
+	raw: string,
+	line?: number | null,
+	limit?: number | null,
+): string {
+	if (line == null && limit == null) return raw;
+	const lines = raw.split("\n");
+	const start = line != null && line > 0 ? line - 1 : 0;
+	const end = limit != null && limit >= 0 ? start + limit : lines.length;
+	return lines.slice(start, end).join("\n");
 }

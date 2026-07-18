@@ -29,22 +29,6 @@ export default defineConfig({
 				__dirname,
 				"../claude-runner/src/index.ts",
 			),
-			"cyrus-codex-runner": path.resolve(
-				__dirname,
-				"../codex-runner/src/index.ts",
-			),
-			"cyrus-cursor-runner": path.resolve(
-				__dirname,
-				"../cursor-runner/src/index.ts",
-			),
-			"cyrus-gemini-runner": path.resolve(
-				__dirname,
-				"../gemini-runner/src/index.ts",
-			),
-			"cyrus-simple-agent-runner": path.resolve(
-				__dirname,
-				"../simple-agent-runner/src/index.ts",
-			),
 			"cyrus-config-updater": path.resolve(
 				__dirname,
 				"../config-updater/src/index.ts",

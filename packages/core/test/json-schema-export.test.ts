@@ -41,8 +41,10 @@ describe("JSON Schema export", () => {
 				"linearWorkspaces",
 				"claudeDefaultModel",
 				"claudeDefaultFallbackModel",
-				"geminiDefaultModel",
+				"cursorDefaultModel",
+				"cursorDefaultFallbackModel",
 				"codexDefaultModel",
+				"codexDefaultFallbackModel",
 				"defaultRunner",
 				"defaultModel",
 				"defaultFallbackModel",
@@ -50,9 +52,7 @@ describe("JSON Schema export", () => {
 				"linearAllowedTools",
 				"defaultAllowedTools",
 				"defaultDisallowedTools",
-				"slackAllowedTools",
 				"githubAllowedTools",
-				"slackMcpConfigs",
 				"linearMcpConfigs",
 				"githubMcpConfigs",
 				"issueUpdateTrigger",
@@ -72,9 +72,8 @@ describe("JSON Schema export", () => {
 		it("represents defaultRunner as enum", () => {
 			expect(schema.properties.defaultRunner.enum).toEqual([
 				"claude",
-				"gemini",
-				"codex",
 				"cursor",
+				"codex",
 			]);
 		});
 

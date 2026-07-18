@@ -4,7 +4,6 @@ export {
 	buildCyrusPermissionsConfig,
 	type CyrusPermissionsConfig,
 } from "./permissions.js";
-export { SimpleCursorRunner } from "./SimpleCursorRunner.js";
 export {
 	buildCursorSandboxJson,
 	buildSandboxEnv,

@@ -1,5 +1,33 @@
 import type { EdgeWorkerConfig, RunnerType } from "cyrus-core";
 
+/**
+ * Built-in default Cursor model when none is configured. Cursor's SDK resolves
+ * model ids server-side. "composer-2.5" selects Composer 2.5, whose default
+ * speed tier is "Fast" — there is no separate `composer-2.5-fast` slug. Override
+ * via `cursorDefaultModel` / `CYRUS_CURSOR_DEFAULT_MODEL` if your account exposes
+ * a different id (check `cursor-agent --list-models`).
+ */
+const CURSOR_DEFAULT_MODEL = "composer-2.5";
+
+/**
+ * Built-in default Codex model when none is configured. The Codex ACP adapter
+ * resolves model ids against the OpenAI backend; "gpt-5-codex" is Codex's
+ * flagship coding model. Override via `codexDefaultModel` if your account
+ * exposes a different id.
+ */
+const CODEX_DEFAULT_MODEL = "gpt-5-codex";
+
+/**
+ * Resolves the runner type and model for a session.
+ *
+ * This fork supports three runners: Claude (default), Cursor, and Codex. The
+ * runner is chosen from an `[agent=...]` description tag, a
+ * `cursor`/`claude`/`codex` label, or an explicit model whose family implies
+ * the runner; otherwise it falls back to the configured `defaultRunner` (or
+ * Claude). The service also resolves the model + fallback model from labels and
+ * the `[model=...]` description tag, with repository/global defaults as the
+ * baseline.
+ */
 export class RunnerSelectionService {
 	private config: EdgeWorkerConfig;
 
@@ -19,7 +47,8 @@ export class RunnerSelectionService {
 	 *
 	 * Priority:
 	 * 1. Explicit `defaultRunner` in config
-	 * 2. Auto-detect from available API keys (if exactly one runner has keys)
+	 * 2. Auto-detect from available API keys (only Cursor if its key is the sole
+	 *    one configured)
 	 * 3. Fall back to "claude"
 	 */
 	public getDefaultRunner(): RunnerType {
@@ -27,68 +56,60 @@ export class RunnerSelectionService {
 			return this.config.defaultRunner;
 		}
 
-		// Auto-detect from environment: if exactly one runner's API key is set, use it
-		const available: Array<RunnerType> = [];
-		if (process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY) {
-			available.push("claude");
-		}
-		if (process.env.GEMINI_API_KEY) {
-			available.push("gemini");
-		}
-		if (process.env.OPENAI_API_KEY) {
-			available.push("codex");
-		}
-		if (process.env.CURSOR_API_KEY) {
-			available.push("cursor");
+		const hasClaude = Boolean(
+			process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY,
+		);
+		const hasCursor = Boolean(process.env.CURSOR_API_KEY);
+		const hasCodex = Boolean(
+			process.env.CODEX_API_KEY || process.env.OPENAI_API_KEY,
+		);
+
+		// If Cursor is the only runner with credentials configured, default to it.
+		if (hasCursor && !hasClaude && !hasCodex) {
+			return "cursor";
 		}
 
-		if (available.length === 1 && available[0]) {
-			return available[0];
+		// If Codex is the only runner with credentials configured, default to it.
+		if (hasCodex && !hasClaude && !hasCursor) {
+			return "codex";
 		}
 
 		return "claude";
 	}
 
 	/**
-	 * Resolve default model for a given runner from config with sensible built-in defaults.
+	 * Resolve the default model for a runner from config with sensible built-in
+	 * defaults.
 	 */
-	public getDefaultModelForRunner(runnerType: RunnerType): string {
-		if (runnerType === "claude") {
-			return (
-				this.config.claudeDefaultModel || this.config.defaultModel || "opus"
-			);
-		}
-		if (runnerType === "gemini") {
-			return this.config.geminiDefaultModel || "gemini-2.5-pro";
-		}
+	public getDefaultModelForRunner(runnerType: RunnerType = "claude"): string {
 		if (runnerType === "cursor") {
-			return this.config.cursorDefaultModel || "composer-2";
+			return this.config.cursorDefaultModel || CURSOR_DEFAULT_MODEL;
 		}
-		return this.config.codexDefaultModel || "gpt-5.5";
+		if (runnerType === "codex") {
+			return this.config.codexDefaultModel || CODEX_DEFAULT_MODEL;
+		}
+		return this.config.claudeDefaultModel || this.config.defaultModel || "opus";
 	}
 
 	/**
-	 * Resolve default fallback model for a given runner from config with sensible built-in defaults.
-	 * Supports legacy Claude fallback key for backwards compatibility.
+	 * Resolve the default fallback model for a runner from config with sensible
+	 * built-in defaults. Supports the legacy Claude fallback key for backwards
+	 * compatibility.
 	 */
-	public getDefaultFallbackModelForRunner(runnerType: RunnerType): string {
-		if (runnerType === "claude") {
-			return (
-				this.config.claudeDefaultFallbackModel ||
-				this.config.defaultFallbackModel ||
-				"sonnet"
-			);
-		}
-		if (runnerType === "gemini") {
-			return "gemini-2.5-flash";
+	public getDefaultFallbackModelForRunner(
+		runnerType: RunnerType = "claude",
+	): string {
+		if (runnerType === "cursor") {
+			return this.config.cursorDefaultFallbackModel || CURSOR_DEFAULT_MODEL;
 		}
 		if (runnerType === "codex") {
-			return "gpt-5.2-codex";
+			return this.config.codexDefaultFallbackModel || CODEX_DEFAULT_MODEL;
 		}
-		if (runnerType === "cursor") {
-			return this.config.cursorDefaultFallbackModel || "composer-2";
-		}
-		return "gpt-5";
+		return (
+			this.config.claudeDefaultFallbackModel ||
+			this.config.defaultFallbackModel ||
+			"sonnet"
+		);
 	}
 
 	/**
@@ -110,21 +131,41 @@ export class RunnerSelectionService {
 	}
 
 	/**
-	 * Determine runner type and model using labels + issue description tags.
+	 * Determine the runner type, model, and fallback model using labels + issue
+	 * description tags.
 	 *
 	 * Supported description tags:
-	 * - [agent=claude|gemini|codex|cursor]
+	 * - [agent=claude|cursor|codex]
 	 * - [model=<model-name>]
 	 *
-	 * Precedence:
+	 * This is the single source of truth for model precedence. Callers pass any
+	 * configured model sources via `opts`; do NOT re-resolve models downstream.
+	 *
+	 * Explicit-model precedence (highest first):
+	 * 1. `[model=…]` description tag
+	 * 2. Model label (e.g. `opus`, `composer-1`, `gpt-5`)
+	 * 3. `opts.labelPromptModel` — matched label-prompt config's `model`
+	 * 4. `opts.repositoryModel` — repository config's `model`
+	 *
+	 * Runner precedence (highest first):
 	 * 1. Description tags override labels
-	 * 2. Agent labels override model labels
-	 * 3. Model labels can infer agent type
-	 * 4. Defaults to claude runner
+	 * 2. Agent (`cursor`/`claude`/`codex`) labels override model labels
+	 * 3. Model labels / explicit models can infer the agent type (e.g.
+	 *    `composer-*` → cursor, `gpt-*`/`o3`/`*codex*` → codex)
+	 * 4. Falls back to the configured default runner
+	 *
+	 * An explicit model whose inferred runner family conflicts with the resolved
+	 * runner is dropped (the runner falls back to its default model). The same
+	 * guard applies to `opts.repositoryFallbackModel`.
 	 */
 	public determineRunnerSelection(
 		labels: string[],
 		issueDescription?: string,
+		opts?: {
+			labelPromptModel?: string;
+			repositoryModel?: string;
+			repositoryFallbackModel?: string;
+		},
 	): {
 		runnerType: RunnerType;
 		modelOverride?: string;
@@ -141,26 +182,21 @@ export class RunnerSelectionService {
 			"model",
 		);
 
-		const defaultModelByRunner: Record<RunnerType, string> = {
-			claude: this.getDefaultModelForRunner("claude"),
-			gemini: this.getDefaultModelForRunner("gemini"),
-			codex: this.getDefaultModelForRunner("codex"),
-			cursor: this.getDefaultModelForRunner("cursor"),
-		};
-		const defaultFallbackByRunner: Record<RunnerType, string> = {
-			claude: this.getDefaultFallbackModelForRunner("claude"),
-			gemini: this.getDefaultFallbackModelForRunner("gemini"),
-			codex: this.getDefaultFallbackModelForRunner("codex"),
-			cursor: this.getDefaultFallbackModelForRunner("cursor"),
-		};
+		const isCursorModel = (model: string): boolean =>
+			/^composer[a-z0-9.-]*$/i.test(model);
 
+		// Codex/OpenAI model families: gpt-*, the o-series reasoning models
+		// (o1/o3/o4-mini…), and anything carrying the `codex` marker.
 		const isCodexModel = (model: string): boolean =>
-			/gpt-[a-z0-9.-]*codex$/i.test(model) || /^gpt-[a-z0-9.-]+$/i.test(model);
+			/^gpt[-0-9]/i.test(model) ||
+			/^o[0-9]/i.test(model) ||
+			/codex/i.test(model);
 
 		const inferRunnerFromModel = (model?: string): RunnerType | undefined => {
 			if (!model) return undefined;
 			const normalizedModel = model.toLowerCase();
-			if (normalizedModel.startsWith("gemini")) return "gemini";
+			if (isCursorModel(normalizedModel)) return "cursor";
+			if (isCodexModel(normalizedModel)) return "codex";
 			if (
 				normalizedModel === "fable" ||
 				normalizedModel === "opus" ||
@@ -170,7 +206,6 @@ export class RunnerSelectionService {
 			) {
 				return "claude";
 			}
-			if (isCodexModel(normalizedModel)) return "codex";
 			return undefined;
 		};
 
@@ -179,92 +214,43 @@ export class RunnerSelectionService {
 			runnerType: RunnerType,
 		): string | undefined => {
 			const normalizedModel = model.toLowerCase();
-			if (runnerType === "claude") {
-				if (normalizedModel === "fable") return "opus";
-				if (normalizedModel === "opus") return "sonnet";
-				if (normalizedModel === "sonnet") return "haiku";
-				// Keep haiku fallback on sonnet for retry behavior
-				if (normalizedModel === "haiku") return "sonnet";
-				return "sonnet";
+			if (runnerType === "cursor") {
+				return this.getDefaultFallbackModelForRunner("cursor");
 			}
-			if (runnerType === "gemini") {
-				if (
-					normalizedModel === "gemini-3" ||
-					normalizedModel === "gemini-3-pro" ||
-					normalizedModel === "gemini-3-pro-preview"
-				) {
-					return "gemini-2.5-pro";
-				}
-				if (
-					normalizedModel === "gemini-2.5-pro" ||
-					normalizedModel === "gemini-2.5"
-				) {
-					return "gemini-2.5-flash";
-				}
-				if (normalizedModel === "gemini-2.5-flash") {
-					return "gemini-2.5-flash-lite";
-				}
-				if (normalizedModel === "gemini-2.5-flash-lite") {
-					return "gemini-2.5-flash-lite";
-				}
-				return "gemini-2.5-flash";
+			if (runnerType === "codex") {
+				return this.getDefaultFallbackModelForRunner("codex");
 			}
-			if (isCodexModel(normalizedModel)) {
-				return "gpt-5.2-codex";
-			}
-			return "gpt-5";
+			if (normalizedModel === "fable") return "opus";
+			if (normalizedModel === "opus") return "sonnet";
+			if (normalizedModel === "sonnet") return "haiku";
+			// Keep haiku fallback on sonnet for retry behavior
+			if (normalizedModel === "haiku") return "sonnet";
+			return "sonnet";
 		};
 
 		const resolveAgentFromLabel = (
 			lowercaseLabels: string[],
 		): RunnerType | undefined => {
-			if (lowercaseLabels.includes("cursor")) {
-				return "cursor";
-			}
-			if (
-				lowercaseLabels.includes("codex") ||
-				lowercaseLabels.includes("openai")
-			) {
-				return "codex";
-			}
-			if (lowercaseLabels.includes("gemini")) {
-				return "gemini";
-			}
-			if (lowercaseLabels.includes("claude")) {
-				return "claude";
-			}
+			if (lowercaseLabels.includes("cursor")) return "cursor";
+			if (lowercaseLabels.includes("codex")) return "codex";
+			if (lowercaseLabels.includes("claude")) return "claude";
 			return undefined;
 		};
 
 		const resolveModelFromLabel = (
 			lowercaseLabels: string[],
 		): string | undefined => {
-			const codexModelLabel = lowercaseLabels.find((label) =>
-				isCodexModel(label),
+			const cursorModelLabel = lowercaseLabels.find((label) =>
+				isCursorModel(label),
 			);
-			if (codexModelLabel) {
-				return codexModelLabel;
-			}
+			if (cursorModelLabel) return cursorModelLabel;
 
-			if (
-				lowercaseLabels.includes("gemini-2.5-pro") ||
-				lowercaseLabels.includes("gemini-2.5")
-			) {
-				return "gemini-2.5-pro";
-			}
-			if (lowercaseLabels.includes("gemini-2.5-flash")) {
-				return "gemini-2.5-flash";
-			}
-			if (lowercaseLabels.includes("gemini-2.5-flash-lite")) {
-				return "gemini-2.5-flash-lite";
-			}
-			if (
-				lowercaseLabels.includes("gemini-3") ||
-				lowercaseLabels.includes("gemini-3-pro") ||
-				lowercaseLabels.includes("gemini-3-pro-preview")
-			) {
-				return "gemini-3-pro-preview";
-			}
+			// Exclude the bare `codex` agent-selector label — it routes the runner,
+			// it is not a model id (unlike `gpt-5-codex`, which is).
+			const codexModelLabel = lowercaseLabels.find(
+				(label) => label !== "codex" && isCodexModel(label),
+			);
+			if (codexModelLabel) return codexModelLabel;
 
 			if (lowercaseLabels.includes("fable")) return "fable";
 			if (lowercaseLabels.includes("opus")) return "opus";
@@ -275,21 +261,23 @@ export class RunnerSelectionService {
 		};
 
 		const agentFromDescription = descriptionAgentTagRaw?.toLowerCase();
-		const resolvedAgentFromDescription =
+		const resolvedAgentFromDescription: RunnerType | undefined =
 			agentFromDescription === "cursor"
 				? "cursor"
-				: agentFromDescription === "codex" || agentFromDescription === "openai"
+				: agentFromDescription === "codex"
 					? "codex"
-					: agentFromDescription === "gemini"
-						? "gemini"
-						: agentFromDescription === "claude"
-							? "claude"
-							: undefined;
+					: agentFromDescription === "claude"
+						? "claude"
+						: undefined;
 		const resolvedAgentFromLabels = resolveAgentFromLabel(normalizedLabels);
 
 		const modelFromDescription = descriptionModelTagRaw;
 		const modelFromLabels = resolveModelFromLabel(normalizedLabels);
-		const explicitModel = modelFromDescription || modelFromLabels;
+		const explicitModel =
+			modelFromDescription ||
+			modelFromLabels ||
+			opts?.labelPromptModel ||
+			opts?.repositoryModel;
 
 		const runnerType: RunnerType =
 			resolvedAgentFromDescription ||
@@ -297,7 +285,8 @@ export class RunnerSelectionService {
 			inferRunnerFromModel(explicitModel) ||
 			this.getDefaultRunner();
 
-		// If an explicit agent conflicts with model's implied runner, keep the agent and reset model.
+		// If an explicit agent conflicts with the model's implied runner, keep the
+		// agent and drop the (mismatched) model so we fall back to the runner default.
 		const modelRunner = inferRunnerFromModel(explicitModel);
 		let modelOverride = explicitModel;
 		if (modelOverride && modelRunner && modelRunner !== runnerType) {
@@ -305,17 +294,22 @@ export class RunnerSelectionService {
 		}
 
 		const resolvedModelOverride =
-			modelOverride ||
-			defaultModelByRunner[runnerType] ||
-			this.getDefaultModelForRunner(runnerType);
+			modelOverride || this.getDefaultModelForRunner(runnerType);
 
-		let fallbackModelOverride = inferFallbackModel(
-			resolvedModelOverride,
-			runnerType,
-		);
-		if (!fallbackModelOverride) {
-			fallbackModelOverride = defaultFallbackByRunner[runnerType];
+		// Repository-configured fallback model, honored only when its inferred
+		// family matches the resolved runner (mirrors the primary-model guard).
+		let repositoryFallbackOverride = opts?.repositoryFallbackModel;
+		if (repositoryFallbackOverride) {
+			const fallbackRunner = inferRunnerFromModel(repositoryFallbackOverride);
+			if (fallbackRunner && fallbackRunner !== runnerType) {
+				repositoryFallbackOverride = undefined;
+			}
 		}
+
+		const fallbackModelOverride =
+			repositoryFallbackOverride ||
+			inferFallbackModel(resolvedModelOverride, runnerType) ||
+			this.getDefaultFallbackModelForRunner(runnerType);
 
 		return {
 			runnerType,

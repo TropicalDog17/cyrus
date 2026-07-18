@@ -1,19 +1,17 @@
 import { EventEmitter } from "node:events";
-import type {
-	APIAssistantMessage,
-	APIUserMessage,
-	SDKAssistantMessage,
-	SDKMessage,
-	SDKRateLimitEvent,
-	SDKResultMessage,
-	SDKStatusMessage,
-	SDKSystemMessage,
-	SDKUserMessage,
-} from "cyrus-claude-runner";
 import {
+	type AgentAssistantMessage,
+	type AgentCompactBoundaryMessage,
+	type AgentMessage,
 	type AgentPendingWork,
+	type AgentRateLimitMessage,
+	type AgentResultMessage,
 	AgentSessionStatus,
 	AgentSessionType,
+	type AgentStatusMessage,
+	type AgentSystemInitMessage,
+	type AgentUsage,
+	type AgentUserMessage,
 	type CyrusAgentSession,
 	type CyrusAgentSessionEntry,
 	createLogger,
@@ -26,22 +24,47 @@ import {
 	type Workspace,
 } from "cyrus-core";
 
+import type { Activity, ActivitySignal } from "./activity/Activity.js";
+import { ActivityMapper, normalizeTool } from "./activity/ActivityMapper.js";
+import type { MapContext } from "./activity/MapContext.js";
 import {
 	formatPendingWorkThought,
 	formatScheduleWakeupResponse,
 	tryParseScheduleWakeupInput,
 } from "./PendingWorkFormatter.js";
-import type {
-	ActivityPostOptions,
-	ActivitySignal,
-	IActivitySink,
-} from "./sinks/index.js";
+import type { IActivitySink } from "./sinks/index.js";
+import {
+	addUsage,
+	emptyUsage,
+	formatUsageFooter,
+	subtractUsage,
+} from "./usage-footer.js";
+
+/**
+ * Payload for {@link AgentSessionManagerEvents.sessionComplete}. Raw session facts; EdgeWorker
+ * enriches (repositoryId → repo name) before re-emitting on its own bus for the loop adapter.
+ */
+export interface SessionCompleteEvent {
+	sessionId: string;
+	/** Internal issue id (issueContext.issueId, falling back to the deprecated issueId). */
+	issueId?: string;
+	/** Human issue identifier, e.g. `DEV-123` — what the loop's run_id is keyed on. */
+	issueIdentifier?: string;
+	/** Primary repository id for the session (repositories[0]). */
+	repositoryId?: string;
+	/** The session's worktree path. */
+	worktree: string;
+	/** Resolved terminal status. */
+	status: AgentSessionStatus;
+}
 
 /**
  * Events emitted by AgentSessionManager
  */
-// biome-ignore lint/complexity/noBannedTypes: Empty events type (events removed in CYPACK-996 skill refactor)
-export type AgentSessionManagerEvents = {};
+export type AgentSessionManagerEvents = {
+	/** Fired once when a session reaches a terminal state via the normal (non-user-stop) path. */
+	sessionComplete: (payload: SessionCompleteEvent) => void;
+};
 
 /**
  * Type-safe event emitter interface for AgentSessionManager
@@ -55,6 +78,11 @@ export declare interface AgentSessionManager {
 		event: K,
 		...args: Parameters<AgentSessionManagerEvents[K]>
 	): boolean;
+}
+
+/** Render a token count for humans: 210418 -> "210k", 840 -> "840". */
+function formatTokenCount(tokens: number): string {
+	return tokens < 1000 ? String(tokens) : `${Math.round(tokens / 1000)}k`;
 }
 
 /**
@@ -76,11 +104,15 @@ export class AgentSessionManager extends EventEmitter {
 	private lastAssistantBodyBySession: Map<string, string> = new Map(); // Buffer: last assistant text per session for posting as response on result
 	private lastAssistantBodyIsToolInputBySession: Map<string, boolean> =
 		new Map(); // Whether the buffered body above is a tool_use input JSON (no trailing assistant text) — guards against posting raw JSON as the "response" (CYPACK-1177)
-	private bufferedAssistantEntryBySession: Map<string, CyrusAgentSessionEntry> =
-		new Map(); // One-behind buffer: holds last assistant entry until next message or result
+	private bufferedAssistantEntryBySession: Map<
+		string,
+		{ message: AgentAssistantMessage; entry: CyrusAgentSessionEntry }
+	> = new Map(); // One-behind buffer: holds last assistant message+entry until next message or result
 	private taskSubjectsByToolUseId: Map<string, string> = new Map(); // Cache TaskCreate subjects by toolUseId until result arrives with task ID
 	private taskSubjectsById: Map<string, string> = new Map(); // Cache task subjects by task ID (e.g., "1" → "Fix login bug")
 	private activeStatusActivitiesBySession: Map<string, string> = new Map(); // Maps session ID to active compacting status activity ID
+	/** Sessions whose current compaction was already reported by a compact_boundary. */
+	private compactBoundaryPostedBySession: Set<string> = new Set();
 	private stopRequestedSessions: Set<string> = new Set(); // Sessions explicitly stopped by user signal
 	// Per-session serialization queue for handleClaudeMessage. The EdgeWorker's
 	// onMessage callback is fire-and-forget, so without serialization the async
@@ -89,12 +121,26 @@ export class AgentSessionManager extends EventEmitter {
 	// deferred tools like ToolSearch, where a tool_use and its tool_result can
 	// arrive back-to-back in the same microtask batch).
 	private messageProcessingQueues: Map<string, Promise<void>> = new Map();
+	// Last `result.usage` seen in the CURRENT runner process, per session. Since
+	// `result.usage` is cumulative-per-process (see agent-docs/dev-gotchas.md),
+	// the delta against this baseline is the true per-turn increment. Reset on
+	// every `system/init` (i.e. every new process) via
+	// updateAgentSessionWithRunnerSessionId.
+	private lastRunnerCumulativeUsage: Map<string, AgentUsage> = new Map();
+	/** When true, append a cumulative usage/cost footer to final responses. */
+	private readonly showUsageFooter: boolean;
 	private getParentSessionId?: (childSessionId: string) => string | undefined;
 	private resumeParentSession?: (
 		parentSessionId: string,
 		prompt: string,
 		childSessionId: string,
 	) => Promise<void>;
+	/**
+	 * The single per-tool render table. Pure: given a neutral message + a
+	 * MapContext snapshot of this session's state, returns the activities to
+	 * post. All the state it reads is written by this manager before each map().
+	 */
+	private readonly mapper = new ActivityMapper();
 
 	constructor(
 		getParentSessionId?: (childSessionId: string) => string | undefined,
@@ -104,11 +150,13 @@ export class AgentSessionManager extends EventEmitter {
 			childSessionId: string,
 		) => Promise<void>,
 		logger?: ILogger,
+		showUsageFooter = true,
 	) {
 		super();
 		this.logger = logger ?? createLogger({ component: "AgentSessionManager" });
 		this.getParentSessionId = getParentSessionId;
 		this.resumeParentSession = resumeParentSession;
+		this.showUsageFooter = showUsageFooter;
 	}
 
 	/**
@@ -146,7 +194,7 @@ export class AgentSessionManager extends EventEmitter {
 	 * @param issueId - Issue/PR identifier
 	 * @param issueMinimal - Minimal issue data
 	 * @param workspace - Workspace configuration
-	 * @param platform - Source platform ("linear", "github", "gitlab", "slack"). Defaults to "linear".
+	 * @param platform - Source platform ("linear", "github", "slack"). Defaults to "linear".
 	 *                   Only "linear" sessions will have activities streamed to Linear.
 	 * @param repositories - Repository contexts for the session (defaults to empty array)
 	 */
@@ -155,7 +203,7 @@ export class AgentSessionManager extends EventEmitter {
 		issueId: string,
 		issueMinimal: IssueMinimal,
 		workspace: Workspace,
-		platform: "linear" | "github" | "gitlab" | "slack" = "linear",
+		platform: "linear" | "github" | "slack" = "linear",
 		repositories: RepositoryContext[] = [],
 	): CyrusAgentSession {
 		const log = this.logger.withContext({
@@ -229,12 +277,13 @@ export class AgentSessionManager extends EventEmitter {
 	}
 
 	/**
-	 * Update Agent Session with session ID from system initialization
-	 * Automatically detects whether it's Claude or Gemini based on the runner
+	 * Update Agent Session with session ID from system initialization.
+	 * Records the session id against the runner that produced it (Claude or
+	 * Cursor) so resumes stick with the same harness.
 	 */
 	updateAgentSessionWithRunnerSessionId(
 		sessionId: string,
-		claudeSystemMessage: SDKSystemMessage,
+		initMessage: AgentSystemInitMessage,
 	): void {
 		const linearSession = this.sessions.get(sessionId);
 		if (!linearSession) {
@@ -243,35 +292,27 @@ export class AgentSessionManager extends EventEmitter {
 			return;
 		}
 
-		// Determine which runner is being used
-		const runner = linearSession.agentRunner;
-		const runnerType =
-			runner?.constructor.name === "GeminiRunner"
-				? "gemini"
-				: runner?.constructor.name === "CodexRunner"
-					? "codex"
-					: runner?.constructor.name === "CursorRunner"
-						? "cursor"
-						: "claude";
-
-		// Update the appropriate session ID based on runner type
-		if (runnerType === "gemini") {
-			linearSession.geminiSessionId = claudeSystemMessage.session_id;
-		} else if (runnerType === "codex") {
-			linearSession.codexSessionId = claudeSystemMessage.session_id;
-		} else if (runnerType === "cursor") {
-			linearSession.cursorSessionId = claudeSystemMessage.session_id;
+		if (linearSession.agentRunner?.provider === "cursor") {
+			linearSession.cursorSessionId = initMessage.sessionId;
+		} else if (linearSession.agentRunner?.provider === "codex") {
+			linearSession.codexSessionId = initMessage.sessionId;
 		} else {
-			linearSession.claudeSessionId = claudeSystemMessage.session_id;
+			linearSession.claudeSessionId = initMessage.sessionId;
 		}
+
+		// A new `system/init` means a fresh runner process, whose `result.usage`
+		// counts up from zero again. Drop the per-process baseline so the next
+		// result deltas from zero (a cold resume) rather than from the previous
+		// process's cumulative total. See agent-docs/dev-gotchas.md.
+		this.lastRunnerCumulativeUsage.delete(sessionId);
 
 		linearSession.updatedAt = Date.now();
 		linearSession.metadata = {
 			...linearSession.metadata, // Preserve existing metadata
-			model: claudeSystemMessage.model,
-			tools: claudeSystemMessage.tools,
-			permissionMode: claudeSystemMessage.permissionMode,
-			apiKeySource: claudeSystemMessage.apiKeySource,
+			model: initMessage.model,
+			tools: initMessage.tools,
+			permissionMode: initMessage.permissionMode,
+			apiKeySource: initMessage.apiKeySource,
 		};
 	}
 
@@ -280,50 +321,33 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	private async createSessionEntry(
 		sessionId: string,
-		sdkMessage: SDKUserMessage | SDKAssistantMessage,
+		message: AgentUserMessage | AgentAssistantMessage,
 	): Promise<CyrusAgentSessionEntry> {
 		// Extract tool info if this is an assistant message
 		const toolInfo =
-			sdkMessage.type === "assistant" ? this.extractToolInfo(sdkMessage) : null;
+			message.type === "assistant" ? this.extractToolInfo(message) : null;
 		// Extract tool_use_id and error status if this is a user message with tool_result
 		const toolResultInfo =
-			sdkMessage.type === "user"
-				? this.extractToolResultInfo(sdkMessage)
-				: null;
-		// Extract SDK error from assistant messages (e.g., rate_limit, billing_error)
-		// SDKAssistantMessage has optional `error?: SDKAssistantMessageError` field
-		// See: @anthropic-ai/claude-agent-sdk sdk.d.ts lines 1013-1022
-		// Evidence from ~/.cyrus/logs/CYGROW-348 session jsonl shows assistant messages with
-		// "error":"rate_limit" field when usage limits are hit
-		const sdkError =
-			sdkMessage.type === "assistant" ? sdkMessage.error : undefined;
+			message.type === "user" ? this.extractToolResultInfo(message) : null;
+		// Extract provider error from assistant messages (e.g., rate_limit,
+		// billing_error). The neutral AgentAssistantMessage carries the optional
+		// `error?: SDKAssistantMessageError` tag through from the runner.
+		const sdkError = message.type === "assistant" ? message.error : undefined;
 
-		// Determine which runner is being used
-		const session = this.sessions.get(sessionId);
-		const runner = session?.agentRunner;
-		const runnerType =
-			runner?.constructor.name === "GeminiRunner"
-				? "gemini"
-				: runner?.constructor.name === "CodexRunner"
-					? "codex"
-					: runner?.constructor.name === "CursorRunner"
-						? "cursor"
-						: "claude";
+		// Record the runner session id against the runner that produced it.
+		const runner = this.sessions.get(sessionId)?.agentRunner;
 
 		const sessionEntry: CyrusAgentSessionEntry = {
-			// Set the appropriate session ID based on runner type
-			...(runnerType === "gemini"
-				? { geminiSessionId: sdkMessage.session_id }
-				: runnerType === "codex"
-					? { codexSessionId: sdkMessage.session_id }
-					: runnerType === "cursor"
-						? { cursorSessionId: sdkMessage.session_id }
-						: { claudeSessionId: sdkMessage.session_id }),
-			type: sdkMessage.type,
-			content: this.extractContent(sdkMessage),
+			...(runner?.provider === "cursor"
+				? { cursorSessionId: message.sessionId }
+				: runner?.provider === "codex"
+					? { codexSessionId: message.sessionId }
+					: { claudeSessionId: message.sessionId }),
+			type: message.type,
+			content: this.extractContent(message),
 			metadata: {
 				timestamp: Date.now(),
-				parentToolUseId: sdkMessage.parent_tool_use_id || undefined,
+				parentToolUseId: message.parentToolUseId || undefined,
 				...(toolInfo && {
 					toolUseId: toolInfo.id,
 					toolName: toolInfo.name,
@@ -347,7 +371,7 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	async completeSession(
 		sessionId: string,
-		resultMessage: SDKResultMessage,
+		resultMessage: AgentResultMessage,
 	): Promise<void> {
 		const session = this.sessions.get(sessionId);
 		if (!session) {
@@ -368,10 +392,30 @@ export class AgentSessionManager extends EventEmitter {
 				? AgentSessionStatus.Complete
 				: AgentSessionStatus.Error;
 
-		// Update session status and metadata
+		// Accumulate per-session usage. `result.usage` is cumulative *within a
+		// runner process* (see agent-docs/dev-gotchas.md), so the true per-turn
+		// increment is the delta against the last result seen in this process.
+		// The baseline is cleared on every `system/init`, so a cold resume's
+		// first result deltas from zero while a warm session's later results
+		// delta from the prior turn.
+		const turnUsage = resultMessage.usage;
+		const baseline = this.lastRunnerCumulativeUsage.get(sessionId);
+		const delta = baseline ? subtractUsage(turnUsage, baseline) : turnUsage;
+		this.lastRunnerCumulativeUsage.set(sessionId, turnUsage);
+		const cumulativeUsage = addUsage(
+			session.metadata?.cumulativeUsage ?? emptyUsage(),
+			delta,
+		);
+		const turnCount = (session.metadata?.turnCount ?? 0) + 1;
+
+		// Update session status and metadata. `usage`/`totalCostUsd` stay as the
+		// raw last-`result` value; `cumulativeUsage`/`turnCount` carry the
+		// accumulated totals.
 		await this.updateSessionStatus(sessionId, status, {
-			totalCostUsd: resultMessage.total_cost_usd,
+			totalCostUsd: resultMessage.usage.costUsd,
 			usage: resultMessage.usage,
+			cumulativeUsage,
+			turnCount,
 		});
 
 		if (wasStopRequested) {
@@ -443,7 +487,7 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	private async handleChildSessionCompletion(
 		sessionId: string,
-		resultMessage: SDKResultMessage,
+		resultMessage: AgentResultMessage,
 	): Promise<void> {
 		const log = this.sessionLog(sessionId);
 		if (!this.getParentSessionId || !this.resumeParentSession) {
@@ -492,7 +536,7 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	async handleClaudeMessage(
 		sessionId: string,
-		message: SDKMessage,
+		message: AgentMessage,
 	): Promise<void> {
 		const prev =
 			this.messageProcessingQueues.get(sessionId) ?? Promise.resolve();
@@ -513,7 +557,7 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	private async processClaudeMessage(
 		sessionId: string,
-		message: SDKMessage,
+		message: AgentMessage,
 	): Promise<void> {
 		const log = this.sessionLog(sessionId);
 		try {
@@ -523,35 +567,27 @@ export class AgentSessionManager extends EventEmitter {
 						this.updateAgentSessionWithRunnerSessionId(sessionId, message);
 
 						// Post model notification
-						const systemMessage = message as SDKSystemMessage;
-						if (systemMessage.model) {
-							await this.postModelNotificationThought(
-								sessionId,
-								systemMessage.model,
-							);
+						if (message.model) {
+							await this.postModelNotificationThought(sessionId, message.model);
 						}
 					} else if (message.subtype === "status") {
 						// Handle status updates (compacting, etc.)
-						await this.handleStatusMessage(
-							sessionId,
-							message as SDKStatusMessage,
-						);
+						await this.handleStatusMessage(sessionId, message);
+					} else if (message.subtype === "compact_boundary") {
+						await this.handleCompactBoundaryMessage(sessionId, message);
 					}
 					break;
 
 				case "user": {
-					const userEntry = await this.createSessionEntry(
-						sessionId,
-						message as SDKUserMessage,
-					);
-					await this.syncEntryToActivitySink(userEntry, sessionId);
+					const userEntry = await this.createSessionEntry(sessionId, message);
+					await this.renderAndPost(sessionId, message, userEntry);
 					break;
 				}
 
 				case "assistant": {
 					const assistantEntry = await this.createSessionEntry(
 						sessionId,
-						message as SDKAssistantMessage,
+						message,
 					);
 					// Buffer the text content so addResultEntry can post it as the response.
 					// Track whether this body is a tool_use input (JSON) rather than real
@@ -571,7 +607,7 @@ export class AgentSessionManager extends EventEmitter {
 						// Tool-use message: flush any buffered text first (preserves ordering),
 						// then post immediately for real-time "in progress" display
 						await this.flushBufferedAssistant(sessionId);
-						await this.syncEntryToActivitySink(assistantEntry, sessionId);
+						await this.renderAndPost(sessionId, message, assistantEntry);
 					} else {
 						// Text-only message: buffer it so the LAST one can be posted as "response"
 						// Flush any previous buffered text first (posts as thought)
@@ -581,10 +617,10 @@ export class AgentSessionManager extends EventEmitter {
 						// between activities (e.g. between "Using model: ..." and the
 						// first real assistant turn).
 						if (assistantEntry.content?.trim()) {
-							this.bufferedAssistantEntryBySession.set(
-								sessionId,
-								assistantEntry,
-							);
+							this.bufferedAssistantEntryBySession.set(sessionId, {
+								message,
+								entry: assistantEntry,
+							});
 						}
 					}
 					break;
@@ -594,15 +630,17 @@ export class AgentSessionManager extends EventEmitter {
 					// Result arrived: discard buffered entry (addResultEntry uses lastAssistantBodyBySession
 					// to post the content as a response activity)
 					this.bufferedAssistantEntryBySession.delete(sessionId);
-					await this.completeSession(sessionId, message as SDKResultMessage);
+					await this.completeSession(sessionId, message);
 					break;
 
-				case "rate_limit_event":
-					this.handleRateLimitEvent(sessionId, message as SDKRateLimitEvent);
+				case "rate_limit":
+					this.handleRateLimitEvent(sessionId, message);
 					break;
 
 				default:
-					log.warn(`Unknown message type: ${(message as any).type}`);
+					log.warn(
+						`Unknown message type: ${(message as { type: string }).type}`,
+					);
 			}
 		} catch (error) {
 			log.error(`Error handling message:`, error);
@@ -622,8 +660,8 @@ export class AgentSessionManager extends EventEmitter {
 		this.bufferedAssistantEntryBySession.delete(sessionId);
 		// Defensive guard: never post a blank thought — it would appear as an
 		// empty line between real activities in Linear.
-		if (!buffered.content?.trim()) return;
-		await this.syncEntryToActivitySink(buffered, sessionId);
+		if (!buffered.entry.content?.trim()) return;
+		await this.renderAndPost(sessionId, buffered.message, buffered.entry);
 	}
 
 	/**
@@ -631,10 +669,10 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	private handleRateLimitEvent(
 		sessionId: string,
-		message: SDKRateLimitEvent,
+		message: AgentRateLimitMessage,
 	): void {
 		const log = this.sessionLog(sessionId);
-		const info = message.rate_limit_info;
+		const info = message.info;
 
 		if (info.status === "rejected") {
 			const resetsAt = info.resetsAt
@@ -649,6 +687,17 @@ export class AgentSessionManager extends EventEmitter {
 			);
 		}
 		// "allowed" status is a no-op — fires frequently and provides no actionable information
+	}
+
+	/**
+	 * Mark a session active again after a message is appended to its live stream.
+	 *
+	 * A completed turn sets the session to `Complete` even when the runner stays
+	 * warm and idle. Without this, an appended follow-up would keep working under
+	 * a `Complete` session, which `getActiveSessionsByIssueId` consumers skip.
+	 */
+	async markSessionActive(sessionId: string): Promise<void> {
+		await this.updateSessionStatus(sessionId, AgentSessionStatus.Active);
 	}
 
 	/**
@@ -677,20 +726,8 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	private async addResultEntry(
 		sessionId: string,
-		resultMessage: SDKResultMessage,
+		resultMessage: AgentResultMessage,
 	): Promise<void> {
-		// Determine which runner is being used
-		const session = this.sessions.get(sessionId);
-		const runner = session?.agentRunner;
-		const runnerType =
-			runner?.constructor.name === "GeminiRunner"
-				? "gemini"
-				: runner?.constructor.name === "CodexRunner"
-					? "codex"
-					: runner?.constructor.name === "CursorRunner"
-						? "cursor"
-						: "claude";
-
 		// For error results, content may be in errors[] rather than result.
 		const resultText =
 			"result" in resultMessage && typeof resultMessage.result === "string"
@@ -711,7 +748,7 @@ export class AgentSessionManager extends EventEmitter {
 		this.lastAssistantBodyIsToolInputBySession.delete(sessionId);
 
 		let content: string;
-		if (resultMessage.is_error) {
+		if (resultMessage.isError) {
 			content = (
 				"errors" in resultMessage &&
 				Array.isArray(resultMessage.errors) &&
@@ -745,162 +782,141 @@ export class AgentSessionManager extends EventEmitter {
 			return;
 		}
 
+		// Append the cumulative usage/cost footer to successful responses. Never
+		// on errors; skipped when every counter is zero or the gate is off.
+		if (this.showUsageFooter && !resultMessage.isError) {
+			const cumulativeUsage =
+				this.sessions.get(sessionId)?.metadata?.cumulativeUsage;
+			const footer = cumulativeUsage
+				? formatUsageFooter(cumulativeUsage)
+				: null;
+			if (footer) {
+				content = `${content}\n\n---\n${footer}`;
+			}
+		}
+
+		const runner = this.sessions.get(sessionId)?.agentRunner;
 		const resultEntry: CyrusAgentSessionEntry = {
-			// Set the appropriate session ID based on runner type
-			...(runnerType === "gemini"
-				? { geminiSessionId: resultMessage.session_id }
-				: runnerType === "codex"
-					? { codexSessionId: resultMessage.session_id }
-					: runnerType === "cursor"
-						? { cursorSessionId: resultMessage.session_id }
-						: { claudeSessionId: resultMessage.session_id }),
+			...(runner?.provider === "cursor"
+				? { cursorSessionId: resultMessage.sessionId }
+				: runner?.provider === "codex"
+					? { codexSessionId: resultMessage.sessionId }
+					: { claudeSessionId: resultMessage.sessionId }),
 			type: "result",
 			content,
 			metadata: {
 				timestamp: Date.now(),
-				durationMs: resultMessage.duration_ms,
-				isError: resultMessage.is_error,
+				durationMs: resultMessage.durationMs,
+				isError: resultMessage.isError,
 			},
 		};
 
-		// DON'T store locally - syncEntryToActivitySink will do it
-		// Sync to Linear
-		await this.syncEntryToActivitySink(resultEntry, sessionId);
+		// Store the entry, then post it as a response (or error) through the sink.
+		this.storeEntry(sessionId, resultEntry);
+		const activity: Activity = resultMessage.isError
+			? { type: "error", body: content }
+			: { type: "response", body: content };
+		const activityId = await this.postToSink(sessionId, activity, "result");
+		if (activityId) {
+			resultEntry.linearAgentActivityId = activityId;
+			const log = this.sessionLog(sessionId);
+			log.info(`Result message emitted to Linear (activity ${activityId})`);
+		}
 	}
 
 	/**
-	 * Extract content from Claude message
+	 * Extract flattened content from a neutral agent message. The runner's
+	 * projection layer already flattened tool_result blocks to strings (incl.
+	 * the ToolSearch `tool_reference` names), so this just joins the block
+	 * texts: text/thinking surface their prose, tool_use serializes its input,
+	 * tool_result emits its already-flattened content.
 	 */
 	private extractContent(
-		sdkMessage: SDKUserMessage | SDKAssistantMessage,
+		message: AgentUserMessage | AgentAssistantMessage,
 	): string {
-		const message =
-			sdkMessage.type === "user"
-				? (sdkMessage.message as APIUserMessage)
-				: (sdkMessage.message as APIAssistantMessage);
-
-		if (typeof message.content === "string") {
-			return message.content;
-		}
-
-		if (Array.isArray(message.content)) {
-			return message.content
-				.map((block) => {
-					if (block.type === "text") {
-						return block.text;
-					} else if (block.type === "tool_use") {
-						// For tool use blocks, return the input as JSON string
-						return JSON.stringify(block.input, null, 2);
-					} else if (block.type === "tool_result") {
-						// For tool_result blocks, extract just the text content
-						// Also store the error status in metadata if needed
-						if ("is_error" in block && block.is_error) {
-							// Mark this as an error result - we'll handle this elsewhere
-						}
-						if (typeof block.content === "string") {
-							return block.content;
-						}
-						if (Array.isArray(block.content)) {
-							return block.content
-								.map((contentBlock: any) => {
-									if (contentBlock.type === "text") {
-										return contentBlock.text;
-									}
-									// ToolSearch emits tool_reference blocks; preserve the tool name
-									// so the formatter can render "Loaded tools: `X`, `Y`".
-									if (
-										contentBlock.type === "tool_reference" &&
-										contentBlock.tool_name
-									) {
-										return contentBlock.tool_name;
-									}
-									return "";
-								})
-								.filter(Boolean)
-								.join("\n");
-						}
-						return "";
-					}
-					return "";
-				})
-				.filter(Boolean)
-				.join("\n");
-		}
-
-		return "";
+		return message.content
+			.map((block) => {
+				if (block.type === "text") {
+					return block.text;
+				}
+				if (block.type === "thinking") {
+					// Surface reasoning as text instead of dropping it (Cursor
+					// thinking previously never reached the timeline).
+					return block.thinking;
+				}
+				if (block.type === "tool_use") {
+					// For tool use blocks, return the input as JSON string
+					return JSON.stringify(block.input, null, 2);
+				}
+				if (block.type === "tool_result") {
+					// Already flattened to a string by the runner projection.
+					return block.content;
+				}
+				return "";
+			})
+			.filter(Boolean)
+			.join("\n");
 	}
 
 	/**
-	 * Extract tool information from Claude assistant message
+	 * Extract tool information from a neutral assistant message
 	 */
 	private extractToolInfo(
-		sdkMessage: SDKAssistantMessage,
+		message: AgentAssistantMessage,
 	): { id: string; name: string; input: any } | null {
-		const message = sdkMessage.message as APIAssistantMessage;
-
-		if (Array.isArray(message.content)) {
-			const toolUse = message.content.find(
-				(block) => block.type === "tool_use",
-			);
-			if (
-				toolUse &&
-				"id" in toolUse &&
-				"name" in toolUse &&
-				"input" in toolUse
-			) {
-				return {
-					id: toolUse.id,
-					name: toolUse.name,
-					input: toolUse.input,
-				};
-			}
+		const toolUse = message.content.find((block) => block.type === "tool_use");
+		if (toolUse && toolUse.type === "tool_use") {
+			return {
+				id: toolUse.id,
+				name: toolUse.name,
+				input: toolUse.input,
+			};
 		}
 		return null;
 	}
 
 	/**
-	 * Extract tool_use_id and error status from Claude user message containing tool_result
+	 * Extract tool_use_id and error status from a neutral user message
+	 * containing a tool_result block
 	 */
 	private extractToolResultInfo(
-		sdkMessage: SDKUserMessage,
+		message: AgentUserMessage,
 	): { toolUseId: string; isError: boolean } | null {
-		const message = sdkMessage.message as APIUserMessage;
-
-		if (Array.isArray(message.content)) {
-			const toolResult = message.content.find(
-				(block) => block.type === "tool_result",
-			);
-			if (toolResult && "tool_use_id" in toolResult) {
-				return {
-					toolUseId: toolResult.tool_use_id,
-					isError: "is_error" in toolResult && toolResult.is_error === true,
-				};
-			}
+		const toolResult = message.content.find(
+			(block) => block.type === "tool_result",
+		);
+		if (toolResult && toolResult.type === "tool_result") {
+			return {
+				toolUseId: toolResult.toolUseId,
+				isError: toolResult.isError,
+			};
 		}
 		return null;
 	}
 
 	/**
-	 * Extract tool result content and error status from session entry
+	 * Store a session entry locally (timeline history / serialization).
 	 */
-	private extractToolResult(
-		entry: CyrusAgentSessionEntry,
-	): { content: string; isError: boolean } | null {
-		// Check if we have the error status in metadata
-		const isError = entry.metadata?.toolResultError || false;
-
-		return {
-			content: entry.content,
-			isError: isError,
-		};
+	private storeEntry(sessionId: string, entry: CyrusAgentSessionEntry): void {
+		const entries = this.entries.get(sessionId) || [];
+		entries.push(entry);
+		this.entries.set(sessionId, entries);
 	}
 
 	/**
-	 * Sync session entry to external tracker (create AgentActivity)
+	 * Render a neutral message into activities via the pure ActivityMapper and
+	 * post them through the session's sink.
+	 *
+	 * The manager owns all the mutable state the mapper reads: it performs the
+	 * tool-call registration / active-Task / subject-cache writes the old switch
+	 * did inline (BEFORE snapshotting MapContext), snapshots the context, calls
+	 * the pure mapper, posts each activity, then performs the deferred cleanup
+	 * writes (tool-call delete, active-Task clear) AFTER the map.
 	 */
-	private async syncEntryToActivitySink(
-		entry: CyrusAgentSessionEntry,
+	private async renderAndPost(
 		sessionId: string,
+		message: AgentUserMessage | AgentAssistantMessage,
+		entry: CyrusAgentSessionEntry,
 	): Promise<void> {
 		const log = this.sessionLog(sessionId);
 		try {
@@ -910,413 +926,215 @@ export class AgentSessionManager extends EventEmitter {
 				return;
 			}
 
-			// Store entry locally first
-			const entries = this.entries.get(sessionId) || [];
-			entries.push(entry);
-			this.entries.set(sessionId, entries);
+			// Store entry locally first (matches previous behavior: entries are
+			// recorded when they are posted, not when buffered).
+			this.storeEntry(sessionId, entry);
 
-			// Build activity content based on entry type
-			let content: any;
-			let ephemeral = false;
-			switch (entry.type) {
-				case "user": {
-					const activeTaskId = this.activeTasksBySession.get(sessionId);
-					if (activeTaskId && activeTaskId === entry.metadata?.toolUseId) {
-						content = {
-							type: "thought",
-							body: `✅ Task Completed\n\n\n\n${entry.content}\n\n---\n\n`,
-						};
-						this.activeTasksBySession.delete(sessionId);
-					} else if (entry.metadata?.toolUseId) {
-						// This is a tool result - create an action activity with the result
-						const toolResult = this.extractToolResult(entry);
-						if (toolResult) {
-							// Get the original tool information
-							const originalTool = this.toolCallsByToolUseId.get(
-								entry.metadata.toolUseId,
-							);
-							const toolName = originalTool?.name || "Tool";
-							const toolInput = originalTool?.input || "";
+			// State writes that must land BEFORE the MapContext snapshot.
+			this.applyPreMapMutations(sessionId, message);
 
-							// Clean up the tool call from our tracking map
-							if (entry.metadata.toolUseId) {
-								this.toolCallsByToolUseId.delete(entry.metadata.toolUseId);
-							}
+			const ctx = this.buildMapContext(sessionId);
+			const activities = this.mapper.map(message, ctx);
 
-							// Handle TaskCreate results: cache the task ID → subject mapping
-							const baseToolName = toolName.replace("↪ ", "");
-							if (baseToolName === "TaskCreate" && entry.metadata?.toolUseId) {
-								const cachedSubject = this.taskSubjectsByToolUseId.get(
-									entry.metadata.toolUseId,
-								);
-								if (cachedSubject) {
-									// Parse task ID from result like "Task #1 created successfully: ..."
-									const taskIdMatch = toolResult.content?.match(/Task #(\d+)/);
-									if (taskIdMatch?.[1]) {
-										this.taskSubjectsById.set(taskIdMatch[1], cachedSubject);
-									}
-									this.taskSubjectsByToolUseId.delete(
-										entry.metadata.toolUseId!,
-									);
-								}
-							}
+			// Deferred cleanup writes (must run AFTER the map read the snapshot).
+			this.applyPostMapMutations(sessionId, message);
 
-							// Handle TaskUpdate/TaskGet results: post enriched thought with subject
-							if (baseToolName === "TaskUpdate" || baseToolName === "TaskGet") {
-								const formatter = session.agentRunner?.getFormatter();
-								if (!formatter) {
-									log.warn(`No formatter available for session ${sessionId}`);
-									return;
-								}
-
-								// Try to enrich toolInput with subject from cache or result
-								const enrichedInput = { ...toolInput };
-								if (!enrichedInput.subject) {
-									const taskId = enrichedInput.taskId || "";
-									// First try: look up subject from our cache
-									const cachedSubject = this.taskSubjectsById.get(taskId);
-									if (cachedSubject) {
-										enrichedInput.subject = cachedSubject;
-									} else if (baseToolName === "TaskGet" && toolResult.content) {
-										// Second try: parse subject from TaskGet result content
-										// Format: "ID: 123\nSubject: Fix bug\nStatus: ..."
-										const subjectMatch =
-											toolResult.content.match(/^Subject:\s*(.+)$/m);
-										if (subjectMatch?.[1]) {
-											enrichedInput.subject = subjectMatch[1].trim();
-											// Also cache it for future TaskUpdate calls
-											if (taskId) {
-												this.taskSubjectsById.set(
-													taskId,
-													enrichedInput.subject,
-												);
-											}
-										}
-									} else if (
-										baseToolName === "TaskUpdate" &&
-										toolResult.content
-									) {
-										// Try to parse subject from TaskUpdate result content
-										// Format: "Updated task #3 subject" or may contain task details
-										const subjectMatch =
-											toolResult.content.match(/^Subject:\s*(.+)$/m);
-										if (subjectMatch?.[1]) {
-											enrichedInput.subject = subjectMatch[1].trim();
-											if (taskId) {
-												this.taskSubjectsById.set(
-													taskId,
-													enrichedInput.subject,
-												);
-											}
-										}
-									}
-								}
-
-								const formattedTask = formatter.formatTaskParameter(
-									baseToolName,
-									enrichedInput,
-								);
-								content = {
-									type: "thought",
-									body: formattedTask,
-								};
-								ephemeral = false;
-								break;
-							}
-
-							// Skip creating activity for TodoWrite/write_todos results since they already created a non-ephemeral thought
-							// Skip TaskCreate/TaskList results since they already created a non-ephemeral thought
-							// Skip AskUserQuestion results since it's custom handled via Linear's select signal elicitation
-							if (
-								toolName === "TodoWrite" ||
-								toolName === "↪ TodoWrite" ||
-								toolName === "write_todos" ||
-								toolName === "TaskCreate" ||
-								toolName === "↪ TaskCreate" ||
-								toolName === "TaskList" ||
-								toolName === "↪ TaskList" ||
-								toolName === "AskUserQuestion" ||
-								toolName === "↪ AskUserQuestion"
-							) {
-								return;
-							}
-
-							// Get formatter from runner
-							const formatter = session.agentRunner?.getFormatter();
-							if (!formatter) {
-								log.warn(`No formatter available`);
-								return;
-							}
-
-							// Format parameter and result using runner's formatter
-							const formattedParameter = formatter.formatToolParameter(
-								toolName,
-								toolInput,
-							);
-							const formattedResult = formatter.formatToolResult(
-								toolName,
-								toolInput,
-								toolResult.content?.trim() || "",
-								toolResult.isError,
-							);
-
-							// Format the action name (with description for Bash tool)
-							const formattedAction = formatter.formatToolActionName(
-								toolName,
-								toolInput,
-								toolResult.isError,
-							);
-
-							content = {
-								type: "action",
-								action: formattedAction,
-								parameter: formattedParameter,
-								result: formattedResult,
-							};
-						} else {
-							return;
-						}
-					} else {
-						return;
-					}
-					break;
-				}
-				case "assistant": {
-					// Assistant messages can be thoughts or responses
-					if (entry.metadata?.toolUseId) {
-						const toolName = entry.metadata.toolName || "Tool";
-
-						// Store tool information for later use in tool results
-						if (entry.metadata.toolUseId) {
-							// Check if this is a subtask with arrow prefix
-							let storedName = toolName;
-							if (entry.metadata?.parentToolUseId) {
-								const activeTaskId = this.activeTasksBySession.get(sessionId);
-								if (activeTaskId === entry.metadata?.parentToolUseId) {
-									storedName = `↪ ${toolName}`;
-								}
-							}
-
-							this.toolCallsByToolUseId.set(entry.metadata.toolUseId, {
-								name: storedName,
-								input: entry.metadata.toolInput || entry.content,
-							});
-						}
-
-						// Skip AskUserQuestion tool - it's custom handled via Linear's select signal elicitation
-						if (toolName === "AskUserQuestion") {
-							return;
-						}
-
-						// Special handling for TodoWrite tool (Claude) and write_todos (Gemini) - treat as thought instead of action
-						if (toolName === "TodoWrite" || toolName === "write_todos") {
-							// Get formatter from runner
-							const formatter = session.agentRunner?.getFormatter();
-							if (!formatter) {
-								log.warn(`No formatter available`);
-								return;
-							}
-
-							const formattedTodos = formatter.formatTodoWriteParameter(
-								entry.content,
-							);
-							content = {
-								type: "thought",
-								body: formattedTodos,
-							};
-							// TodoWrite/write_todos is not ephemeral
-							ephemeral = false;
-						} else if (toolName === "TaskCreate" || toolName === "TaskList") {
-							// Get formatter from runner
-							const formatter = session.agentRunner?.getFormatter();
-							if (!formatter) {
-								log.warn(`No formatter available for session ${sessionId}`);
-								return;
-							}
-
-							// Special handling for Task tools - format as thought instead of action
-							const toolInput = entry.metadata.toolInput || entry.content;
-							const formattedTask = formatter.formatTaskParameter(
-								toolName,
-								toolInput,
-							);
-							content = {
-								type: "thought",
-								body: formattedTask,
-							};
-							// Task tools are not ephemeral
-							ephemeral = false;
-
-							// Cache TaskCreate subject by toolUseId so we can map it to task ID when result arrives
-							if (
-								toolName === "TaskCreate" &&
-								toolInput?.subject &&
-								entry.metadata.toolUseId
-							) {
-								this.taskSubjectsByToolUseId.set(
-									entry.metadata.toolUseId,
-									toolInput.subject,
-								);
-							}
-						} else if (toolName === "TaskUpdate" || toolName === "TaskGet") {
-							// Skip posting at tool_use time — defer to tool_result time
-							// so we can enrich with subject from result or cache
-							return;
-						} else if (toolName === "Task") {
-							// Get formatter from runner
-							const formatter = session.agentRunner?.getFormatter();
-							if (!formatter) {
-								log.warn(`No formatter available`);
-								return;
-							}
-
-							// Special handling for Task tool - add start marker and track active task
-							const toolInput = entry.metadata.toolInput || entry.content;
-							const formattedParameter = formatter.formatToolParameter(
-								toolName,
-								toolInput,
-							);
-							const displayName = toolName;
-
-							// Track this as the active Task for this session
-							if (entry.metadata?.toolUseId) {
-								this.activeTasksBySession.set(
-									sessionId,
-									entry.metadata.toolUseId,
-								);
-							}
-
-							content = {
-								type: "action",
-								action: displayName,
-								parameter: formattedParameter,
-								// result will be added later when we get tool result
-							};
-							// Task is not ephemeral
-							ephemeral = false;
-						} else {
-							// Get formatter from runner
-							const formatter = session.agentRunner?.getFormatter();
-							if (!formatter) {
-								log.warn(`No formatter available`);
-								return;
-							}
-
-							// Other tools - check if they're within an active Task
-							const toolInput = entry.metadata.toolInput || entry.content;
-							let displayName = toolName;
-
-							if (entry.metadata?.parentToolUseId) {
-								const activeTaskId = this.activeTasksBySession.get(sessionId);
-								if (activeTaskId === entry.metadata?.parentToolUseId) {
-									displayName = `↪ ${toolName}`;
-								}
-							}
-
-							const formattedParameter = formatter.formatToolParameter(
-								displayName,
-								toolInput,
-							);
-
-							content = {
-								type: "action",
-								action: displayName,
-								parameter: formattedParameter,
-								// result will be added later when we get tool result
-							};
-							// Standard tool calls are ephemeral
-							ephemeral = true;
-						}
-					} else if (entry.metadata?.sdkError) {
-						// Assistant message with SDK error (e.g., rate_limit, billing_error)
-						// Create an error type so it's visible to users (not just a thought)
-						// Per CYPACK-719: usage limits should trigger "error" type activity
-						content = {
-							type: "error",
-							body: entry.content,
-						};
-					} else {
-						// Regular assistant message - create a thought
-						content = {
-							type: "thought",
-							body: entry.content,
-						};
-					}
-					break;
-				}
-
-				case "system":
-					// System messages are thoughts
-					content = {
-						type: "thought",
-						body: entry.content,
-					};
-					break;
-
-				case "result":
-					// Result messages can be responses or errors
-					if (entry.metadata?.isError) {
-						content = {
-							type: "error",
-							body: entry.content,
-						};
-					} else {
-						content = {
-							type: "response",
-							body: entry.content,
-						};
-					}
-					break;
-
-				default:
-					// Default to thought
-					content = {
-						type: "thought",
-						body: entry.content,
-					};
-			}
-
-			// Ensure we have an external session ID for activity posting
-			if (!session.externalSessionId) {
-				log.debug(
-					`Skipping activity sync - no external session ID (platform: ${session.issueContext?.trackerId || "unknown"})`,
+			for (const activity of activities) {
+				const activityId = await this.postToSink(
+					sessionId,
+					activity,
+					activity.type,
 				);
-				return;
-			}
-
-			const options: ActivityPostOptions = {};
-			if (ephemeral) {
-				options.ephemeral = true;
-			}
-
-			const activitySink = this.getActivitySink(sessionId);
-			if (!activitySink) {
-				log.debug(
-					`Skipping activity sync - no activity sink registered for session`,
-				);
-				return;
-			}
-
-			const result = await activitySink.postActivity(
-				session.externalSessionId,
-				content,
-				options,
-			);
-
-			if (result.activityId) {
-				entry.linearAgentActivityId = result.activityId;
-				if (entry.type === "result") {
-					log.info(
-						`Result message emitted to Linear (activity ${entry.linearAgentActivityId})`,
-					);
-				} else {
-					log.debug(
-						`Created ${content.type} activity ${entry.linearAgentActivityId}`,
-					);
+				// Correlate the first posted activity id back onto the stored entry.
+				if (activityId && !entry.linearAgentActivityId) {
+					entry.linearAgentActivityId = activityId;
+					log.debug(`Created ${activity.type} activity ${activityId}`);
 				}
 			}
 		} catch (error) {
-			log.error(`Failed to sync entry to activity sink:`, error);
+			log.error(`Failed to render/post message:`, error);
+		}
+	}
+
+	/**
+	 * Build a read-only MapContext snapshot of this session's current state.
+	 */
+	private buildMapContext(sessionId: string): MapContext {
+		const session = this.sessions.get(sessionId);
+		const provider = session?.agentRunner?.provider ?? "claude";
+		return {
+			provider,
+			toolCall: (toolUseId) => this.toolCallsByToolUseId.get(toolUseId),
+			activeTaskUseId: this.activeTasksBySession.get(sessionId),
+			taskSubjectById: (taskId) => this.taskSubjectsById.get(taskId),
+			workingDirectory: session?.workspace?.path,
+		};
+	}
+
+	/**
+	 * State writes the old per-tool switch performed at tool_use / tool_result
+	 * time. These must run BEFORE the MapContext snapshot so the pure mapper
+	 * observes them (e.g. TaskUpdate/TaskGet subject enrichment).
+	 */
+	private applyPreMapMutations(
+		sessionId: string,
+		message: AgentUserMessage | AgentAssistantMessage,
+	): void {
+		const session = this.sessions.get(sessionId);
+		const provider = session?.agentRunner?.provider ?? "claude";
+		const workingDirectory = session?.workspace?.path;
+
+		if (message.type === "assistant") {
+			const toolUse = message.content.find((b) => b.type === "tool_use");
+			if (!toolUse || toolUse.type !== "tool_use") return;
+
+			const { name: baseName, input } = normalizeTool(
+				provider,
+				toolUse.name,
+				toolUse.input,
+				workingDirectory,
+			);
+
+			// Register the tool call (with subtask arrow prefix) for its future
+			// tool_result. The stored name is canonical so the result render needs
+			// no re-normalization.
+			let storedName = baseName;
+			if (message.parentToolUseId) {
+				const activeTaskId = this.activeTasksBySession.get(sessionId);
+				if (activeTaskId === message.parentToolUseId) {
+					storedName = `↪ ${baseName}`;
+				}
+			}
+			this.toolCallsByToolUseId.set(toolUse.id, { name: storedName, input });
+
+			// Track the active Task so its children get the arrow prefix and its
+			// result renders as "Task Completed".
+			if (baseName === "Task") {
+				this.activeTasksBySession.set(sessionId, toolUse.id);
+			}
+
+			// Cache TaskCreate subject by tool_use id until the result carries the id.
+			if (
+				baseName === "TaskCreate" &&
+				input &&
+				typeof input === "object" &&
+				typeof (input as { subject?: unknown }).subject === "string"
+			) {
+				this.taskSubjectsByToolUseId.set(
+					toolUse.id,
+					(input as { subject: string }).subject,
+				);
+			}
+			return;
+		}
+
+		// user tool_result
+		const toolResult = message.content.find((b) => b.type === "tool_result");
+		if (!toolResult || toolResult.type !== "tool_result") return;
+
+		const toolUseId = toolResult.toolUseId;
+		const activeTaskId = this.activeTasksBySession.get(sessionId);
+		if (activeTaskId === toolUseId) {
+			// Active-Task completion clears in the post-map phase.
+			return;
+		}
+
+		const originalTool = this.toolCallsByToolUseId.get(toolUseId);
+		const toolName = originalTool?.name || "Tool";
+		const baseToolName = toolName.replace("↪ ", "");
+		const resultContent = toolResult.content;
+		const toolInput =
+			originalTool?.input && typeof originalTool.input === "object"
+				? (originalTool.input as Record<string, unknown>)
+				: {};
+
+		// TaskCreate result: map the parsed task id to its cached subject.
+		if (baseToolName === "TaskCreate") {
+			const cachedSubject = this.taskSubjectsByToolUseId.get(toolUseId);
+			if (cachedSubject) {
+				const taskIdMatch = resultContent?.match(/Task #(\d+)/);
+				if (taskIdMatch?.[1]) {
+					this.taskSubjectsById.set(taskIdMatch[1], cachedSubject);
+				}
+				this.taskSubjectsByToolUseId.delete(toolUseId);
+			}
+		}
+
+		// TaskUpdate/TaskGet result: cache the subject parsed from the result so
+		// future lookups (and the mapper's enrichment) can use it.
+		if (
+			(baseToolName === "TaskUpdate" || baseToolName === "TaskGet") &&
+			!toolInput.subject &&
+			resultContent
+		) {
+			const taskId =
+				typeof toolInput.taskId === "string" ? toolInput.taskId : "";
+			if (taskId && !this.taskSubjectsById.has(taskId)) {
+				const subjectMatch = resultContent.match(/^Subject:\s*(.+)$/m);
+				if (subjectMatch?.[1]) {
+					this.taskSubjectsById.set(taskId, subjectMatch[1].trim());
+				}
+			}
+		}
+	}
+
+	/**
+	 * Deferred cleanup writes that must run AFTER the mapper read the snapshot:
+	 * clearing the active Task on its completion and removing a consumed tool
+	 * call from the lookup map.
+	 */
+	private applyPostMapMutations(
+		sessionId: string,
+		message: AgentUserMessage | AgentAssistantMessage,
+	): void {
+		if (message.type !== "user") return;
+		const toolResult = message.content.find((b) => b.type === "tool_result");
+		if (!toolResult || toolResult.type !== "tool_result") return;
+
+		const toolUseId = toolResult.toolUseId;
+		const activeTaskId = this.activeTasksBySession.get(sessionId);
+		if (activeTaskId === toolUseId) {
+			this.activeTasksBySession.delete(sessionId);
+			return;
+		}
+		this.toolCallsByToolUseId.delete(toolUseId);
+	}
+
+	/**
+	 * Guarded post to the session's activity sink. Returns the created activity
+	 * id (when the tracker reports one), or null when skipped/failed. This is the
+	 * single funnel every activity-post path in this manager collapses onto.
+	 */
+	private async postToSink(
+		sessionId: string,
+		activity: Activity,
+		label: string,
+	): Promise<string | null> {
+		const log = this.sessionLog(sessionId);
+		const session = this.sessions.get(sessionId);
+
+		if (!session?.externalSessionId) {
+			log.debug(
+				`Skipping ${label} - no external session ID (platform: ${session?.issueContext?.trackerId || "unknown"})`,
+			);
+			return null;
+		}
+
+		const activitySink = this.getActivitySink(sessionId);
+		if (!activitySink) {
+			log.debug(`Skipping ${label} - no activity sink registered for session`);
+			return null;
+		}
+
+		try {
+			const result = await activitySink.post(
+				session.externalSessionId,
+				activity,
+			);
+			return result.activityId ?? null;
+		} catch (error) {
+			log.error(`Error creating ${label}:`, error);
+			return null;
 		}
 	}
 
@@ -1496,52 +1314,13 @@ export class AgentSessionManager extends EventEmitter {
 		},
 		label: string,
 	): Promise<string | null> {
-		const log = this.sessionLog(sessionId);
-		const session = this.sessions.get(sessionId);
-
-		if (!session?.externalSessionId) {
-			log.debug(
-				`Skipping ${label} - no external session ID (platform: ${session?.issueContext?.trackerId || "unknown"})`,
-			);
-			return null;
-		}
-
-		try {
-			const options: ActivityPostOptions = {};
-			if (input.ephemeral !== undefined) {
-				options.ephemeral = input.ephemeral;
-			}
-			if (input.signal) {
-				options.signal = input.signal;
-			}
-			if (input.signalMetadata) {
-				options.signalMetadata = input.signalMetadata;
-			}
-
-			const activitySink = this.getActivitySink(sessionId);
-			if (!activitySink) {
-				log.debug(
-					`Skipping ${label} - no activity sink registered for session`,
-				);
-				return null;
-			}
-
-			const result = await activitySink.postActivity(
-				session.externalSessionId,
-				input.content,
-				options,
-			);
-
-			if (result.activityId) {
-				log.debug(`Created ${label} activity ${result.activityId}`);
-				return result.activityId;
-			}
-			log.debug(`Created ${label}`);
-			return null;
-		} catch (error) {
-			log.error(`Error creating ${label}:`, error);
-			return null;
-		}
+		const activity: Activity = {
+			...input.content,
+			...(input.ephemeral !== undefined && { ephemeral: input.ephemeral }),
+			...(input.signal && { signal: input.signal }),
+			...(input.signalMetadata && { signalMetadata: input.signalMetadata }),
+		};
+		return this.postToSink(sessionId, activity, label);
 	}
 
 	/**
@@ -1835,7 +1614,7 @@ export class AgentSessionManager extends EventEmitter {
 	 */
 	private async handleStatusMessage(
 		sessionId: string,
-		message: SDKStatusMessage,
+		message: AgentStatusMessage,
 	): Promise<void> {
 		const session = this.sessions.get(sessionId);
 		if (!session?.externalSessionId) {
@@ -1847,6 +1626,9 @@ export class AgentSessionManager extends EventEmitter {
 		}
 
 		if (message.status === "compacting") {
+			// A new compaction cycle begins; any boundary from the previous one is
+			// no longer the reason to suppress this cycle's closing thought.
+			this.compactBoundaryPostedBySession.delete(sessionId);
 			const activityId = await this.postActivity(
 				sessionId,
 				{
@@ -1862,6 +1644,14 @@ export class AgentSessionManager extends EventEmitter {
 				this.activeStatusActivitiesBySession.set(sessionId, activityId);
 			}
 		} else if (message.status === null) {
+			// The SDK orders these `compacting` -> compact_boundary -> null, so by
+			// now the boundary has already reported this compaction with its token
+			// counts — don't follow it with a vaguer duplicate. Fall back to the
+			// generic thought when no boundary arrived.
+			if (this.compactBoundaryPostedBySession.delete(sessionId)) {
+				this.activeStatusActivitiesBySession.delete(sessionId);
+				return;
+			}
 			// Clear the status - post a non-ephemeral thought to replace the ephemeral one
 			await this.postActivity(
 				sessionId,
@@ -1874,5 +1664,40 @@ export class AgentSessionManager extends EventEmitter {
 			// Clean up the stored activity ID regardless — stale IDs do no harm
 			this.activeStatusActivitiesBySession.delete(sessionId);
 		}
+	}
+
+	/**
+	 * Handle a completed context compaction. Reports how much conversation was
+	 * traded away, which is what makes an early auto-compact window (the
+	 * `claudeAutoCompactWindow` setting) observable — a session that never
+	 * compacts pays to re-read its whole history on every turn.
+	 */
+	private async handleCompactBoundaryMessage(
+		sessionId: string,
+		message: AgentCompactBoundaryMessage,
+	): Promise<void> {
+		const session = this.sessions.get(sessionId);
+		if (!session?.externalSessionId) {
+			const log = this.sessionLog(sessionId);
+			log.debug(
+				`Skipping compact boundary - no external session ID (platform: ${session?.issueContext?.trackerId || "unknown"})`,
+			);
+			return;
+		}
+
+		const pre = formatTokenCount(message.preTokens);
+		const body =
+			message.postTokens === undefined
+				? `Compacted conversation (${message.trigger}, was ${pre} tokens)`
+				: `Compacted conversation: ${pre} → ${formatTokenCount(message.postTokens)} tokens (${message.trigger})`;
+
+		await this.postActivity(
+			sessionId,
+			{ content: { type: "thought", body }, ephemeral: false },
+			"compact boundary",
+		);
+		this.compactBoundaryPostedBySession.add(sessionId);
+		// The ephemeral "Compacting…" thought is superseded by the line above.
+		this.activeStatusActivitiesBySession.delete(sessionId);
 	}
 }

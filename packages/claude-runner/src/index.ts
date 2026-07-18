@@ -11,6 +11,10 @@ export type {
 } from "@anthropic-ai/claude-agent-sdk";
 export { AbortError, ClaudeRunner } from "./ClaudeRunner.js";
 export {
+	flattenToolResultContent,
+	toAgentMessage,
+} from "./claude-message-projection.js";
+export {
 	availableTools,
 	getAllTools,
 	getCoordinatorTools,
@@ -21,14 +25,16 @@ export {
 	writeTools,
 } from "./config.js";
 export {
-	ClaudeMessageFormatter,
-	type IMessageFormatter,
-} from "./formatter.js";
-export {
 	HttpSessionStore,
 	type HttpSessionStoreOptions,
 } from "./HttpSessionStore.js";
 export { buildHomeDirectoryDisallowedTools } from "./home-directory-restrictions.js";
+export {
+	type ExportResult,
+	exportTranscriptToLangfuse,
+	type LangfuseConfig,
+	resolveLangfuseConfig,
+} from "./langfuse-exporter.js";
 export {
 	checkLinuxSandboxRequirements,
 	logSandboxRequirementFailures,
@@ -38,6 +44,7 @@ export {
 } from "./sandbox-requirements.js";
 export {
 	buildBaseSessionEnv,
+	buildToolOutputCapEnv,
 	CYRUS_SESSION_ENV,
 	normalizeMcpHttpTransport,
 } from "./session-env.js";
@@ -77,3 +84,7 @@ export type {
 	SessionStore,
 	SessionStoreEntry,
 } from "./types.js";
+export {
+	type WarmIdleSession,
+	WarmSessionRegistry,
+} from "./WarmSessionRegistry.js";

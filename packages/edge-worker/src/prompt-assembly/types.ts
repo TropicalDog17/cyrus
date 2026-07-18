@@ -17,7 +17,7 @@ import type {
 /**
  * Output structure from buildPrompt - contains everything needed to start a Claude session
  */
-export interface PromptAssembly {
+export interface PromptAssemblyResult {
 	/** System prompt for Claude runner configuration (e.g., "builder", "debugger") */
 	systemPrompt?: string;
 

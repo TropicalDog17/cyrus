@@ -47,12 +47,11 @@ You can use the Read tool to view these files.
 `)
 			.build();
 
-		// Verify XML structure with author and timestamp
+		// Verify XML structure with author; with no source timestamp the
+		// <timestamp> line is omitted rather than filled with a wall-clock value.
 		expect(result.userPrompt).toContain("<new_comment>");
 		expect(result.userPrompt).toContain("<author>Unknown</author>");
-		expect(result.userPrompt).toMatch(
-			/<timestamp>[\d-]+T[\d:.]+Z<\/timestamp>/,
-		);
+		expect(result.userPrompt).not.toContain("<timestamp>");
 		expect(result.userPrompt).toContain("<content>\nTest\n  </content>");
 		expect(result.userPrompt).toContain("</new_comment>");
 

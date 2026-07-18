@@ -1,20 +1,19 @@
 ---
 name: verify-and-ship
-description: Runs all quality checks (tests, lint, typecheck), fixes failures, updates the changelog, commits, pushes, and creates or updates the pull/merge request. Use after implementation or debug whenever code changed, before summarize. Not needed for questions or research (use investigate then summarize).
+description: Runs all quality checks (tests, lint, typecheck), fixes failures, commits, pushes, and creates or updates the pull/merge request. Use after implementation or debug whenever code changed, before summarize. Not needed for questions or research (use investigate then summarize).
 ---
 
 # Verify and Ship
 
-Run after code changed, before summarize. Work through the phases in order. Phase 1 gates everything: validate acceptance criteria before shipping. The git/gh/glab and changelog commands below are exact — run them as written. The only flag latitude is the push-recovery escape hatch in Phase 4.
+Run after code changed, before summarize. Work through the phases in order. Phase 1 gates everything: validate acceptance criteria before shipping. The git/gh/glab commands below are exact — run them as written. The only flag latitude is the push-recovery escape hatch in Phase 3.
 
 Resolve these from context once: the issue identifier and Linear URL from `<linear_issue>` (`<identifier>` / `<url>`); the target branch from `<git_context>` (or `<context>`) as `<base_branch>`.
 
-Paste this checklist into your response and check items off as you go — Cyrus renders it in the Linear timeline (the ready-state decision in Phase 5 depends on the quality-check result):
+Paste this checklist into your response and check items off as you go — Cyrus renders it in the Linear timeline (the ready-state decision in Phase 4 depends on the quality-check result):
 
 ```
 - [ ] Acceptance criteria validated against the issue
 - [ ] Tests, lint, and typecheck run and read
-- [ ] Changelog updated (dedup against base branch)
 - [ ] Changes committed and pushed
 - [ ] PR/MR created or updated with the cyrus marker
 - [ ] Ready-state decided: mark ready only if checks pass and guidance allows
@@ -22,41 +21,22 @@ Paste this checklist into your response and check items off as you go — Cyrus 
 
 ## Phase 1: Validate acceptance criteria
 
-Fetch the current issue with the issue tracker's `get_issue` tool. Extract every acceptance criterion from the description and confirm the implementation satisfies each one. If the issue states no explicit criteria, validate against the implied requirements in the title and description. Treat unmet criteria as a quality failure surfaced in Phase 5.
+Fetch the current issue with the issue tracker's `get_issue` tool. Extract every acceptance criterion from the description and confirm the implementation satisfies each one. If the issue states no explicit criteria, validate against the implied requirements in the title and description. Treat unmet criteria as a quality failure surfaced in Phase 4.
 
 ## Phase 2: Quality checks
 
 Discover the project's non-interactive check commands first (from package.json, Makefile, or CLAUDE.md) and prefer run-once variants over watch mode — a watch-mode test command never exits and hangs the whole ship. Run each applicable check, read its output, and fix what it reports. Report from fresh command output, never from expectation — no "should pass" or "looks done".
 
-- **Tests** — Run the full suite once (not in watch mode). On failure, fix and re-run. Retry up to 3 times. If failures remain after 3 attempts, stop retrying and carry the failing result into Phase 5 (do not silently ship as passing).
+- **Tests** — Run the full suite once (not in watch mode). On failure, fix and re-run. Retry up to 3 times. If failures remain after 3 attempts, stop retrying and carry the failing result into Phase 4 (do not silently ship as passing).
 - **Lint** — Run the linter and fix what it flags.
 - **Typecheck** — Run type checking (if the project has it) and fix every error.
 - **Self-review** — Read the diff. Remove debug code, stray logging, and commented-out blocks.
 
-Record whether checks ended passing or still failing — Phase 5 branches on it.
+Record whether checks ended passing or still failing — Phase 4 branches on it.
 
-## Phase 3: Changelog
+## Phase 3: Commit and push
 
-Inspect state before mutating. Check for changelog files:
-
-```bash
-ls -la CHANGELOG.md CHANGELOG.internal.md 2>/dev/null || echo "NO_CHANGELOG"
-```
-
-If none exist, skip this phase. Otherwise diff against the base branch (`<base_branch>` from `<git_context>` or `<context>`) to see what this branch already added:
-
-```bash
-git diff <base_branch> -- CHANGELOG.md CHANGELOG.internal.md 2>/dev/null
-```
-
-- If the diff shows this branch already added an entry for the current issue (matching the issue identifier), update that entry in place — add the PR/MR link or refine the wording. Do not add a duplicate.
-- Otherwise add a new entry.
-
-Place entries under `## [Unreleased]` in the right subsection (`### Added`, `### Changed`, `### Fixed`, `### Removed`), focused on end-user impact, in [Keep a Changelog](https://keepachangelog.com/) format. Include the issue identifier and PR/MR link: `([ISSUE-ID](linear_url), [#NUMBER](pr_or_mr_url))`.
-
-## Phase 4: Commit and push
-
-Stage the relevant changes (including the changelog), commit with a clear message following the project's conventions, then push:
+Stage the relevant changes, commit with a clear message following the project's conventions, then push:
 
 ```bash
 git push -u origin HEAD
@@ -64,7 +44,7 @@ git push -u origin HEAD
 
 If the push is rejected as non-fast-forward (e.g. history was rewritten during the Phase 2 retries) and the branch is a Cyrus-owned worktree branch, recover with `git push --force-with-lease`. If the push still fails, stop here and surface the failure — do not open or ready a PR/MR on un-pushed code.
 
-## Phase 5: Create or update the PR/MR
+## Phase 4: Create or update the PR/MR
 
 **Pick the platform.** `<repository_routing_context>` renders both `<github_url>` and `<gitlab_url>`; the unused one is the literal `N/A`. If `<github_url>` is a real URL (not `N/A`), follow the **GitHub** branch; otherwise follow the **GitLab** branch. Follow exactly one.
 

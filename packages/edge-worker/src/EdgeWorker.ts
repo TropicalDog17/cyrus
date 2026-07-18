@@ -1,27 +1,16 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { execSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { LinearClient } from "@linear/sdk";
-import type {
-	McpServerConfig,
-	SDKMessage,
-	SessionStore,
-	WarmQuery,
-} from "cyrus-claude-runner";
+import type { SessionStore } from "cyrus-claude-runner";
 import {
-	buildBaseSessionEnv,
-	buildHomeDirectoryDisallowedTools,
-	ClaudeRunner,
 	findTranscriptPath,
 	HttpSessionStore,
-	normalizeMcpHttpTransport,
 	summarizeTranscript,
+	WarmSessionRegistry,
 } from "cyrus-claude-runner";
 import { getCyrusAppUrl } from "cyrus-cloudflare-tunnel-client";
-import { CodexRunner } from "cyrus-codex-runner";
 import { ConfigUpdater } from "cyrus-config-updater";
 import type {
 	AgentActivityCreateInput,
@@ -29,11 +18,9 @@ import type {
 	AgentRunnerConfig,
 	AgentSessionCreatedWebhook,
 	AgentSessionPromptedWebhook,
-	BaseBranchResolution,
-	ContentUpdateMessage,
 	CyrusAgentSession,
 	EdgeWorkerConfig,
-	GuidanceRule,
+	EffortLevel,
 	IAgentRunner,
 	IIssueTrackerService,
 	ILogger,
@@ -44,44 +31,24 @@ import type {
 	IssueUnassignedWebhook,
 	IssueUpdateWebhook,
 	RepositoryConfig,
-	RunnerType,
 	SerializableEdgeWorkerState,
-	SessionStartMessage,
-	StopSignalMessage,
-	UnassignMessage,
-	UserPromptMessage,
 	Webhook,
-	WebhookAgentSession,
 	WebhookIssue,
 } from "cyrus-core";
 import {
 	CLIIssueTrackerService,
 	CLIRPCServer,
+	compute,
 	createLogger,
 	DEFAULT_PROXY_URL,
-	isAgentSessionCreatedWebhook,
-	isAgentSessionPromptedWebhook,
-	isContentUpdateMessage,
-	isIssueAssignedWebhook,
-	isIssueCommentMentionWebhook,
-	isIssueDeletedWebhook,
-	isIssueNewCommentWebhook,
-	isIssueStateChangeMessage,
-	isIssueStateChangeWebhook,
-	isIssueStateIdUpdateWebhook,
-	isIssueTitleOrDescriptionUpdateWebhook,
-	isIssueUnassignedWebhook,
-	isSessionStartMessage,
-	isStopSignalMessage,
-	isUnassignMessage,
-	isUserPromptMessage,
+	getReadParentDirectories,
+	normalizeConfigPaths,
 	PersistenceManager,
 	requireLinearWorkspaceId,
-	resolvePath,
+	toClaudeToolPatterns,
 	WebhookIpValidator,
+	withLinearMcpPruned,
 } from "cyrus-core";
-import { CursorRunner } from "cyrus-cursor-runner";
-import { GeminiRunner } from "cyrus-gemini-runner";
 import {
 	extractCommentAuthor,
 	extractCommentBody,
@@ -107,82 +74,56 @@ import {
 	isPullRequestReviewPayload,
 	stripMention,
 } from "cyrus-github-event-transport";
-import type { GitLabWebhookEvent } from "cyrus-gitlab-event-transport";
-import {
-	extractDiscussionId,
-	extractSessionKey as extractGitLabSessionKey,
-	extractMRBaseBranchRef,
-	extractMRBranchRef,
-	extractMRIid,
-	extractMRTitle,
-	extractNoteAuthor,
-	extractNoteBody,
-	extractNoteId,
-	extractNoteUrl,
-	extractProjectId,
-	extractProjectPath,
-	GitLabCommentService,
-	GitLabEventTransport,
-	isNoteOnMergeRequest,
-	stripMention as stripGitLabMention,
-} from "cyrus-gitlab-event-transport";
 import {
 	LinearEventTransport,
 	LinearIssueTrackerService,
 	type LinearOAuthConfig,
 } from "cyrus-linear-event-transport";
-import {
-	type CyrusToolsOptions,
-	createCyrusToolsServer,
-	createFetchFailureModesClient,
-	type FailureModesHttpClient,
-	type ResolvedSession,
-} from "cyrus-mcp-tools";
-import {
-	SlackEventTransport,
-	type SlackWebhookEvent,
-} from "cyrus-slack-event-transport";
-import { Sessions, streamableHttp } from "fastify-mcp";
 import { ActivityPoster } from "./ActivityPoster.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
-import { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
+import {
+	AskUserQuestionHandler,
+	questionTimeoutMsFromMinutes,
+} from "./AskUserQuestionHandler.js";
 import { AttachmentService } from "./AttachmentService.js";
-import { LiveChatRepositoryProvider } from "./ChatRepositoryProvider.js";
-import { ChatSessionHandler } from "./ChatSessionHandler.js";
+import type { Activity } from "./activity/index.js";
+import {
+	formatLabelRoleThought,
+	formatRepoSetupHookActivity,
+	formatRoutingThought,
+} from "./activity/index.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
+import { CyrusToolsHost } from "./CyrusToolsHost.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { EgressProxy } from "./EgressProxy.js";
+import { GitHubUsernameResolver } from "./GitHubUsernameResolver.js";
 import { GitService } from "./GitService.js";
 import { GlobalSessionRegistry } from "./GlobalSessionRegistry.js";
 import { McpConfigService } from "./McpConfigService.js";
+import { ParkedSessionRegistry } from "./ParkedSessionRegistry.js";
 import { PromptBuilder } from "./PromptBuilder.js";
-import type {
-	IssueContextResult,
-	PromptAssembly,
-	PromptAssemblyInput,
-	PromptComponent,
-	PromptType,
-} from "./prompt-assembly/types.js";
+import { PromptAssembler } from "./prompt-assembly/PromptAssembler.js";
+import type { PromptAssemblyInput } from "./prompt-assembly/types.js";
 import {
 	RepositoryRouter,
 	type RepositoryRouterDeps,
 } from "./RepositoryRouter.js";
-import {
-	RunnerConfigBuilder,
-	resolveIssueMcpConfigPath,
-} from "./RunnerConfigBuilder.js";
+import { RunnerConfigBuilder } from "./RunnerConfigBuilder.js";
 import { RunnerSelectionService } from "./RunnerSelectionService.js";
+import { SessionOrchestrator } from "./SessionOrchestrator.js";
 import { SharedApplicationServer } from "./SharedApplicationServer.js";
 import {
 	type SkillSessionContext,
 	SkillsPluginResolver,
 } from "./SkillsPluginResolver.js";
-import { SlackChatAdapter } from "./SlackChatAdapter.js";
 import type { IActivitySink } from "./sinks/IActivitySink.js";
 import { LinearActivitySink } from "./sinks/LinearActivitySink.js";
+import { NoopActivitySink } from "./sinks/NoopActivitySink.js";
 import { ToolPermissionResolver } from "./ToolPermissionResolver.js";
 import type { AgentSessionData, EdgeWorkerEvents } from "./types.js";
 import { UserAccessControl } from "./UserAccessControl.js";
+import { WarmSessionPool } from "./WarmSessionPool.js";
+import { WebhookRouter, type WebhookRouterDeps } from "./WebhookRouter.js";
 
 export declare interface EdgeWorker {
 	on<K extends keyof EdgeWorkerEvents>(
@@ -195,10 +136,6 @@ export declare interface EdgeWorker {
 	): boolean;
 }
 
-type CyrusToolsMcpContext = {
-	contextId?: string;
-};
-
 /**
  * Unified edge worker that **orchestrates**
  *   capturing Linear webhooks,
@@ -208,55 +145,52 @@ type CyrusToolsMcpContext = {
 export class EdgeWorker extends EventEmitter {
 	private config: EdgeWorkerConfig;
 	private repositories: Map<string, RepositoryConfig> = new Map(); // repository 'id' (internal, stored in config.json) mapped to the full repo config
-	private agentSessionManager: AgentSessionManager; // Single instance managing all agent sessions across repositories
+	private agentSessionManager!: AgentSessionManager; // Single instance managing all agent sessions across repositories
 	private activitySinks: Map<string, IActivitySink> = new Map(); // Maps Linear workspace ID to activity sink (one per workspace, mirrors issueTrackers)
 	private sessionRepositories: Map<string, string> = new Map(); // Maps session ID to repository ID
 	private lastStopTimeBySession: Map<string, number> = new Map(); // Maps session ID to timestamp of last stop signal (for double-stop detection)
-	private warmInstances: Map<string, WarmQuery> = new Map(); // Pre-warmed Claude sessions keyed by agentSessionId
+	private warmPool!: WarmSessionPool; // Pre-warmed Claude session subprocess pool
+	private warmSessionRegistry!: WarmSessionRegistry; // LRU cap over concurrently-warm idle Claude sessions
+	private parkedRegistry!: ParkedSessionRegistry; // Sessions parked behind blocked-by dependencies
+	private sessionOrchestrator!: SessionOrchestrator; // Runner creation + message wiring
 	private issueTrackers: Map<string, IIssueTrackerService> = new Map(); // one issue tracker per Linear workspace (keyed by linearWorkspaceId)
 	private linearEventTransport: LinearEventTransport | null = null; // Single event transport for webhook delivery
 	private gitHubEventTransport: GitHubEventTransport | null = null; // GitHub event transport for forwarded GitHub webhooks
 	private gitHubAppTokenProvider: GitHubAppTokenProvider | null = null; // Self-hosted GitHub App token minting
-	private gitLabEventTransport: GitLabEventTransport | null = null; // GitLab event transport for forwarded GitLab webhooks
-	private slackEventTransport: SlackEventTransport | null = null;
-	private chatSessionHandler: ChatSessionHandler<SlackWebhookEvent> | null =
-		null;
-	private gitHubCommentService: GitHubCommentService; // Service for posting comments back to GitHub PRs
-	private gitLabCommentService: GitLabCommentService; // Service for posting comments back to GitLab MRs
+	private gitHubCommentService!: GitHubCommentService; // Service for posting comments back to GitHub PRs
 	private cliRPCServer: CLIRPCServer | null = null; // CLI RPC server for CLI platform mode
 	private configUpdater: ConfigUpdater | null = null; // Single config updater for configuration updates
-	private persistenceManager: PersistenceManager;
-	private sharedApplicationServer: SharedApplicationServer;
+	private persistenceManager!: PersistenceManager;
+	private sharedApplicationServer!: SharedApplicationServer;
 	private cyrusHome: string;
-	private globalSessionRegistry: GlobalSessionRegistry; // Centralized session storage across all repositories
+	private globalSessionRegistry!: GlobalSessionRegistry; // Centralized session storage across all repositories
 	private configPath?: string; // Path to config.json file
 	/** @internal - Exposed for testing only */
-	public repositoryRouter: RepositoryRouter; // Repository routing and selection
-	private gitService: GitService;
+	public repositoryRouter!: RepositoryRouter; // Repository routing and selection
+	private webhookRouter!: WebhookRouter; // Webhook/message dispatch + branch selection
+	private gitService!: GitService;
 	private activeWebhookCount = 0; // Track number of webhooks currently being processed
 	/** Handler for AskUserQuestion tool invocations via Linear select signal */
-	private askUserQuestionHandler: AskUserQuestionHandler;
+	private askUserQuestionHandler!: AskUserQuestionHandler;
 	/** User access control for whitelisting/blacklisting Linear users */
-	private userAccessControl: UserAccessControl;
+	private userAccessControl!: UserAccessControl;
 	private logger: ILogger;
 	// Extracted service modules
-	private attachmentService: AttachmentService;
-	private runnerSelectionService: RunnerSelectionService;
-	private toolPermissionResolver: ToolPermissionResolver;
-	private mcpConfigService: McpConfigService;
-	private runnerConfigBuilder: RunnerConfigBuilder;
-	private activityPoster: ActivityPoster;
-	private configManager: ConfigManager;
-	private promptBuilder: PromptBuilder;
-	private defaultSkillsDeployer: DefaultSkillsDeployer;
-	private skillsPluginResolver: SkillsPluginResolver;
-	private readonly cyrusToolsMcpEndpoint = "/mcp/cyrus-tools";
-	private cyrusToolsMcpRegistered = false;
-	private cyrusToolsMcpRequestContext =
-		new AsyncLocalStorage<CyrusToolsMcpContext>();
-	private cyrusToolsMcpSessions = new Sessions<any>();
+	private attachmentService!: AttachmentService;
+	private runnerSelectionService!: RunnerSelectionService;
+	private toolPermissionResolver!: ToolPermissionResolver;
+	private mcpConfigService!: McpConfigService;
+	private runnerConfigBuilder!: RunnerConfigBuilder;
+	private activityPoster!: ActivityPoster;
+	private configManager!: ConfigManager;
+	private promptBuilder!: PromptBuilder;
+	private gitHubUsernameResolver!: GitHubUsernameResolver;
+	private promptAssembler!: PromptAssembler;
+	private defaultSkillsDeployer!: DefaultSkillsDeployer;
+	private skillsPluginResolver!: SkillsPluginResolver;
+	private cyrusToolsHost!: CyrusToolsHost;
 	/** Validates webhook source IPs against known provider allowlists */
-	private webhookIpValidator: WebhookIpValidator;
+	private webhookIpValidator!: WebhookIpValidator;
 	/** Egress proxy for sandbox network traffic filtering and header injection */
 	private egressProxy: EgressProxy | null = null;
 	/** Base SDK sandbox settings to pass to ClaudeRunner sessions (set when proxy starts) */
@@ -279,52 +213,44 @@ export class EdgeWorker extends EventEmitter {
 	 * Key format: `${createdAt}:${issueId}`
 	 */
 	private processedIssueUpdateKeys = new Set<string>();
-
-	/**
-	 * Sessions parked due to blocked-by dependencies.
-	 * Key: Linear issue ID (the blocked issue)
-	 * Value: All data needed to replay initializeAgentRunner when unblocked
-	 */
-	private parkedSessions = new Map<
-		string,
-		{
-			agentSession: AgentSessionCreatedWebhook["agentSession"];
-			repositories: RepositoryConfig[];
-			linearWorkspaceId: string;
-			guidance?: AgentSessionCreatedWebhook["guidance"];
-			commentBody?: string | null;
-			baseBranchOverrides?: Map<string, string>;
-			routingMethod?: string;
-			blockingIssueIds: string[];
-		}
-	>();
-
-	/**
-	 * Resolve `~/` prefixes in path-bearing config fields that are otherwise
-	 * passed verbatim to `fs.readFileSync` (which does not expand tildes).
-	 * Repository-scoped paths are normalized separately in addNew /
-	 * updateModified; this covers the platform-level MCP config lists that
-	 * cyrus-hosted writes with literal `~/.cyrus/...` prefixes when
-	 * generating self-host config.
-	 */
-	private static normalizeConfigPaths(
-		config: EdgeWorkerConfig,
-	): EdgeWorkerConfig {
-		const resolveList = (paths: string[] | undefined): string[] | undefined =>
-			paths ? paths.map(resolvePath) : undefined;
-		return {
-			...config,
-			slackMcpConfigs: resolveList(config.slackMcpConfigs),
-			linearMcpConfigs: resolveList(config.linearMcpConfigs),
-			githubMcpConfigs: resolveList(config.githubMcpConfigs),
-		};
-	}
+	/** Guards buildCollaborators() against double-construction. */
+	private collaboratorsBuilt = false;
 
 	constructor(config: EdgeWorkerConfig) {
 		super();
-		this.config = EdgeWorker.normalizeConfigPaths(config);
+		this.config = normalizeConfigPaths(config);
 		this.cyrusHome = config.cyrusHome;
 		this.logger = createLogger({ component: "EdgeWorker" });
+		// Collaborators are constructed + wired by buildCollaborators(), driven
+		// by the composeEdgeWorker() composition root — NOT here. The constructor
+		// sets only primitive state, so there is no `new Collaborator()` in the
+		// constructor body (Frozen decision #6). A worker built via
+		// `new EdgeWorker(config)` alone is intentionally incomplete; always
+		// construct through composeEdgeWorker().
+	}
+
+	/**
+	 * Construct and wire every collaborator onto this worker — the composition
+	 * root's build step.
+	 *
+	 * This is the second half of a two-phase construction: the constructor sets
+	 * primitive state (config / cyrusHome / logger + the field-initialized state
+	 * maps), then `composeEdgeWorker()` calls this to build the collaborator
+	 * graph. Collaborators bind to this worker instance — their dependency
+	 * closures read `this.<method>` / `this.<stateMap>` lazily — so they must be
+	 * built *after* the instance exists. That is why construction is two-phase
+	 * rather than a constructor that accepts a prebuilt collaborator bag.
+	 *
+	 * @internal Exposed for the composeEdgeWorker() composition root only.
+	 *
+	 * @param config the raw (un-normalized) config; the body reads it directly
+	 *   for the fields that were historically consumed pre-normalization
+	 *   (serverPort, linearWorkspaces, repositories, userAccessControl), while
+	 *   `this.config` holds the path-normalized copy.
+	 */
+	buildCollaborators(config: EdgeWorkerConfig): void {
+		if (this.collaboratorsBuilt) return;
+		this.collaboratorsBuilt = true;
 		this.persistenceManager = new PersistenceManager(
 			join(this.cyrusHome, "state"),
 		);
@@ -364,24 +290,6 @@ export class EdgeWorker extends EventEmitter {
 
 		// Initialize GitHub comment service for posting replies to GitHub PRs
 		this.gitHubCommentService = new GitHubCommentService();
-
-		// Initialize GitLab comment service for posting replies to GitLab MRs.
-		// For Self-Managed GitLab the API base URL must be derived from the
-		// configured repos' gitlabUrl host; otherwise the service falls back to
-		// gitlab.com and 404s on every reply. Picks the first configured
-		// GitLab repo's host (single GitLab host per Cyrus instance).
-		const firstGitlabRepo = config.repositories.find((r) => r.gitlabUrl);
-		let gitlabApiBaseUrl: string | undefined;
-		if (firstGitlabRepo?.gitlabUrl) {
-			try {
-				gitlabApiBaseUrl = new URL(firstGitlabRepo.gitlabUrl).origin;
-			} catch {
-				// malformed gitlabUrl — leave undefined and fall through to default
-			}
-		}
-		this.gitLabCommentService = new GitLabCommentService(
-			gitlabApiBaseUrl ? { apiBaseUrl: gitlabApiBaseUrl } : undefined,
-		);
 
 		// Initialize global session registry (centralized session storage)
 		this.globalSessionRegistry = new GlobalSessionRegistry();
@@ -433,7 +341,80 @@ export class EdgeWorker extends EventEmitter {
 			getIssueTracker: (linearWorkspaceId: string) => {
 				return this.getIssueTrackerForWorkspace(linearWorkspaceId) ?? null;
 			},
+			// Re-read per question so config hot-reload takes effect without restart.
+			getTimeoutMs: () =>
+				questionTimeoutMsFromMinutes(this.config.askUserQuestionTimeoutMinutes),
 		});
+
+		// Initialize the webhook/message router. Every dep is a late-bound arrow
+		// closure over `this` — CRITICAL: they bind to the heavy-body EdgeWorker
+		// methods (initializeAgentRunner via startAgentSession, handleStopSignal,
+		// handleGitHubWebhook, ...), NEVER to the thin delegator methods
+		// (handleWebhook / handleAgentSessionCreatedWebhook /
+		// handleUserPromptedAgentActivity), which would recurse forever.
+		// Late binding also lets tests reassign a handler on the instance and have
+		// the router pick it up (see EdgeWorker.status-endpoint.test.ts).
+		const webhookRouterDeps: WebhookRouterDeps = {
+			repositoryRouter: this.repositoryRouter,
+			askUserQuestionHandler: this.askUserQuestionHandler,
+			isParked: (issueId) => this.parkedRegistry.isParked(issueId),
+			getCachedRepositories: (issueId) => this.getCachedRepositories(issueId),
+			getRepositoryForSession: (agentSessionId) => {
+				const session = this.agentSessionManager.getSession(agentSessionId);
+				if (!session) return null;
+				const repoId = this.sessionRepositories.get(agentSessionId);
+				if (!repoId) return null;
+				return this.repositories.get(repoId) ?? null;
+			},
+			cacheIssueRepositories: (issueId, repoIds) => {
+				this.repositoryRouter.getIssueRepositoryCache().set(issueId, repoIds);
+			},
+			allRepositories: () => Array.from(this.repositories.values()),
+			postSessionLostResponse: async (agentSessionId) => {
+				await this.agentSessionManager.createResponseActivity(
+					agentSessionId,
+					"I couldn't process your message because the session configuration was lost. Please create a new session by mentioning me (@cyrus) in a new comment with your prompt.",
+				);
+			},
+			checkUserAccess: (webhook, repo) => this.checkUserAccess(webhook, repo),
+			handleBlockedUser: (webhook, repo, reason) =>
+				this.handleBlockedUser(webhook, repo, reason),
+			checkBlockedByDependencies: (agentSession, linearWorkspaceId) =>
+				this.checkBlockedByDependencies(agentSession, linearWorkspaceId),
+			parkSession: (
+				webhook,
+				repositories,
+				blockingIssueIds,
+				blockingIdentifiers,
+				opts,
+			) =>
+				this.parkAgentSession(
+					webhook,
+					repositories,
+					blockingIssueIds,
+					blockingIdentifiers,
+					opts,
+				),
+			startSession: (webhook, repositories, opts) =>
+				this.startAgentSession(webhook, repositories, opts),
+			continuePromptedActivity: (webhook, repositories) =>
+				this.handleNormalPromptedActivity(webhook, repositories),
+			stopSession: (webhook) => this.handleStopSignal(webhook),
+			handleParkedReprompt: (webhook, issueId) =>
+				this.handleParkedSessionReprompt(webhook, issueId),
+			handleRepositorySelection: (webhook) =>
+				this.handleRepositorySelectionResponse(webhook),
+			handleAskUserQuestion: (webhook) =>
+				this.handleAskUserQuestionResponse(webhook),
+			handleUnassigned: (webhook) => this.handleIssueUnassignedWebhook(webhook),
+			handleContentUpdate: (webhook) => this.handleIssueContentUpdate(webhook),
+			handleStateChange: (webhook) => this.handleIssueStateChange(webhook),
+			handleGitHubComment: (event) => this.handleGitHubWebhook(event),
+			handleGitHubPush: (payload) => this.handleGitHubPushWebhook(payload),
+			handleIssueTerminal: (message) =>
+				this.handleIssueStateChangeMessage(message),
+		};
+		this.webhookRouter = new WebhookRouter(webhookRouterDeps, this.logger);
 
 		// Initialize webhook IP validator
 		// Enabled by default in self-hosted mode (CYRUS_HOST_EXTERNAL=true),
@@ -490,27 +471,16 @@ export class EdgeWorker extends EventEmitter {
 					childSessionId,
 				);
 			},
+			undefined,
+			// Usage footer defaults ON; only an explicit `false` opts out.
+			this.config.showUsageFooter !== false,
 		);
 
-		// Initialize repositories with path resolution
-		for (const repo of config.repositories) {
+		// Initialize repositories. Paths are already normalized by
+		// `normalizeConfigPaths(config)` above, so use them directly.
+		for (const repo of this.config.repositories) {
 			if (repo.isActive !== false) {
-				// Resolve paths that may contain tilde (~) prefix
-				const resolvedRepo: RepositoryConfig = {
-					...repo,
-					repositoryPath: resolvePath(repo.repositoryPath),
-					workspaceBaseDir: resolvePath(repo.workspaceBaseDir),
-					mcpConfigPath: Array.isArray(repo.mcpConfigPath)
-						? repo.mcpConfigPath.map(resolvePath)
-						: repo.mcpConfigPath
-							? resolvePath(repo.mcpConfigPath)
-							: undefined,
-					promptTemplatePath: repo.promptTemplatePath
-						? resolvePath(repo.promptTemplatePath)
-						: undefined,
-				};
-
-				this.repositories.set(repo.id, resolvedRepo);
+				this.repositories.set(repo.id, repo);
 			}
 		}
 
@@ -579,12 +549,38 @@ export class EdgeWorker extends EventEmitter {
 							getClient?: () => import("@linear/sdk").LinearClient;
 					  })
 					| undefined,
-			getCyrusToolsMcpUrl: () => this.getCyrusToolsMcpUrl(),
+			getCyrusToolsMcpUrl: () => this.cyrusToolsHost.getUrl(),
 			createCyrusToolsOptions: (parentSessionId) =>
-				this.createCyrusToolsOptions(parentSessionId),
+				this.cyrusToolsHost.createToolsOptions(parentSessionId),
+		});
+		// The in-process cyrus-tools MCP host. Constructed after McpConfigService
+		// so it can consume it for context lookup + auth validation. The
+		// getCyrusToolsMcpUrl/createCyrusToolsOptions lambdas above are lazy, so
+		// the forward reference here is safe (both directions resolve at
+		// request/build time, never during construction).
+		// (In Phase G this construction + those two lambdas move into
+		// composeEdgeWorker.)
+		this.cyrusToolsHost = new CyrusToolsHost({
+			getFastifyInstance: () =>
+				this.sharedApplicationServer.getFastifyInstance(),
+			getPort: () => {
+				const s = this.sharedApplicationServer as {
+					getPort?: () => number;
+				};
+				return typeof s.getPort === "function"
+					? s.getPort()
+					: this.config.serverPort || this.config.webhookPort || 3456;
+			},
+			mcpConfigService: this.mcpConfigService,
+			getAllKnownSessions: () => this.getAllKnownSessions(),
+			onChildSessionCreated: (childSessionId, parentSessionId) =>
+				this.handleChildSessionMapping(childSessionId, parentSessionId),
+			onFeedbackDelivery: (childSessionId, message) =>
+				this.handleFeedbackDeliveryToChildSession(childSessionId, message),
+			getFailureModesApiKey: () => process.env.CYRUS_API_KEY,
+			getFailureModesBaseUrl: () => getCyrusAppUrl(),
 		});
 		this.runnerConfigBuilder = new RunnerConfigBuilder(
-			this.toolPermissionResolver,
 			this.mcpConfigService,
 			this.runnerSelectionService,
 		);
@@ -599,11 +595,13 @@ export class EdgeWorker extends EventEmitter {
 			this.configPath,
 			this.repositories,
 		);
+		this.gitHubUsernameResolver = new GitHubUsernameResolver(this.logger);
 		this.promptBuilder = new PromptBuilder({
 			logger: this.logger,
 			repositories: this.repositories,
 			issueTrackers: this.issueTrackers,
 			gitService: this.gitService,
+			gitHubUsernameResolver: this.gitHubUsernameResolver,
 		});
 		this.defaultSkillsDeployer = new DefaultSkillsDeployer(
 			this.cyrusHome,
@@ -613,6 +611,145 @@ export class EdgeWorker extends EventEmitter {
 			this.cyrusHome,
 			this.logger,
 		);
+		this.promptAssembler = new PromptAssembler({
+			logger: this.logger,
+			promptBuilder: this.promptBuilder,
+			skillsPluginResolver: this.skillsPluginResolver,
+			buildSkillSessionContext: (repo, issue, session) =>
+				this.buildSkillSessionContext(repo, issue, session),
+		});
+
+		// Session split (Phase F): parked/warm/orchestration state machines.
+		// (In Phase G this construction moves to composeEdgeWorker.)
+		this.parkedRegistry = new ParkedSessionRegistry();
+		// LRU cap over concurrently-warm idle Claude sessions. `0` (default when
+		// `claudeMaxWarmIdleSessions` is unset) means unbounded — the keep-alive
+		// window alone governs accumulation. Hot-reloaded on `configChanged`.
+		this.warmSessionRegistry = new WarmSessionRegistry(
+			this.config.claudeMaxWarmIdleSessions ?? 0,
+			this.logger,
+		);
+		this.warmPool = new WarmSessionPool({
+			agentSessionManager: this.agentSessionManager,
+			// Warm and cold paths share the SAME AccessPolicy compute+adapter so
+			// their home-directory denials can't drift (Frozen decision #2).
+			accessPolicy: { compute, toClaudeToolPatterns },
+			mcpConfigService: this.mcpConfigService,
+			skillsPluginResolver: this.skillsPluginResolver,
+			gitService: this.gitService,
+			logger: this.logger,
+			cyrusHome: this.cyrusHome,
+			getConfig: () => this.config,
+			getRepositoryForSession: (sessionId) => {
+				const repoId = this.sessionRepositories.get(sessionId);
+				return repoId ? this.repositories.get(repoId) : undefined;
+			},
+			buildAllowedTools: (repository) => this.buildAllowedTools(repository),
+			buildDisallowedTools: (repository) =>
+				this.buildDisallowedTools(repository),
+		});
+		this.sessionOrchestrator = new SessionOrchestrator({
+			logger: this.logger,
+			cyrusHome: this.cyrusHome,
+			agentSessionManager: this.agentSessionManager,
+			warmPool: this.warmPool,
+			runnerConfigBuilder: this.runnerConfigBuilder,
+			skillsPluginResolver: this.skillsPluginResolver,
+			gitService: this.gitService,
+			promptAssembler: this.promptAssembler,
+			getConfig: () => this.config,
+			getClaudeSessionStore: () => this.claudeSessionStore,
+			getWarmSessionRegistry: () => this.warmSessionRegistry,
+			getSandboxSettings: () => this.sdkSandboxSettings ?? undefined,
+			getEgressCaCertPath: () => this.egressCaCertPath ?? undefined,
+			createCyrusAgentSession: (
+				sessionId,
+				issue,
+				repositories,
+				agentSessionManager,
+				linearWorkspaceId,
+				baseBranchOverrides,
+				routingMethod,
+			) =>
+				this.createCyrusAgentSession(
+					sessionId,
+					issue,
+					repositories,
+					agentSessionManager,
+					linearWorkspaceId,
+					baseBranchOverrides,
+					routingMethod,
+				),
+			buildSessionPrompt: (
+				isNewSession,
+				session,
+				fullIssue,
+				repository,
+				promptBody,
+				attachmentManifest,
+				commentAuthor,
+				commentTimestamp,
+				previousSessionSummary,
+			) =>
+				this.buildSessionPrompt(
+					isNewSession,
+					session,
+					fullIssue,
+					repository,
+					promptBody,
+					attachmentManifest,
+					commentAuthor,
+					commentTimestamp,
+					previousSessionSummary,
+				),
+			maybeSummarizeColdResume: (
+				session,
+				linearAgentSessionId,
+				claudeSessionId,
+				linearWorkspaceId,
+			) =>
+				this.maybeSummarizeColdResume(
+					session,
+					linearAgentSessionId,
+					claudeSessionId,
+					linearWorkspaceId,
+				),
+			determineSystemPromptFromLabels: (labels, repository) =>
+				this.determineSystemPromptFromLabels(labels, repository),
+			buildAllowedTools: (repositories, promptType) =>
+				this.buildAllowedTools(repositories, promptType),
+			buildDisallowedTools: (repositories, promptType) =>
+				this.buildDisallowedTools(repositories, promptType),
+			buildSkillSessionContext: (repository, fullIssue, session) =>
+				this.buildSkillSessionContext(repository, fullIssue, session),
+			resolveSkillRepoPaths: (repository, session) =>
+				this.resolveSkillRepoPaths(repository, session),
+			fetchFullIssueDetails: (issueId, workspaceId) =>
+				this.fetchFullIssueDetails(issueId, workspaceId),
+			fetchIssueLabels: (issue) => this.fetchIssueLabels(issue),
+			createAskUserQuestionCallback: (sid, wid) =>
+				this.createAskUserQuestionCallback(sid, wid),
+			savePersistedState: () => this.savePersistedState(),
+			postInstantAcknowledgment: (sessionId, linearWorkspaceId) =>
+				this.postInstantAcknowledgment(sessionId, linearWorkspaceId),
+			postSystemPromptSelectionThought: (
+				sessionId,
+				labels,
+				linearWorkspaceId,
+				repositoryId,
+			) =>
+				this.postSystemPromptSelectionThought(
+					sessionId,
+					labels,
+					linearWorkspaceId,
+					repositoryId,
+				),
+			emitSessionStarted: (issueId, issue, repositoryId) => {
+				this.emit("session:started", issueId, issue, repositoryId);
+				this.config.handlers?.onSessionStart?.(issueId, issue, repositoryId);
+			},
+			resumeSessionDelegate: (...args) => this.resumeAgentSession(...args),
+		});
 
 		// Components will be initialized and registered in start() method before server starts
 	}
@@ -638,8 +775,8 @@ export class EdgeWorker extends EventEmitter {
 		// Pre-warm the 30 most recent Claude sessions in the background
 		// so their first query after restart has near-zero cold-start latency.
 		// Disabled by default; opt in with CYRUS_ENABLE_WARM_SESSIONS=1.
-		if (this.isWarmSessionsEnabled()) {
-			this.warmupRecentSessions(30).catch((err) => {
+		if (this.warmPool.isEnabled()) {
+			this.warmPool.warmup(30).catch((err) => {
 				this.logger.warn("Session warmup failed (non-fatal):", err);
 			});
 		}
@@ -654,10 +791,16 @@ export class EdgeWorker extends EventEmitter {
 				await this.addNewRepositories(changes.added);
 				// Live-update sandbox / egress proxy settings
 				await this.applySandboxConfigChanges(changes.newConfig);
-				this.config = EdgeWorker.normalizeConfigPaths(changes.newConfig);
+				// `changes.newConfig` is reconcile's already-normalized `merged`.
+				this.config = changes.newConfig;
 				this.configManager.setConfig(changes.newConfig);
 				this.runnerSelectionService.setConfig(changes.newConfig);
 				this.toolPermissionResolver.setConfig(changes.newConfig);
+				// Live-update the warm-idle-session LRU cap; lowering it evicts the
+				// now-excess least-recently-used idle sessions immediately.
+				this.warmSessionRegistry.setMaxIdleSessions(
+					changes.newConfig.claudeMaxWarmIdleSessions ?? 0,
+				);
 			},
 		);
 		this.configManager.startConfigWatcher();
@@ -834,12 +977,10 @@ export class EdgeWorker extends EventEmitter {
 			);
 		}
 
-		// 2. Register GitHub and Slack event transports unconditionally
-		// These don't require repositories and must be available during onboarding
+		// 2. Register the GitHub event transport unconditionally
+		// It doesn't require repositories and must be available during onboarding
 		// for webhook URL verification to succeed.
 		this.registerGitHubEventTransport();
-		this.registerGitLabEventTransport();
-		this.registerSlackEventTransport();
 
 		// 3. Create and register ConfigUpdater (both platforms)
 		this.configUpdater = new ConfigUpdater(
@@ -860,7 +1001,7 @@ export class EdgeWorker extends EventEmitter {
 		);
 
 		// 3. Register MCP endpoint for cyrus-tools on the same Fastify server/port
-		await this.registerCyrusToolsMcpEndpoint();
+		await this.cyrusToolsHost.mount();
 		// 4. Register /status endpoint for process activity monitoring
 		this.registerStatusEndpoint();
 
@@ -932,28 +1073,18 @@ export class EdgeWorker extends EventEmitter {
 					: undefined,
 		});
 
-		// Listen for legacy GitHub webhook events (deprecated, kept for backward compatibility)
+		// Listen for legacy GitHub webhook events (deprecated, kept for backward compatibility).
+		// The WebhookRouter performs the push-vs-comment fan-out; the comment handler
+		// (handleGitHubWebhook) owns its own activeWebhookCount shell. Kept
+		// fire-and-forget (.catch, not awaited) so a slow handler never blocks the
+		// transport.
 		this.gitHubEventTransport.on("event", (event: GitHubWebhookEvent) => {
-			// Route push events to the base branch notification handler
-			if (event.eventType === "push") {
-				this.handleGitHubPushWebhook(event.payload as GitHubPushPayload).catch(
-					(error) => {
-						this.logger.error(
-							"Failed to handle GitHub push webhook",
-							error instanceof Error ? error : new Error(String(error)),
-						);
-					},
+			this.webhookRouter.dispatchGitHubEvent(event).catch((error) => {
+				this.logger.error(
+					"Failed to handle GitHub webhook",
+					error instanceof Error ? error : new Error(String(error)),
 				);
-				return;
-			}
-			this.handleGitHubWebhook(event as GitHubCommentWebhookEvent).catch(
-				(error) => {
-					this.logger.error(
-						"Failed to handle GitHub webhook",
-						error instanceof Error ? error : new Error(String(error)),
-					);
-				},
-			);
+			});
 		});
 
 		// Listen for unified internal messages (new message bus)
@@ -988,199 +1119,6 @@ export class EdgeWorker extends EventEmitter {
 			`GitHub event transport registered (${verificationMode} mode)`,
 		);
 		this.logger.info("Webhook endpoint: POST /github-webhook");
-	}
-
-	/**
-	 * Register the GitLab event transport for receiving forwarded GitLab webhooks.
-	 * This creates a /gitlab-webhook endpoint that handles note events on merge requests.
-	 */
-	private registerGitLabEventTransport(): void {
-		const isExternalHost =
-			process.env.CYRUS_HOST_EXTERNAL?.toLowerCase().trim() === "true";
-		const hasGitlabWebhookSecret =
-			process.env.GITLAB_WEBHOOK_SECRET != null &&
-			process.env.GITLAB_WEBHOOK_SECRET !== "";
-		const useSignatureVerification = isExternalHost && hasGitlabWebhookSecret;
-		const verificationMode = useSignatureVerification ? "signature" : "proxy";
-		const secret = useSignatureVerification
-			? process.env.GITLAB_WEBHOOK_SECRET!
-			: process.env.CYRUS_API_KEY || "";
-
-		this.gitLabEventTransport = new GitLabEventTransport({
-			fastifyServer: this.sharedApplicationServer.getFastifyInstance(),
-			verificationMode,
-			secret,
-		});
-
-		// Listen for legacy GitLab webhook events
-		this.gitLabEventTransport.on("event", (event: GitLabWebhookEvent) => {
-			this.handleGitLabWebhook(event).catch((error) => {
-				this.logger.error(
-					"Failed to handle GitLab webhook",
-					error instanceof Error ? error : new Error(String(error)),
-				);
-			});
-		});
-
-		// Listen for unified internal messages (new message bus)
-		this.gitLabEventTransport.on("message", (message: InternalMessage) => {
-			this.handleMessage(message);
-		});
-
-		// Listen for errors
-		this.gitLabEventTransport.on("error", (error: Error) => {
-			this.handleError(error);
-		});
-
-		// Register the /gitlab-webhook endpoint
-		this.gitLabEventTransport.register();
-
-		this.logger.info(
-			`GitLab event transport registered (${verificationMode} mode)`,
-		);
-		this.logger.info("Webhook endpoint: POST /gitlab-webhook");
-	}
-
-	/**
-	 * Whether Cyrus should follow plain replies in a Slack thread it was
-	 * @mentioned in. Enabled by default; controlled by the per-team
-	 * `slackThreadFollowing` config toggle (Behaviours page) and force-disabled
-	 * by the `CYRUS_SLACK_THREAD_FOLLOWING_DISABLED` env kill-switch, which takes
-	 * precedence over the toggle. When disabled, only @mentions are processed.
-	 */
-	private isSlackThreadFollowingEnabled(): boolean {
-		const envValue = (process.env.CYRUS_SLACK_THREAD_FOLLOWING_DISABLED ?? "")
-			.toLowerCase()
-			.trim();
-		if (envValue === "true" || envValue === "1" || envValue === "yes") {
-			return false;
-		}
-		// Config toggle defaults to enabled when unset.
-		return this.config.slackThreadFollowing !== false;
-	}
-
-	/**
-	 * Register the Slack event transport for receiving forwarded Slack webhooks from CYHOST.
-	 * This creates a /slack-webhook endpoint that handles @mention events from Slack.
-	 */
-	private registerSlackEventTransport(): void {
-		// Live provider reads from the repository map on demand — no snapshot needed
-		const chatRepositoryProvider = new LiveChatRepositoryProvider(
-			this.repositories,
-			() => this.config.linearWorkspaces || {},
-		);
-
-		const routingContext =
-			this.promptBuilder.generateRoutingContextForAllWorkspaces();
-		// Only managed teams (cloud or self-hosted, paired with cyrus-hosted)
-		// have a Behaviours page where automatic Slack thread listening can be
-		// turned off — CYRUS_API_KEY is proof of that pairing, so the
-		// stop-listening prompt guidance is gated on it. Community members
-		// don't have the key (or the page).
-		const cyrusAppBaseUrl = process.env.CYRUS_API_KEY
-			? getCyrusAppUrl()
-			: undefined;
-		const slackAdapter = new SlackChatAdapter(
-			chatRepositoryProvider,
-			this.logger,
-			{ repositoryRoutingContext: routingContext, cyrusAppBaseUrl },
-		);
-
-		if (
-			!chatRepositoryProvider.getDefaultLinearWorkspaceId() ||
-			!chatRepositoryProvider.getDefaultRepository()
-		) {
-			this.logger.warn(
-				"No repositories or workspaces configured — Slack sessions will not have access to MCP tools",
-			);
-		}
-
-		this.chatSessionHandler = new ChatSessionHandler(
-			slackAdapter,
-			{
-				cyrusHome: this.cyrusHome,
-				chatRepositoryProvider,
-				runnerConfigBuilder: this.runnerConfigBuilder,
-				createRunner: (config) => {
-					const runnerType = this.runnerSelectionService.getDefaultRunner();
-					return this.createRunnerForType(runnerType, {
-						...config,
-						model: this.getDefaultModelForRunner(runnerType),
-						fallbackModel: this.getDefaultFallbackModelForRunner(runnerType),
-					});
-				},
-				// Live read so hot-reloaded config (`setConfig`) picks up new
-				// per-platform MCP paths without rebuilding the handler.
-				getPlatformMcpConfigOverrides: () => this.config.slackMcpConfigs,
-				resolveSkillsConfig: async ({ repository, repositoryPaths }) => {
-					const plugins = await this.skillsPluginResolver.resolve();
-					const skills = await this.skillsPluginResolver.discoverSkillNames(
-						plugins,
-						{
-							repositoryId: repository?.id,
-							repoPaths: repositoryPaths,
-						},
-					);
-					return { plugins, skills };
-				},
-				onWebhookStart: () => {
-					this.activeWebhookCount++;
-				},
-				onWebhookEnd: () => {
-					this.activeWebhookCount--;
-				},
-				onStateChange: () => this.savePersistedState(),
-				onClaudeError: (error) => this.handleClaudeError(error),
-			},
-			this.logger,
-		);
-
-		// Use direct Slack signature verification only when BOTH:
-		// 1. SLACK_SIGNING_SECRET is set (we have the secret to verify)
-		// 2. CYRUS_HOST_EXTERNAL is true (self-hosted: Slack sends directly to us)
-		// On cloud droplets, CYHOST forwards webhooks with Bearer token auth
-		// (it verifies the Slack signature itself and doesn't forward the headers).
-		const isExternalHost =
-			process.env.CYRUS_HOST_EXTERNAL?.toLowerCase().trim() === "true";
-		const hasSlackSigningSecret =
-			process.env.SLACK_SIGNING_SECRET != null &&
-			process.env.SLACK_SIGNING_SECRET !== "";
-		const useDirectSlackWebhooks = isExternalHost && hasSlackSigningSecret;
-
-		const slackVerificationMode = useDirectSlackWebhooks ? "direct" : "proxy";
-		const slackSecret = useDirectSlackWebhooks
-			? process.env.SLACK_SIGNING_SECRET!
-			: process.env.CYRUS_API_KEY || "";
-
-		this.slackEventTransport = new SlackEventTransport({
-			fastifyServer: this.sharedApplicationServer.getFastifyInstance(),
-			verificationMode: slackVerificationMode,
-			secret: slackSecret,
-			// Live read so the per-team toggle (hot-reloaded via config) and the
-			// env kill-switch both take effect without rebuilding the transport.
-			isThreadFollowingEnabled: () => this.isSlackThreadFollowingEnabled(),
-		});
-
-		this.slackEventTransport.on("event", (event: SlackWebhookEvent) => {
-			this.chatSessionHandler!.handleEvent(event).catch((error) => {
-				this.logger.error(
-					"Failed to handle Slack webhook",
-					error instanceof Error ? error : new Error(String(error)),
-				);
-			});
-		});
-		this.slackEventTransport.on("message", (message: InternalMessage) => {
-			this.handleMessage(message);
-		});
-		this.slackEventTransport.on("error", (error: Error) => {
-			this.handleError(error);
-		});
-
-		this.slackEventTransport.register();
-
-		this.logger.info(
-			`Slack event transport registered (${slackVerificationMode} mode)`,
-		);
 	}
 
 	/**
@@ -1512,8 +1450,7 @@ export class EdgeWorker extends EventEmitter {
 
 			// Build allowed tools using the GitHub platform resolver, which honors
 			// `githubAllowedTools` on the workspace config and falls back to
-			// `GITHUB_DEFAULT_ALLOWED_TOOLS` (which intentionally omits
-			// `mcp__slack` — no subtractive filtering needed).
+			// `GITHUB_DEFAULT_ALLOWED_TOOLS`.
 			const allowedTools =
 				this.toolPermissionResolver.buildGithubAllowedTools(repository);
 			const disallowedTools = this.buildDisallowedTools(repository);
@@ -1521,7 +1458,7 @@ export class EdgeWorker extends EventEmitter {
 
 			// Create agent runner using the standard config builder
 			const { config: runnerConfig, runnerType } =
-				await this.buildAgentRunnerConfig(
+				await this.sessionOrchestrator.buildAgentRunnerConfig(
 					session,
 					repository,
 					githubSessionId,
@@ -1535,10 +1472,15 @@ export class EdgeWorker extends EventEmitter {
 					200, // maxTurns
 					undefined, // linearWorkspaceId
 					this.buildSkillSessionContext(repository, undefined, session),
+					undefined, // labelPromptModel (no Linear labels for GitHub PRs)
+					undefined, // effort (GitHub PR sessions use SDK default)
 					"github", // sessionPlatform → uses githubMcpConfigs override
 				);
 
-			const runner = this.createRunnerForType(runnerType, runnerConfig);
+			const runner = this.sessionOrchestrator.createRunnerForType(
+				runnerType,
+				runnerConfig,
+			);
 
 			// Store the runner in the session manager
 			agentSessionManager.addAgentRunner(githubSessionId, runner);
@@ -1807,9 +1749,13 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 					}),
 			} as unknown as Issue;
 
-			return await this.gitService.createGitWorktree(syntheticIssue, [
-				repository,
-			]);
+			return await this.gitService.createGitWorktree(
+				syntheticIssue,
+				[repository],
+				{
+					crossRepoSiblingRepositories: Array.from(this.repositories.values()),
+				},
+			);
 		} catch (error) {
 			this.logger.error(
 				`Failed to create GitHub workspace for PR #${prNumber}`,
@@ -1914,18 +1860,11 @@ ${taskSection}`;
 				.find((m) => m.type === "assistant");
 
 			let summary = "Task completed. Please review the changes on this branch.";
-			if (
-				lastAssistantMessage &&
-				lastAssistantMessage.type === "assistant" &&
-				"message" in lastAssistantMessage
-			) {
-				const msg = lastAssistantMessage as {
-					message: { content: Array<{ type: string; text?: string }> };
-				};
-				const textBlock = msg.message.content?.find(
+			if (lastAssistantMessage && lastAssistantMessage.type === "assistant") {
+				const textBlock = lastAssistantMessage.content.find(
 					(block) => block.type === "text" && block.text,
 				);
-				if (textBlock?.text) {
+				if (textBlock?.type === "text" && textBlock.text) {
 					summary = textBlock.text;
 				}
 			}
@@ -1983,522 +1922,6 @@ ${taskSection}`;
 	}
 
 	/**
-	 * Handle an incoming GitLab webhook event (note on a merge request).
-	 * Mirrors the GitHub webhook handler but uses GitLab-specific utilities.
-	 */
-	private async handleGitLabWebhook(event: GitLabWebhookEvent): Promise<void> {
-		this.activeWebhookCount++;
-
-		try {
-			// Only handle notes on merge requests
-			if (!isNoteOnMergeRequest(event)) {
-				this.logger.debug(
-					"Ignoring GitLab event: not a note on a merge request",
-				);
-				return;
-			}
-
-			const projectPath = extractProjectPath(event);
-			const mrIid = extractMRIid(event);
-			const noteBody = extractNoteBody(event);
-			const noteAuthor = extractNoteAuthor(event);
-			const mrTitle = extractMRTitle(event);
-			const sessionKey = extractGitLabSessionKey(event);
-
-			// Skip comments from the bot itself to prevent infinite loops
-			const botUsername = process.env.GITLAB_BOT_USERNAME;
-			if (botUsername && noteAuthor === botUsername) {
-				this.logger.debug(
-					`Ignoring note from bot user @${botUsername} on ${projectPath}!${mrIid}`,
-				);
-				return;
-			}
-
-			// Only trigger on notes that mention the bot (when configured)
-			if (botUsername && !noteBody.includes(`@${botUsername}`)) {
-				this.logger.debug(
-					`Ignoring note without @${botUsername} mention on ${projectPath}!${mrIid}`,
-				);
-				return;
-			}
-
-			this.logger.info(
-				`Processing GitLab webhook: ${projectPath}!${mrIid} by @${noteAuthor}`,
-			);
-
-			// Add "eyes" emoji reaction to acknowledge receipt
-			const reactionToken =
-				event.accessToken || process.env.GITLAB_ACCESS_TOKEN;
-			const noteId = extractNoteId(event);
-			const projectId = extractProjectId(event);
-			if (reactionToken && noteId && projectId && mrIid) {
-				this.gitLabCommentService
-					.addAwardEmoji({
-						token: reactionToken,
-						projectId,
-						mrIid,
-						noteId,
-						name: "eyes",
-					})
-					.catch((err: unknown) => {
-						this.logger.warn(
-							`Failed to add GitLab emoji reaction: ${err instanceof Error ? err.message : err}`,
-						);
-					});
-			}
-
-			// Find the repository configuration that matches this GitLab project
-			const repository = this.findRepositoryByGitLabUrl(projectPath);
-			if (!repository) {
-				this.logger.warn(
-					`No repository configured for GitLab project: ${projectPath}`,
-				);
-				return;
-			}
-
-			const agentSessionManager = this.agentSessionManager;
-
-			// Branch refs are available directly from the MR payload
-			const branchRef = extractMRBranchRef(event);
-			const baseBranchRef = extractMRBaseBranchRef(event);
-
-			if (!branchRef || !mrIid) {
-				this.logger.error(
-					`Could not determine branch or MR iid for ${projectPath}!${mrIid}`,
-				);
-				return;
-			}
-
-			// Strip the bot mention to get the task instructions
-			const mentionHandle = botUsername ? `@${botUsername}` : "@cyrusagent";
-			const taskInstructions = stripGitLabMention(noteBody, mentionHandle);
-
-			// Check for an existing multi-repo session that includes this repository
-			let workspace: { path: string; isGitWorktree: boolean } | null = null;
-			const multiRepoSession =
-				agentSessionManager.getActiveMultiRepoSessionForRepository(
-					repository.id,
-				);
-
-			if (multiRepoSession) {
-				const subWorktreePath =
-					multiRepoSession.workspace.repoPaths?.[repository.id];
-				if (subWorktreePath) {
-					workspace = {
-						path: subWorktreePath,
-						isGitWorktree: true,
-					};
-					this.logger.info(
-						`Resolved multi-repo sub-worktree for ${repository.name}: ${subWorktreePath}`,
-					);
-				} else {
-					this.logger.warn(
-						`No sub-worktree found for repo ${repository.name} in multi-repo session ${multiRepoSession.id}, falling back to root workspace`,
-					);
-					workspace = {
-						path: multiRepoSession.workspace.path,
-						isGitWorktree: true,
-					};
-				}
-			} else {
-				// Single-repo or no existing session: create workspace
-				workspace = await this.createGitLabWorkspace(
-					repository,
-					branchRef,
-					mrIid,
-				);
-			}
-
-			if (!workspace) {
-				this.logger.error(
-					`Failed to create workspace for ${projectPath}!${mrIid}`,
-				);
-				return;
-			}
-
-			this.logger.info(`GitLab workspace created at: ${workspace.path}`);
-
-			// Check if another active session is already using this branch/workspace
-			const existingSessions =
-				agentSessionManager.getActiveSessionsByBranchName(branchRef);
-			const firstExisting = existingSessions[0];
-			if (firstExisting) {
-				this.logger.warn(
-					`Reusing workspace from active session ${firstExisting.id} — concurrent writes possible`,
-				);
-			}
-
-			// Create a synthetic session for this GitLab MR note
-			const issueMinimal: IssueMinimal = {
-				id: sessionKey,
-				identifier: `${projectPath}!${mrIid}`,
-				title: mrTitle || `MR !${mrIid}`,
-				branchName: branchRef,
-			};
-
-			// Create an internal agent session (no Linear session for GitLab)
-			const gitlabSessionId = `gitlab-${Date.now()}`;
-			agentSessionManager.createCyrusAgentSession(
-				gitlabSessionId,
-				sessionKey,
-				issueMinimal,
-				workspace,
-				"gitlab", // Don't stream activities to Linear for GitLab sources
-				[
-					{
-						repositoryId: repository.id,
-						branchName: branchRef,
-						baseBranchName: baseBranchRef ?? repository.baseBranch,
-					},
-				],
-			);
-
-			// Register session-to-repo mapping and activity sink
-			this.sessionRepositories.set(gitlabSessionId, repository.id);
-			const activitySink = this.getActivitySinkForRepo(repository.id);
-			if (activitySink) {
-				agentSessionManager.setActivitySink(gitlabSessionId, activitySink);
-			}
-
-			const session = agentSessionManager.getSession(gitlabSessionId);
-			if (!session) {
-				this.logger.error(
-					`Failed to create session for GitLab webhook on ${projectPath}!${mrIid}`,
-				);
-				return;
-			}
-
-			// Initialize procedure metadata
-			if (!session.metadata) {
-				session.metadata = {};
-			}
-
-			// Store GitLab-specific metadata for reply posting
-			// Reuse commentId for note ID (serves the same purpose across platforms)
-			session.metadata.commentId = String(noteId);
-
-			// Build the system prompt for this GitLab MR session
-			// TODO: Use buildGitLabChangeRequestSystemPrompt for merge_request approval events
-			const isMergeRequestEvent = event.eventType === "merge_request";
-			const systemPrompt = isMergeRequestEvent
-				? this.buildGitLabChangeRequestSystemPrompt(
-						event,
-						branchRef,
-						taskInstructions,
-					)
-				: this.buildGitLabSystemPrompt(event, branchRef, taskInstructions);
-
-			// Build allowed tools using the GitHub platform resolver — GitLab and
-			// GitHub share the same PR-targeted, single-repo intent, so they use
-			// the same `githubAllowedTools` knob and the same `GITHUB_*` default.
-			const allowedTools =
-				this.toolPermissionResolver.buildGithubAllowedTools(repository);
-			const disallowedTools = this.buildDisallowedTools(repository);
-			const allowedDirectories: string[] = [repository.repositoryPath];
-
-			// Create agent runner using the standard config builder
-			const { config: runnerConfig, runnerType } =
-				await this.buildAgentRunnerConfig(
-					session,
-					repository,
-					gitlabSessionId,
-					systemPrompt,
-					allowedTools,
-					allowedDirectories,
-					disallowedTools,
-					undefined, // resumeSessionId
-					undefined, // labels
-					undefined, // issueDescription
-					200, // maxTurns
-					undefined, // linearWorkspaceId
-					this.buildSkillSessionContext(repository, undefined, session),
-					"gitlab", // sessionPlatform → uses githubMcpConfigs override
-				);
-
-			const runner = this.createRunnerForType(runnerType, runnerConfig);
-
-			// Store the runner in the session manager
-			agentSessionManager.addAgentRunner(gitlabSessionId, runner);
-
-			// Save persisted state
-			await this.savePersistedState();
-
-			this.emit(
-				"session:started",
-				sessionKey,
-				issueMinimal as unknown as Issue,
-				repository.id,
-			);
-
-			this.logger.info(
-				`Starting ${runnerType} runner for GitLab MR ${projectPath}!${mrIid}`,
-			);
-
-			// Start the session and handle completion
-			try {
-				const sessionInfo = await runner.start(taskInstructions);
-				this.logger.info(`GitLab session started: ${sessionInfo.sessionId}`);
-
-				// When session completes, post the reply back to GitLab
-				await this.postGitLabReply(event, runner, repository);
-			} catch (error) {
-				this.logger.error(
-					`GitLab session error for ${projectPath}!${mrIid}`,
-					error instanceof Error ? error : new Error(String(error)),
-				);
-			} finally {
-				await this.savePersistedState();
-			}
-		} catch (error) {
-			this.logger.error(
-				"Failed to process GitLab webhook",
-				error instanceof Error ? error : new Error(String(error)),
-			);
-		} finally {
-			this.activeWebhookCount--;
-		}
-	}
-
-	/**
-	 * Find a repository configuration that matches a GitLab project URL.
-	 * Matches against the gitlabUrl field in repository config.
-	 */
-	private findRepositoryByGitLabUrl(
-		projectPath: string,
-	): RepositoryConfig | null {
-		for (const repo of this.repositories.values()) {
-			if (!repo.gitlabUrl) continue;
-			if (
-				repo.gitlabUrl.includes(projectPath) ||
-				repo.gitlabUrl.endsWith(`/${projectPath}`)
-			) {
-				return repo;
-			}
-		}
-		return null;
-	}
-
-	/**
-	 * Create a git worktree for a GitLab MR branch.
-	 * If the worktree already exists for this branch, reuse it.
-	 */
-	private async createGitLabWorkspace(
-		repository: RepositoryConfig,
-		branchRef: string,
-		mrIid: number,
-	): Promise<{ path: string; isGitWorktree: boolean } | null> {
-		try {
-			// Create a synthetic issue-like object for the git service
-			const syntheticIssue = {
-				id: `gitlab-mr-${mrIid}`,
-				identifier: `MR-${mrIid}`,
-				title: `MR !${mrIid}`,
-				description: null,
-				url: "",
-				branchName: branchRef,
-				assigneeId: null,
-				stateId: null,
-				teamId: null,
-				labelIds: [],
-				priority: 0,
-				createdAt: new Date(),
-				updatedAt: new Date(),
-				archivedAt: null,
-				state: Promise.resolve(undefined),
-				assignee: Promise.resolve(undefined),
-				team: Promise.resolve(undefined),
-				parent: Promise.resolve(undefined),
-				project: Promise.resolve(undefined),
-				labels: () => Promise.resolve({ nodes: [] }),
-				comments: () => Promise.resolve({ nodes: [] }),
-				attachments: () => Promise.resolve({ nodes: [] }),
-				children: () => Promise.resolve({ nodes: [] }),
-				inverseRelations: () => Promise.resolve({ nodes: [] }),
-				update: () =>
-					Promise.resolve({
-						success: true,
-						issue: undefined,
-						lastSyncId: 0,
-					}),
-			} as unknown as Issue;
-
-			return await this.gitService.createGitWorktree(syntheticIssue, [
-				repository,
-			]);
-		} catch (error) {
-			this.logger.error(
-				`Failed to create GitLab workspace for MR !${mrIid}`,
-				error instanceof Error ? error : new Error(String(error)),
-			);
-			return null;
-		}
-	}
-
-	/**
-	 * Build a system prompt for a GitLab MR note session.
-	 */
-	private buildGitLabSystemPrompt(
-		event: GitLabWebhookEvent,
-		branchRef: string,
-		taskInstructions: string,
-	): string {
-		const projectPath = extractProjectPath(event);
-		const mrIid = extractMRIid(event);
-		const mrTitle = extractMRTitle(event);
-		const noteAuthor = extractNoteAuthor(event);
-		const noteUrl = extractNoteUrl(event);
-
-		return `You are working on a GitLab Merge Request.
-
-## Context
-- **Project**: ${projectPath}
-- **MR**: !${mrIid} - ${mrTitle || "Untitled"}
-- **Branch**: ${branchRef}
-- **Requested by**: @${noteAuthor}
-- **Note URL**: ${noteUrl}
-
-## Task
-${taskInstructions}
-
-## Instructions
-- You are already checked out on the MR branch \`${branchRef}\`
-- Make changes directly to the code on this branch
-- After making changes, commit and push them to the branch
-- Use \`glab\` CLI commands for GitLab-specific operations
-- Be concise in your responses as they will be posted back to the GitLab MR`;
-	}
-
-	/**
-	 * Build a system prompt for a GitLab MR change request session.
-	 */
-	private buildGitLabChangeRequestSystemPrompt(
-		event: GitLabWebhookEvent,
-		branchRef: string,
-		reviewBody: string,
-	): string {
-		const projectPath = extractProjectPath(event);
-		const mrIid = extractMRIid(event);
-		const mrTitle = extractMRTitle(event);
-		const noteAuthor = extractNoteAuthor(event);
-		const noteUrl = extractNoteUrl(event);
-
-		const hasReviewBody = reviewBody.trim().length > 0;
-
-		const taskSection = hasReviewBody
-			? `## Reviewer Feedback
-${reviewBody}
-
-## Instructions
-- Read the MR diff and the reviewer's feedback above to understand all requested changes
-- You are already checked out on the MR branch \`${branchRef}\`
-- Address all the reviewer's feedback and make the necessary changes
-- After making changes, commit and push them to the branch
-- Respond with a concise summary of the changes you made`
-			: `## Instructions
-- The reviewer has requested changes but did not leave a summary comment
-- Use \`glab mr view ${mrIid}\` and \`glab mr diff ${mrIid}\` to review the MR context
-- You are already checked out on the MR branch \`${branchRef}\`
-- Address all the reviewer's feedback and make the necessary changes
-- After making changes, commit and push them to the branch
-- Respond with a concise summary of the changes you made`;
-
-		return `You are working on a GitLab Merge Request that has received a change request review.
-
-## Context
-- **Project**: ${projectPath}
-- **MR**: !${mrIid} - ${mrTitle || "Untitled"}
-- **Branch**: ${branchRef}
-- **Reviewer**: @${noteAuthor}
-- **Note URL**: ${noteUrl}
-
-${taskSection}`;
-	}
-
-	/**
-	 * Post a reply back to the GitLab MR after the session completes.
-	 */
-	private async postGitLabReply(
-		event: GitLabWebhookEvent,
-		runner: IAgentRunner,
-		_repository: RepositoryConfig,
-	): Promise<void> {
-		try {
-			// Get the last assistant message from the runner as the summary
-			const messages = runner.getMessages();
-			const lastAssistantMessage = [...messages]
-				.reverse()
-				.find((m) => m.type === "assistant");
-
-			let summary = "Task completed. Please review the changes on this branch.";
-			if (
-				lastAssistantMessage &&
-				lastAssistantMessage.type === "assistant" &&
-				"message" in lastAssistantMessage
-			) {
-				const msg = lastAssistantMessage as {
-					message: {
-						content: Array<{ type: string; text?: string }>;
-					};
-				};
-				const textBlock = msg.message.content?.find(
-					(block) => block.type === "text" && block.text,
-				);
-				if (textBlock?.text) {
-					summary = textBlock.text;
-				}
-			}
-
-			const projectId = extractProjectId(event);
-			const mrIid = extractMRIid(event);
-			const discussionId = extractDiscussionId(event);
-
-			if (!mrIid) {
-				this.logger.warn("Cannot post GitLab reply: no MR iid");
-				return;
-			}
-
-			const token = event.accessToken || process.env.GITLAB_ACCESS_TOKEN;
-			if (!token) {
-				this.logger.warn(
-					"Cannot post GitLab reply: no access token or GITLAB_ACCESS_TOKEN configured",
-				);
-				this.logger.debug(
-					`Would have posted reply to ${extractProjectPath(event)}!${mrIid}: ${summary}`,
-				);
-				return;
-			}
-
-			if (discussionId) {
-				// Reply to the specific discussion thread
-				await this.gitLabCommentService.postDiscussionReply({
-					token,
-					projectId,
-					mrIid,
-					discussionId,
-					body: summary,
-				});
-			} else {
-				// Post as a top-level MR note
-				await this.gitLabCommentService.postMRNote({
-					token,
-					projectId,
-					mrIid,
-					body: summary,
-				});
-			}
-
-			this.logger.info(
-				`Posted GitLab reply to ${extractProjectPath(event)}!${mrIid}`,
-			);
-		} catch (error) {
-			this.logger.error(
-				"Failed to post GitLab reply",
-				error instanceof Error ? error : new Error(String(error)),
-			);
-		}
-	}
-
-	/**
 	 * Compute the current status of the Cyrus process
 	 * @returns "idle" if the process can be safely restarted, "busy" if work is in progress
 	 */
@@ -2516,24 +1939,7 @@ ${taskSection}`;
 			}
 		}
 
-		// Busy if any chat platform runner is actively running
-		if (this.chatSessionHandler?.isAnyRunnerBusy()) {
-			return "busy";
-		}
-
 		return "idle";
-	}
-
-	/**
-	 * Test-only: dispatch a synthetic Slack webhook event through the chat
-	 * session handler. Used by the F1 test harness to exercise the Slack →
-	 * ClaudeRunner code path end-to-end without a real Slack signature.
-	 */
-	async dispatchChatTestEvent(event: SlackWebhookEvent): Promise<void> {
-		if (!this.chatSessionHandler) {
-			throw new Error("chatSessionHandler not initialized");
-		}
-		await this.chatSessionHandler.handleEvent(event);
 	}
 
 	/**
@@ -2542,52 +1948,6 @@ ${taskSection}`;
 	 */
 	getSharedApplicationServer(): SharedApplicationServer {
 		return this.sharedApplicationServer;
-	}
-
-	/**
-	 * Test-only: list active chat threads (threadKey → sessionId).
-	 */
-	listChatThreads(): Array<{ threadKey: string; sessionId: string }> {
-		if (!this.chatSessionHandler) return [];
-		return this.chatSessionHandler.listThreads();
-	}
-
-	/**
-	 * Test-only: fetch the last assistant text reply for a chat thread.
-	 * Returns null when the thread or runner is unknown, or no assistant
-	 * message has been produced yet.
-	 */
-	getChatThreadLastReply(threadKey: string): {
-		text: string;
-		isRunning: boolean;
-		messageCount: number;
-	} | null {
-		if (!this.chatSessionHandler) return null;
-		const runner = this.chatSessionHandler.getRunnerForThread(threadKey);
-		if (!runner) return null;
-		const messages = runner.getMessages();
-		const lastAssistant = [...messages]
-			.reverse()
-			.find((m) => m.type === "assistant");
-		let text = "";
-		if (
-			lastAssistant &&
-			lastAssistant.type === "assistant" &&
-			"message" in lastAssistant
-		) {
-			const msg = lastAssistant as {
-				message: { content: Array<{ type: string; text?: string }> };
-			};
-			const block = msg.message.content?.find(
-				(b) => b.type === "text" && b.text,
-			);
-			if (block?.text) text = block.text;
-		}
-		return {
-			text,
-			isRunning: runner.isRunning(),
-			messageCount: messages.length,
-		};
 	}
 
 	/**
@@ -2607,13 +1967,10 @@ ${taskSection}`;
 			);
 		}
 
-		// get all agent runners (including chat platform sessions)
+		// get all agent runners
 		const agentRunners: IAgentRunner[] = [
 			...this.agentSessionManager.getAllAgentRunners(),
 		];
-		if (this.chatSessionHandler) {
-			agentRunners.push(...this.chatSessionHandler.getAllRunners());
-		}
 
 		// Kill all agent processes with null checking
 		for (const runner of agentRunners) {
@@ -2630,8 +1987,7 @@ ${taskSection}`;
 		this.linearEventTransport = null;
 		this.configUpdater = null;
 		this.mcpConfigService.clearAllContexts();
-		this.cyrusToolsMcpSessions.removeAllListeners();
-		this.cyrusToolsMcpRegistered = false;
+		this.cyrusToolsHost.stop();
 
 		// Stop egress proxy
 		if (this.egressProxy) {
@@ -2964,23 +2320,8 @@ ${taskSection}`;
 			try {
 				this.logger.info(`➕ Adding repository: ${repo.name} (${repo.id})`);
 
-				// Resolve paths that may contain tilde (~) prefix
-				const resolvedRepo: RepositoryConfig = {
-					...repo,
-					repositoryPath: resolvePath(repo.repositoryPath),
-					workspaceBaseDir: resolvePath(repo.workspaceBaseDir),
-					mcpConfigPath: Array.isArray(repo.mcpConfigPath)
-						? repo.mcpConfigPath.map(resolvePath)
-						: repo.mcpConfigPath
-							? resolvePath(repo.mcpConfigPath)
-							: undefined,
-					promptTemplatePath: repo.promptTemplatePath
-						? resolvePath(repo.promptTemplatePath)
-						: undefined,
-				};
-
-				// Add to internal map
-				this.repositories.set(repo.id, resolvedRepo);
+				// Paths already normalized by reconcile's normalizeConfigPaths.
+				this.repositories.set(repo.id, repo);
 
 				this.logger.info(`✅ Repository added successfully: ${repo.name}`);
 			} catch (error) {
@@ -3007,23 +2348,8 @@ ${taskSection}`;
 
 				this.logger.info(`🔄 Updating repository: ${repo.name} (${repo.id})`);
 
-				// Resolve paths that may contain tilde (~) prefix
-				const resolvedRepo: RepositoryConfig = {
-					...repo,
-					repositoryPath: resolvePath(repo.repositoryPath),
-					workspaceBaseDir: resolvePath(repo.workspaceBaseDir),
-					mcpConfigPath: Array.isArray(repo.mcpConfigPath)
-						? repo.mcpConfigPath.map(resolvePath)
-						: repo.mcpConfigPath
-							? resolvePath(repo.mcpConfigPath)
-							: undefined,
-					promptTemplatePath: repo.promptTemplatePath
-						? resolvePath(repo.promptTemplatePath)
-						: undefined,
-				};
-
-				// Update stored config
-				this.repositories.set(repo.id, resolvedRepo);
+				// Paths already normalized by reconcile's normalizeConfigPaths.
+				this.repositories.set(repo.id, repo);
 
 				// If active status changed
 				if (oldRepo.isActive !== repo.isActive) {
@@ -3071,7 +2397,7 @@ ${taskSection}`;
 					for (const session of activeSessions) {
 						try {
 							this.logger.debug(
-								`  🛑 Stopping session for issue ${session.issueId}`,
+								`  🛑 Stopping session for issue ${session.issue?.id}`,
 							);
 
 							// Get the agent runner for this session
@@ -3185,42 +2511,10 @@ ${taskSection}`;
 		}
 
 		try {
-			// Route to specific webhook handlers based on webhook type
-			// NOTE: Traditional webhooks (assigned, comment) are disabled in favor of agent session events
-			if (isIssueAssignedWebhook(webhook)) {
-				return;
-			} else if (isIssueCommentMentionWebhook(webhook)) {
-				return;
-			} else if (isIssueNewCommentWebhook(webhook)) {
-				return;
-			} else if (isIssueUnassignedWebhook(webhook)) {
-				// Keep unassigned webhook active
-				await this.handleIssueUnassignedWebhook(webhook);
-			} else if (isAgentSessionCreatedWebhook(webhook)) {
-				await this.handleAgentSessionCreatedWebhook(webhook, repos);
-			} else if (isAgentSessionPromptedWebhook(webhook)) {
-				await this.handleUserPromptedAgentActivity(webhook);
-			} else if (isIssueStateChangeWebhook(webhook)) {
-				// Intentional early return: state changes are handled exclusively via the message bus
-				// (handleIssueStateChangeMessage), not the legacy webhook path. This differs from
-				// unassign which still uses the legacy handler — state change was built message-bus-first.
-				return;
-			} else if (isIssueDeletedWebhook(webhook)) {
-				// Issue deletion also handled via message bus — same cleanup as terminal state.
-				return;
-			} else if (isIssueTitleOrDescriptionUpdateWebhook(webhook)) {
-				// Handle issue title/description/attachments updates - feed changes into active session
-				await this.handleIssueContentUpdate(webhook);
-			} else if (isIssueStateIdUpdateWebhook(webhook)) {
-				// Handle issue state changes — wake up parked sessions when blocking issues complete
-				await this.handleIssueStateChange(webhook);
-			} else {
-				if (process.env.CYRUS_WEBHOOK_DEBUG === "true") {
-					this.logger.debug(
-						`Unhandled webhook type: ${(webhook as any).action}`,
-					);
-				}
-			}
+			// Route to specific webhook handlers via the WebhookRouter, which owns
+			// the type -> handler dispatch table. The counter + try/catch shell
+			// stays here so status-endpoint tests observe net-zero activeWebhookCount.
+			await this.webhookRouter.dispatch(webhook, repos);
 		} catch (error) {
 			this.logger.error(
 				`Failed to process webhook: ${(webhook as any).action}`,
@@ -3239,7 +2533,7 @@ ${taskSection}`;
 	// ============================================================================
 	// These handlers process unified InternalMessage types from the message bus.
 	// They provide a platform-agnostic interface for handling events from
-	// Linear, GitHub, Slack, and other platforms.
+	// Linear, GitHub, and other platforms.
 	// ============================================================================
 
 	/**
@@ -3263,29 +2557,11 @@ ${taskSection}`;
 		}
 
 		try {
-			// Route to specific message handlers based on action type
-			if (isSessionStartMessage(message)) {
-				await this.handleSessionStartMessage(message);
-			} else if (isUserPromptMessage(message)) {
-				await this.handleUserPromptMessage(message);
-			} else if (isStopSignalMessage(message)) {
-				await this.handleStopSignalMessage(message);
-			} else if (isContentUpdateMessage(message)) {
-				await this.handleContentUpdateMessage(message);
-			} else if (isUnassignMessage(message)) {
-				await this.handleUnassignMessage(message);
-			} else if (isIssueStateChangeMessage(message)) {
-				await this.handleIssueStateChangeMessage(message);
-			} else {
-				// This branch should never be reached due to exhaustive type checking
-				// If it is reached, log the unexpected message for debugging
-				if (process.env.CYRUS_WEBHOOK_DEBUG === "true") {
-					const unexpectedMessage = message as InternalMessage;
-					this.logger.debug(
-						`Unhandled message action: ${unexpectedMessage.action}`,
-					);
-				}
-			}
+			// Route via the WebhookRouter's message-bus table. IssueStateChangeMessage
+			// is the only type with real behavior; the others are near-no-op debug
+			// traces that run in parallel with legacy webhook handlers (see
+			// WebhookRouter.dispatchMessage).
+			await this.webhookRouter.dispatchMessage(message);
 		} catch (error) {
 			this.logger.error(
 				`Failed to process message: ${message.source}/${message.action}`,
@@ -3293,89 +2569,6 @@ ${taskSection}`;
 			);
 			// Don't re-throw message processing errors to prevent application crashes
 		}
-	}
-
-	/**
-	 * Handle session start message (unified handler for session creation).
-	 *
-	 * This is a placeholder that logs the message for now.
-	 * TODO: Migrate logic from handleAgentSessionCreatedWebhook and handleGitHubWebhook.
-	 */
-	private async handleSessionStartMessage(
-		message: SessionStartMessage,
-	): Promise<void> {
-		this.logger.debug(
-			`[MessageBus] Session start: ${message.workItemIdentifier} from ${message.source}`,
-		);
-		// TODO: Implement unified session start handling
-		// For now, the legacy handlers (handleAgentSessionCreatedWebhook, handleGitHubWebhook)
-		// continue to process the actual session creation via the 'event' emitter.
-	}
-
-	/**
-	 * Handle user prompt message (unified handler for mid-session prompts).
-	 *
-	 * This is a placeholder that logs the message for now.
-	 * TODO: Migrate logic from handleUserPromptedAgentActivity (branch 3).
-	 */
-	private async handleUserPromptMessage(
-		message: UserPromptMessage,
-	): Promise<void> {
-		this.logger.debug(
-			`[MessageBus] User prompt: ${message.workItemIdentifier} from ${message.source}`,
-		);
-		// TODO: Implement unified user prompt handling
-		// For now, the legacy handler (handleUserPromptedAgentActivity)
-		// continues to process the actual prompt via the 'event' emitter.
-	}
-
-	/**
-	 * Handle stop signal message (unified handler for session termination).
-	 *
-	 * This is a placeholder that logs the message for now.
-	 * TODO: Migrate logic from handleUserPromptedAgentActivity (branch 1).
-	 */
-	private async handleStopSignalMessage(
-		message: StopSignalMessage,
-	): Promise<void> {
-		this.logger.debug(
-			`[MessageBus] Stop signal: ${message.workItemIdentifier} from ${message.source}`,
-		);
-		// TODO: Implement unified stop signal handling
-		// For now, the legacy handler (handleUserPromptedAgentActivity)
-		// continues to process the actual stop via the 'event' emitter.
-	}
-
-	/**
-	 * Handle content update message (unified handler for issue/PR content changes).
-	 *
-	 * This is a placeholder that logs the message for now.
-	 * TODO: Migrate logic from handleIssueContentUpdate.
-	 */
-	private async handleContentUpdateMessage(
-		message: ContentUpdateMessage,
-	): Promise<void> {
-		this.logger.debug(
-			`[MessageBus] Content update: ${message.workItemIdentifier} from ${message.source}`,
-		);
-		// TODO: Implement unified content update handling
-		// For now, the legacy handler (handleIssueContentUpdate)
-		// continues to process the actual update via the 'event' emitter.
-	}
-
-	/**
-	 * Handle unassign message (unified handler for task unassignment).
-	 *
-	 * This is a placeholder that logs the message for now.
-	 * TODO: Migrate logic from handleIssueUnassignedWebhook.
-	 */
-	private async handleUnassignMessage(message: UnassignMessage): Promise<void> {
-		this.logger.debug(
-			`[MessageBus] Unassign: ${message.workItemIdentifier} from ${message.source}`,
-		);
-		// TODO: Implement unified unassign handling
-		// For now, the legacy handler (handleIssueUnassignedWebhook)
-		// continues to process the actual unassignment via the 'event' emitter.
 	}
 
 	/**
@@ -3666,11 +2859,13 @@ ${taskSection}`;
 			}
 		}
 
-		// Build the XML-formatted prompt showing old vs new values
+		// Build the XML-formatted prompt showing old vs new values.
+		// Use the webhook's own updatedAt so the prompt is reproducible.
 		const promptBody = this.buildIssueUpdatePrompt(
 			issueIdentifier,
 			issueData,
 			updatedFrom,
+			issueData.updatedAt,
 		);
 
 		// CYPACK-954: Issue update events are ONLY delivered to the first running
@@ -3770,7 +2965,7 @@ ${taskSection}`;
 			}
 
 			const blockingIssues =
-				await this.promptBuilder.fetchBlockingIssues(fullIssue);
+				await this.gitService.fetchBlockingIssues(fullIssue);
 			if (blockingIssues.length === 0) {
 				return {
 					blocked: false,
@@ -3874,55 +3069,37 @@ ${taskSection}`;
 			`Issue ${issueIdentifier} moved to ${stateType} — checking for parked sessions to wake`,
 		);
 
-		// Find parked sessions that were blocked by this issue
-		const sessionsToWake: string[] = [];
-		for (const [blockedIssueId, parked] of this.parkedSessions.entries()) {
-			if (parked.blockingIssueIds.includes(completedIssueId)) {
-				// Remove this blocker from the list
-				parked.blockingIssueIds = parked.blockingIssueIds.filter(
-					(id) => id !== completedIssueId,
-				);
-
-				// If no more blockers, wake the session
-				if (parked.blockingIssueIds.length === 0) {
-					sessionsToWake.push(blockedIssueId);
-				} else {
-					this.logger.debug(
-						`Parked session for issue ${blockedIssueId} still has ${parked.blockingIssueIds.length} remaining blocker(s)`,
-					);
-				}
-			}
-		}
+		// Drop this blocker from every parked entry; the registry returns the
+		// issue IDs whose blocker list is now empty (ready to wake).
+		const sessionsToWake = this.parkedRegistry.resolveBlocker(completedIssueId);
 
 		// Wake up unblocked sessions
 		for (const blockedIssueId of sessionsToWake) {
-			const parked = this.parkedSessions.get(blockedIssueId);
+			const parked = this.parkedRegistry.wake(blockedIssueId);
 			if (!parked) continue;
-
-			this.parkedSessions.delete(blockedIssueId);
 
 			this.logger.info(
 				`Waking parked session for issue ${parked.agentSession.issue?.identifier} — all blockers resolved`,
 			);
 
 			// Post activity about waking up
-			await this.activityPoster.postThoughtActivity(
+			await this.postThought(
 				parked.agentSession.id,
 				parked.linearWorkspaceId,
 				`All blocking dependencies are now resolved — starting work.`,
 			);
 
-			// Replay the normal initializeAgentRunner flow
+			// Replay the normal startSession flow
 			try {
-				await this.initializeAgentRunner(
-					parked.agentSession,
-					parked.repositories,
-					parked.linearWorkspaceId,
-					parked.guidance,
-					parked.commentBody,
-					parked.baseBranchOverrides,
-					parked.routingMethod,
-				);
+				await this.sessionOrchestrator.startSession({
+					agentSession: parked.agentSession,
+					repositories: parked.repositories,
+					linearWorkspaceId: parked.linearWorkspaceId,
+					guidance: parked.guidance,
+					commentBody: parked.commentBody,
+					baseBranchOverrides: parked.baseBranchOverrides,
+					routingMethod: parked.routingMethod,
+				});
 			} catch (error) {
 				this.logger.error(
 					`Failed to wake parked session for issue ${blockedIssueId}:`,
@@ -3940,7 +3117,7 @@ ${taskSection}`;
 		_webhook: AgentSessionPromptedWebhook,
 		issueId: string,
 	): Promise<void> {
-		const parked = this.parkedSessions.get(issueId);
+		const parked = this.parkedRegistry.get(issueId);
 		if (!parked) return;
 
 		const blockResult = await this.checkBlockedByDependencies(
@@ -3950,11 +3127,11 @@ ${taskSection}`;
 
 		if (blockResult.blocked) {
 			// Still blocked — update the parked entry and re-post status
-			parked.blockingIssueIds = blockResult.blockingIssueIds;
+			this.parkedRegistry.setBlockers(issueId, blockResult.blockingIssueIds);
 			const blockerList = blockResult.blockingIdentifiers
 				.map((id) => `**${id}**`)
 				.join(", ");
-			await this.activityPoster.postThoughtActivity(
+			await this.postThought(
 				parked.agentSession.id,
 				parked.linearWorkspaceId,
 				`Still blocked by ${blockerList}. Will start automatically when resolved.`,
@@ -3966,27 +3143,27 @@ ${taskSection}`;
 		}
 
 		// Blockers resolved — wake the session
-		this.parkedSessions.delete(issueId);
+		this.parkedRegistry.wake(issueId);
 		this.logger.info(
 			`Re-prompt cleared blockers for ${parked.agentSession.issue?.identifier} — waking session`,
 		);
 
-		await this.activityPoster.postThoughtActivity(
+		await this.postThought(
 			parked.agentSession.id,
 			parked.linearWorkspaceId,
 			`Blocking dependencies are now resolved — starting work.`,
 		);
 
 		try {
-			await this.initializeAgentRunner(
-				parked.agentSession,
-				parked.repositories,
-				parked.linearWorkspaceId,
-				parked.guidance,
-				parked.commentBody,
-				parked.baseBranchOverrides,
-				parked.routingMethod,
-			);
+			await this.sessionOrchestrator.startSession({
+				agentSession: parked.agentSession,
+				repositories: parked.repositories,
+				linearWorkspaceId: parked.linearWorkspaceId,
+				guidance: parked.guidance,
+				commentBody: parked.commentBody,
+				baseBranchOverrides: parked.baseBranchOverrides,
+				routingMethod: parked.routingMethod,
+			});
 		} catch (error) {
 			this.logger.error(
 				`Failed to wake parked session for issue ${issueId} on re-prompt:`,
@@ -4007,11 +3184,13 @@ ${taskSection}`;
 			description?: string;
 			attachments?: unknown;
 		},
+		timestamp?: string,
 	): string {
 		return this.promptBuilder.buildIssueUpdatePrompt(
 			issueIdentifier,
 			issueData,
 			updatedFrom,
+			timestamp,
 		);
 	}
 
@@ -4031,6 +3210,56 @@ ${taskSection}`;
 		const repo = this.repositories.get(repoId);
 		if (!repo?.linearWorkspaceId) return undefined;
 		return this.activitySinks.get(repo.linearWorkspaceId);
+	}
+
+	/**
+	 * Resolve the activity sink for a workspace, falling back to a no-op sink so
+	 * every activity-post call site can funnel through the single
+	 * {@link IActivitySink.post} path.
+	 */
+	private getSinkForWorkspace(workspaceId: string): IActivitySink {
+		return (
+			this.activitySinks.get(workspaceId) ?? new NoopActivitySink(workspaceId)
+		);
+	}
+
+	/**
+	 * Post an activity through the workspace's sink, swallowing/logging failures
+	 * (mirrors the former ActivityPoster wrappers so a tracker error never
+	 * aborts the surrounding webhook flow). Returns the activity id or null.
+	 */
+	private async postActivityViaSink(
+		workspaceId: string,
+		sessionId: string,
+		activity: Activity,
+		label: string,
+	): Promise<string | null> {
+		try {
+			const result = await this.getSinkForWorkspace(workspaceId).post(
+				sessionId,
+				activity,
+			);
+			return result.activityId ?? null;
+		} catch (error) {
+			this.logger.error(`Error creating ${label}:`, error);
+			return null;
+		}
+	}
+
+	/**
+	 * Post a plain thought through the workspace's activity sink.
+	 */
+	private async postThought(
+		sessionId: string,
+		workspaceId: string,
+		body: string,
+	): Promise<void> {
+		await this.postActivityViaSink(
+			workspaceId,
+			sessionId,
+			{ type: "thought", body },
+			"thought",
+		);
 	}
 
 	/**
@@ -4090,21 +3319,26 @@ ${taskSection}`;
 		const workspace = this.config.handlers?.createWorkspace
 			? await this.config.handlers.createWorkspace(fullIssue, repositories, {
 					baseBranchOverrides,
-					onRepoSetupHookEvent: (activity) =>
-						this.activityPoster.postRepoSetupHookActivity(
-							sessionId,
+					onRepoSetupHookEvent: async (event) => {
+						await this.postActivityViaSink(
 							linearWorkspaceId,
-							activity,
-						),
+							sessionId,
+							formatRepoSetupHookActivity(event),
+							"repository setup hook",
+						);
+					},
 				})
 			: await this.gitService.createGitWorktree(fullIssue, repositories, {
 					baseBranchOverrides,
-					onRepoSetupHookEvent: (activity) =>
-						this.activityPoster.postRepoSetupHookActivity(
-							sessionId,
+					crossRepoSiblingRepositories: Array.from(this.repositories.values()),
+					onRepoSetupHookEvent: async (event) => {
+						await this.postActivityViaSink(
 							linearWorkspaceId,
-							activity,
-						),
+							sessionId,
+							formatRepoSetupHookActivity(event),
+							"repository setup hook",
+						);
+					},
 				});
 
 		this.logger.debug(`Workspace created at: ${workspace.path}`);
@@ -4208,6 +3442,7 @@ ${taskSection}`;
 			...new Set([
 				attachmentsDir,
 				...allRepoPaths,
+				...getReadParentDirectories(repositories),
 				...this.gitService.getGitMetadataDirectoriesForWorkspace(workspace),
 			]),
 		];
@@ -4239,392 +3474,82 @@ ${taskSection}`;
 	 * @param webhook The agent session created webhook
 	 * @param repos All available repositories for routing
 	 */
-	private async handleAgentSessionCreatedWebhook(
+	/** @internal - retained as a test-callable delegator; not used internally. */
+	async handleAgentSessionCreatedWebhook(
 		webhook: AgentSessionCreatedWebhook,
 		repos: RepositoryConfig[],
 	): Promise<void> {
-		const issueId = webhook.agentSession?.issue?.id;
+		// Thin delegator: the cache/route/needs_selection/selected branching and
+		// the access/blocked-by/park decision now live in WebhookRouter.
+		// Retained (same signature) so tests that call this via (worker as any)
+		// keep working. The router's parkSession/startSession deps bind to the
+		// heavy bodies below (parkAgentSession / startAgentSession), NOT to this
+		// delegator — see the WebhookRouterDeps wiring in the constructor.
+		return this.webhookRouter.routeCreatedWebhook(webhook, repos);
+	}
 
-		// Check the cache first, as the agentSessionCreated webhook may have been triggered by an @mention
-		// on an issue that already has an agentSession and an associated repository.
-		let repositories: RepositoryConfig[] | null = null;
-		let baseBranchOverrides: Map<string, string> | undefined;
-		let routingMethod: string | undefined;
-		if (issueId) {
-			const cachedRepos = this.getCachedRepositories(issueId);
-			if (cachedRepos && cachedRepos.length > 0) {
-				repositories = cachedRepos;
-				this.logger.debug(
-					`Using cached repositories [${cachedRepos.map((r) => r.name).join(", ")}] for issue ${issueId}`,
-				);
-			}
-		}
-
-		// If not cached, perform routing logic
-		if (!repositories) {
-			const routingResult =
-				await this.repositoryRouter.determineRepositoryForWebhook(
-					webhook,
-					repos,
-				);
-
-			if (routingResult.type === "none") {
-				if (process.env.CYRUS_WEBHOOK_DEBUG === "true") {
-					this.logger.info(
-						`No repository configured for webhook from workspace ${webhook.organizationId}`,
-					);
-				}
-				return;
-			}
-
-			// Handle needs_selection case
-			if (routingResult.type === "needs_selection") {
-				await this.repositoryRouter.elicitUserRepositorySelection(
-					webhook,
-					routingResult.workspaceRepos,
-				);
-				// Selection in progress - will be handled by handleRepositorySelectionResponse
-				return;
-			}
-
-			// At this point, routingResult.type === "selected"
-			repositories = routingResult.repositories;
-			baseBranchOverrides = routingResult.baseBranchOverrides;
-			if (baseBranchOverrides && baseBranchOverrides.size > 0) {
-				this.logger.info(
-					`baseBranchOverrides received from routing: ${Array.from(
-						baseBranchOverrides.entries(),
-					)
-						.map(([id, branch]) => `${id}→${branch}`)
-						.join(", ")}`,
-				);
-			} else {
-				this.logger.info(`No baseBranchOverrides from routing result`);
-			}
-			routingMethod = routingResult.routingMethod;
-
-			// Cache all matched repositories for this issue as string[]
-			if (issueId) {
-				this.repositoryRouter.getIssueRepositoryCache().set(
-					issueId,
-					repositories.map((r) => r.id),
-				);
-			}
-		}
-
-		if (!webhook.agentSession.issue) {
-			this.logger.warn("Agent session created webhook missing issue");
-			return;
-		}
-
-		// User access control check (use primary repo)
-		const primaryRepo = repositories[0]!;
-		const accessResult = this.checkUserAccess(webhook, primaryRepo);
-		if (!accessResult.allowed) {
-			this.logger.info(
-				`User ${accessResult.userName} blocked from delegating: ${accessResult.reason}`,
-			);
-			await this.handleBlockedUser(webhook, primaryRepo, accessResult.reason);
-			return;
-		}
-
-		// Use organizationId from webhook as the Linear-native workspace ID source
-		const linearWorkspaceId = webhook.organizationId;
-
-		const log = this.logger.withContext({
-			sessionId: webhook.agentSession.id,
-			platform: this.getRepositoryPlatform(linearWorkspaceId),
-			issueIdentifier: webhook.agentSession.issue.identifier,
-		});
-		log.info(`Handling agent session created`);
+	/**
+	 * Start a new agent session (heavy body). Bound as WebhookRouterDeps.startSession.
+	 */
+	private async startAgentSession(
+		webhook: AgentSessionCreatedWebhook,
+		repositories: RepositoryConfig[],
+		opts: { baseBranchOverrides?: Map<string, string>; routingMethod?: string },
+	): Promise<void> {
 		const { agentSession, guidance } = webhook;
 		const commentBody = agentSession.comment?.body;
-
-		// Check for blocked-by dependencies before starting work
-		const blockResult = await this.checkBlockedByDependencies(
-			agentSession,
-			linearWorkspaceId,
-		);
-		if (blockResult.blocked) {
-			// Park the session — don't create worktree or runner
-			const parkedIssueId = agentSession.issue!.id;
-			this.parkedSessions.set(parkedIssueId, {
-				agentSession,
-				repositories,
-				linearWorkspaceId,
-				guidance,
-				commentBody,
-				baseBranchOverrides,
-				routingMethod,
-				blockingIssueIds: blockResult.blockingIssueIds,
-			});
-
-			// Post acknowledgment to the Linear agent session
-			const blockerList = blockResult.blockingIdentifiers
-				.map((id) => `**${id}**`)
-				.join(", ");
-			await this.activityPoster.postThoughtActivity(
-				agentSession.id,
-				linearWorkspaceId,
-				`Blocked by ${blockerList} — will start automatically when ${blockResult.blockingIdentifiers.length === 1 ? "it is" : "they are"} resolved.`,
-			);
-
-			log.info(
-				`Session parked: issue ${agentSession.issue!.identifier} is blocked by ${blockResult.blockingIdentifiers.join(", ")}`,
-			);
-			return;
-		}
+		const linearWorkspaceId = webhook.organizationId;
 
 		// Initialize agent runner using shared logic (pass full repositories array)
-		await this.initializeAgentRunner(
+		await this.sessionOrchestrator.startSession({
 			agentSession,
 			repositories,
 			linearWorkspaceId,
 			guidance,
 			commentBody,
-			baseBranchOverrides,
-			routingMethod,
-		);
+			baseBranchOverrides: opts.baseBranchOverrides,
+			routingMethod: opts.routingMethod,
+		});
 	}
 
 	/**
-
-	/**
-	 * Initialize and start agent runner for an agent session
-	 * This method contains the shared logic for creating an agent runner that both
-	 * handleAgentSessionCreatedWebhook and handleUserPromptedAgentActivity use.
-	 *
-	 * @param agentSession The Linear agent session
-	 * @param repositories Repository configurations (primary repo is repositories[0])
-	 * @param linearWorkspaceId Linear workspace ID (from webhook.organizationId)
-	 * @param guidance Optional guidance rules from Linear
-	 * @param commentBody Optional comment body (for mentions)
-	 * @param baseBranchOverrides Per-repo base branch overrides from [repo=name#branch] syntax
+	 * Park an agent session behind blocked-by dependencies (heavy body).
+	 * Bound as WebhookRouterDeps.parkSession — creates no worktree or runner.
 	 */
-	private async initializeAgentRunner(
-		agentSession: AgentSessionCreatedWebhook["agentSession"],
+	private async parkAgentSession(
+		webhook: AgentSessionCreatedWebhook,
 		repositories: RepositoryConfig[],
-		linearWorkspaceId: string,
-		guidance?: AgentSessionCreatedWebhook["guidance"],
-		commentBody?: string | null,
-		baseBranchOverrides?: Map<string, string>,
-		routingMethod?: string,
+		blockingIssueIds: string[],
+		blockingIdentifiers: string[],
+		opts: { baseBranchOverrides?: Map<string, string>; routingMethod?: string },
 	): Promise<void> {
-		const sessionId = agentSession.id;
-		const { issue } = agentSession;
+		const { agentSession, guidance } = webhook;
+		const commentBody = agentSession.comment?.body;
+		const linearWorkspaceId = webhook.organizationId;
+		const parkedIssueId = agentSession.issue!.id;
 
-		if (!issue) {
-			this.logger.warn("Cannot initialize Claude runner without issue");
-			return;
-		}
-
-		const primaryRepo = repositories[0]!;
-
-		const log = this.logger.withContext({
-			sessionId,
-			issueIdentifier: issue.identifier,
+		this.parkedRegistry.park(parkedIssueId, {
+			agentSession,
+			repositories,
+			linearWorkspaceId,
+			guidance,
+			commentBody,
+			baseBranchOverrides: opts.baseBranchOverrides,
+			routingMethod: opts.routingMethod,
+			blockingIssueIds,
 		});
 
-		// Log guidance if present
-		if (guidance && guidance.length > 0) {
-			log.debug(`Agent guidance received: ${guidance.length} rule(s)`);
-			for (const rule of guidance) {
-				let origin = "Unknown";
-				if (rule.origin) {
-					if (rule.origin.__typename === "TeamOriginWebhookPayload") {
-						origin = `Team: ${rule.origin.team.displayName}`;
-					} else {
-						origin = "Organization";
-					}
-				}
-				log.info(`- ${origin}: ${rule.body.substring(0, 100)}...`);
-			}
-		}
-
-		// HACK: This is required since the comment body is always populated, thus there is no other way to differentiate between the two trigger events
-		const AGENT_SESSION_MARKER = "This thread is for an agent session";
-		const isMentionTriggered =
-			commentBody && !commentBody.includes(AGENT_SESSION_MARKER);
-		// Check if the comment contains the /label-based-prompt command
-		const isLabelBasedPromptRequested = commentBody?.includes(
-			"/label-based-prompt",
-		);
-
-		const agentSessionManager = this.agentSessionManager;
-
-		// Post instant acknowledgment thought
-		await this.postInstantAcknowledgment(sessionId, linearWorkspaceId);
-
-		// Create the session using the shared method (pass full repositories array)
-		const sessionData = await this.createCyrusAgentSession(
-			sessionId,
-			issue,
-			repositories,
-			agentSessionManager,
+		// Post acknowledgment to the Linear agent session
+		const blockerList = blockingIdentifiers.map((id) => `**${id}**`).join(", ");
+		await this.postThought(
+			agentSession.id,
 			linearWorkspaceId,
-			baseBranchOverrides,
-			routingMethod,
+			`Blocked by ${blockerList} — will start automatically when ${blockingIdentifiers.length === 1 ? "it is" : "they are"} resolved.`,
 		);
 
-		// Destructure the session data (excluding allowedTools which we'll build with promptType)
-		const {
-			session,
-			fullIssue,
-			workspace: _workspace,
-			attachmentResult,
-			attachmentsDir: _attachmentsDir,
-			allowedDirectories,
-		} = sessionData;
-
-		// Fetch labels early (needed for system prompt and runner selection)
-		const labels = await this.fetchIssueLabels(fullIssue);
-
-		log.info(`Starting agent session for issue ${fullIssue.identifier}`);
-
-		// Build and start Claude with initial prompt using full issue (streaming mode)
-		log.info(`Building initial prompt for issue ${fullIssue.identifier}`);
-		try {
-			// Create input for unified prompt assembly
-			const input: PromptAssemblyInput = {
-				session,
-				fullIssue,
-				repositories,
-				repository: primaryRepo,
-				userComment: commentBody || "", // Empty for delegation, present for mentions
-				attachmentManifest: attachmentResult.manifest,
-				guidance: guidance || undefined,
-				agentSession,
-				labels,
-				isNewSession: true,
-				isStreaming: false, // Not yet streaming
-				isMentionTriggered: isMentionTriggered || false,
-				isLabelBasedPromptRequested: isLabelBasedPromptRequested || false,
-				resolvedBaseBranches: sessionData.workspace.resolvedBaseBranches,
-				linearWorkspaceId,
-			};
-
-			// Use unified prompt assembly
-			const assembly = await this.assemblePrompt(input);
-
-			// Get systemPromptVersion for tracking (TODO: add to PromptAssembly metadata)
-			let systemPromptVersion: string | undefined;
-			let promptType:
-				| "debugger"
-				| "builder"
-				| "scoper"
-				| "orchestrator"
-				| "graphite-orchestrator"
-				| undefined;
-
-			if (!isMentionTriggered || isLabelBasedPromptRequested) {
-				const systemPromptResult = await this.determineSystemPromptFromLabels(
-					labels,
-					primaryRepo,
-				);
-				systemPromptVersion = systemPromptResult?.version;
-				promptType = systemPromptResult?.type;
-
-				// Post thought about system prompt selection
-				if (assembly.systemPrompt) {
-					await this.postSystemPromptSelectionThought(
-						sessionId,
-						labels,
-						linearWorkspaceId,
-						primaryRepo.id,
-					);
-				}
-			}
-
-			// Build allowed tools list with Linear MCP tools (now with prompt type context)
-			const allowedTools = this.buildAllowedTools(repositories, promptType);
-			const disallowedTools = this.buildDisallowedTools(
-				repositories,
-				promptType,
-			);
-
-			log.debug(
-				`Configured allowed tools for ${fullIssue.identifier}:`,
-				allowedTools,
-			);
-			if (disallowedTools.length > 0) {
-				log.debug(
-					`Configured disallowed tools for ${fullIssue.identifier}:`,
-					disallowedTools,
-				);
-			}
-
-			// Create agent runner with system prompt from assembly
-			// buildAgentRunnerConfig now determines runner type from labels internally
-			const { config: runnerConfig, runnerType } =
-				await this.buildAgentRunnerConfig(
-					session,
-					primaryRepo,
-					sessionId,
-					assembly.systemPrompt,
-					allowedTools,
-					allowedDirectories,
-					disallowedTools,
-					undefined, // resumeSessionId
-					labels, // Pass labels for runner selection and model override
-					fullIssue.description || undefined, // Description tags can override label selectors
-					undefined, // maxTurns
-					linearWorkspaceId,
-					this.buildSkillSessionContext(primaryRepo, fullIssue, session),
-				);
-
-			log.debug(
-				`Label-based runner selection for new session: ${runnerType} (session ${sessionId})`,
-			);
-
-			const runner = this.createRunnerForType(runnerType, runnerConfig);
-
-			// Store runner by comment ID
-			agentSessionManager.addAgentRunner(sessionId, runner);
-
-			// Save state after mapping changes
-			await this.savePersistedState();
-
-			// Emit events using full issue (core Issue type)
-			this.emit("session:started", fullIssue.id, fullIssue, primaryRepo.id);
-			this.config.handlers?.onSessionStart?.(
-				fullIssue.id,
-				fullIssue,
-				primaryRepo.id,
-			);
-
-			// Update runner with version information (if available)
-			// Note: updatePromptVersions is specific to ClaudeRunner
-			if (
-				systemPromptVersion &&
-				"updatePromptVersions" in runner &&
-				typeof runner.updatePromptVersions === "function"
-			) {
-				runner.updatePromptVersions({
-					systemPromptVersion,
-				});
-			}
-
-			// Log metadata for debugging
-			log.debug(
-				`Initial prompt built successfully - components: ${assembly.metadata.components.join(", ")}, type: ${assembly.metadata.promptType}, length: ${assembly.userPrompt.length} characters`,
-			);
-
-			// Start session - use streaming mode if supported for ability to add messages later
-			if (runner.supportsStreamingInput && runner.startStreaming) {
-				log.debug(`Starting streaming session`);
-				const sessionInfo = await runner.startStreaming(assembly.userPrompt);
-				log.debug(`Streaming session started: ${sessionInfo.sessionId}`);
-			} else {
-				log.debug(`Starting non-streaming session`);
-				const sessionInfo = await runner.start(assembly.userPrompt);
-				log.debug(`Non-streaming session started: ${sessionInfo.sessionId}`);
-			}
-			// Note: AgentSessionManager will be initialized automatically when the first system message
-			// is received via handleClaudeMessage() callback
-		} catch (error) {
-			log.error(`Error in prompt building/starting:`, error);
-			throw error;
-		}
+		this.logger.info(
+			`Session parked: issue ${agentSession.issue!.identifier} is blocked by ${blockingIdentifiers.join(", ")}`,
+		);
 	}
 
 	/**
@@ -4769,15 +3694,15 @@ ${taskSection}`;
 		// Initialize agent runner with the selected repository (wrapped in array)
 		// routingMethod="user-selected" will be included in the combined routing activity
 		// Use organizationId from webhook as the Linear-native workspace ID source
-		await this.initializeAgentRunner(
+		await this.sessionOrchestrator.startSession({
 			agentSession,
-			[repository],
-			webhook.organizationId,
+			repositories: [repository],
+			linearWorkspaceId: webhook.organizationId,
 			guidance,
 			commentBody,
-			undefined,
-			"user-selected",
-		);
+			baseBranchOverrides: undefined,
+			routingMethod: "user-selected",
+		});
 	}
 
 	/**
@@ -5046,145 +3971,20 @@ ${taskSection}`;
 	 *
 	 * @param webhook The prompted webhook containing user's message
 	 */
-	private async handleUserPromptedAgentActivity(
+	/** @internal - retained as a test-callable delegator; not used internally. */
+	async handleUserPromptedAgentActivity(
 		webhook: AgentSessionPromptedWebhook,
 	): Promise<void> {
-		const agentSessionId = webhook.agentSession.id;
-		const activityBody = webhook.agentActivity?.content?.body || "";
-		const signal = (webhook.agentActivity as any)?.signal;
-		const isTextStopRequest = /^\s*stop(\s+session|\s+working)?[\s.!?]*$/i.test(
-			activityBody,
-		);
-
-		// Branch 1: Handle stop signal (checked FIRST, before any routing work)
-		// Per CLAUDE.md: "an agentSession MUST already exist" for stop signals
-		// IMPORTANT: Stop signals do NOT require repository lookup
-		if (signal === "stop" || isTextStopRequest) {
-			await this.handleStopSignal(webhook);
-			return;
-		}
-
-		// Branch 1.5: Handle re-prompt for parked (blocked-by) sessions
-		// When a user re-prompts and the session is parked, re-check blocking status.
-		// If blockers are resolved, wake the session immediately.
-		const issueIdForParkedCheck = webhook.agentSession?.issue?.id;
-		if (
-			issueIdForParkedCheck &&
-			this.parkedSessions.has(issueIdForParkedCheck)
-		) {
-			await this.handleParkedSessionReprompt(webhook, issueIdForParkedCheck);
-			return;
-		}
-
-		// Branch 2: Handle repository selection response
-		// This is the first Claude runner initialization after user selects a repository.
-		// The selection handler extracts the choice from the response (or uses fallback)
-		// and caches the repository for future use.
-		if (this.repositoryRouter.hasPendingSelection(agentSessionId)) {
-			await this.handleRepositorySelectionResponse(webhook);
-			return;
-		}
-
-		// Branch 2.5: Handle AskUserQuestion response
-		// This handles responses to questions posed via the AskUserQuestion tool.
-		// The response is passed to the pending promise resolver.
-		if (this.askUserQuestionHandler.hasPendingQuestion(agentSessionId)) {
-			await this.handleAskUserQuestionResponse(webhook);
-			return;
-		}
-
-		// Branch 3: Handle normal prompted activity (existing session continuation)
-		// Per CLAUDE.md: "an agentSession MUST exist and a repository MUST already
-		// be associated with the Linear issue. The repository will be retrieved from
-		// the issue-to-repository cache - no new routing logic is performed."
-		const issueId = webhook.agentSession?.issue?.id;
-		if (!issueId) {
-			this.logger.error(
-				`No issue ID found in prompted webhook ${agentSessionId}`,
-			);
-			return;
-		}
-
-		// Resolve ALL cached repositories for this issue (not just the first).
-		// Multi-repo sessions need the full set for workspace recreation.
-		let repositories = this.getCachedRepositories(issueId);
-		if (!repositories || repositories.length === 0) {
-			// Fallback: attempt to recover repository for legacy/restarted sessions
-			this.logger.info(
-				`No cached repository for prompted webhook ${agentSessionId}, attempting fallback resolution`,
-			);
-
-			// First, check if the session manager already has this session
-			const session = this.agentSessionManager.getSession(agentSessionId);
-			if (session) {
-				const repoId = this.sessionRepositories.get(agentSessionId);
-				if (repoId) {
-					const repo = this.repositories.get(repoId) ?? null;
-					if (repo) {
-						repositories = [repo];
-						this.repositoryRouter
-							.getIssueRepositoryCache()
-							.set(issueId, [repoId]);
-						this.logger.info(
-							`Recovered repository ${repoId} for issue ${issueId} from session manager`,
-						);
-					}
-				}
-			}
-
-			// Second fallback: re-route via repository router
-			if (!repositories || repositories.length === 0) {
-				try {
-					const repos = Array.from(this.repositories.values());
-					const routingResult =
-						await this.repositoryRouter.determineRepositoryForWebhook(
-							webhook,
-							repos,
-						);
-
-					if (routingResult.type === "selected") {
-						repositories = routingResult.repositories;
-						this.repositoryRouter.getIssueRepositoryCache().set(
-							issueId,
-							routingResult.repositories.map((r) => r.id),
-						);
-						this.logger.info(
-							`Recovered repositories [${repositories.map((r) => r.name).join(", ")}] for issue ${issueId} via fallback routing (${routingResult.routingMethod})`,
-						);
-					}
-				} catch (error) {
-					this.logger.warn(
-						`Fallback repository routing failed for prompted webhook ${agentSessionId}`,
-						error,
-					);
-				}
-			}
-
-			if (!repositories || repositories.length === 0) {
-				// All recovery attempts failed - post visible feedback
-				await this.agentSessionManager.createResponseActivity(
-					agentSessionId,
-					"I couldn't process your message because the session configuration was lost. Please create a new session by mentioning me (@cyrus) in a new comment with your prompt.",
-				);
-				this.logger.warn(
-					`Failed to recover repository for prompted webhook ${agentSessionId} - all fallback methods exhausted`,
-				);
-				return;
-			}
-		}
-
-		// User access control check for mid-session prompts (use primary repo)
-		const primaryRepo = repositories[0]!;
-		const accessResult = this.checkUserAccess(webhook, primaryRepo);
-		if (!accessResult.allowed) {
-			this.logger.info(
-				`User ${accessResult.userName} blocked from prompting: ${accessResult.reason}`,
-			);
-			await this.handleBlockedUser(webhook, primaryRepo, accessResult.reason);
-			return;
-		}
-
-		await this.handleNormalPromptedActivity(webhook, repositories);
+		// Thin delegator: the 5-way branch selection (stop / parked / pending
+		// selection / ask-question / normal) plus the Branch-3 repo-cache
+		// resolution + fallback ladder + access check now live in
+		// WebhookRouter.routePromptedActivity. Retained (same signature) so tests
+		// that call this via (worker as any) keep working. The router's terminal
+		// deps bind to the heavy bodies (handleStopSignal,
+		// handleParkedSessionReprompt, handleRepositorySelectionResponse,
+		// handleAskUserQuestionResponse, handleNormalPromptedActivity), NOT to
+		// this delegator — see the WebhookRouterDeps wiring in the constructor.
+		return this.webhookRouter.routePromptedActivity(webhook);
 	}
 
 	/**
@@ -5223,75 +4023,30 @@ ${taskSection}`;
 	}
 
 	/**
-	 * Handle Claude messages
+	 * Handle Claude session error.
+	 *
+	 * Thin delegator to {@link SessionOrchestrator.handleSessionError} — retained
+	 * (same signature) so existing tests that call `(edgeWorker as any)
+	 * .handleClaudeError` keep working until Phase G. TODO(Phase G): delete.
+	 * @internal - retained for test compatibility only.
 	 */
-	private async handleClaudeMessage(
-		sessionId: string,
-		message: SDKMessage,
-		_repositoryId: string,
-	): Promise<void> {
-		await this.agentSessionManager.handleClaudeMessage(sessionId, message);
-	}
-
-	/**
-	 * Handle Claude session error
-	 * Silently ignores AbortError (user-initiated stop), logs other errors
-	 */
-	private async handleClaudeError(
+	async handleClaudeError(
 		error: Error,
 		sessionId?: string,
 		repositoryId?: string,
 	): Promise<void> {
-		// AbortError is expected when user stops Claude process, don't log it
-		// Check by name since the SDK's AbortError class may not match our imported definition
-		const isAbortError =
-			error.name === "AbortError" || error.message.includes("aborted by user");
-
-		// Also check for SIGTERM (exit code 143), which indicates graceful termination
-		const isSigterm = error.message.includes(
-			"Claude Code process exited with code 143",
-		);
-
-		if (isAbortError || isSigterm) {
-			return;
-		}
-		this.logger.error("Unhandled claude error:", {
+		return this.sessionOrchestrator.handleSessionError(
 			error,
 			sessionId,
 			repositoryId,
-		});
-
-		// A genuine runner crash (subprocess died, stream errored, non-143 exit)
-		// never produces a `result` message, so `completeSession` never runs.
-		// Without surfacing it here the Linear issue stays "In Progress" with a
-		// dead runner and the user sees nothing. When we know which session
-		// crashed, tell the user and transition it to a terminal error state.
-		if (!sessionId) {
-			return;
-		}
-		try {
-			await this.agentSessionManager.failSession(
-				sessionId,
-				`The agent session ended unexpectedly and could not continue.\n\n\`${error.message}\`\n\nComment on this issue to start a new session.`,
-			);
-		} catch (failError) {
-			this.logger.error("Failed to surface runner crash to Linear:", failError);
-		}
-
-		// Reclaim the pre-warmed slot so a crashed session doesn't leak a warm
-		// instance or hand a stale one to a later resume.
-		this.warmInstances.delete(sessionId);
-
-		// Persist the Error transition so a restart doesn't resurrect a zombie
-		// Active session with no runner.
-		await this.savePersistedState();
+		);
 	}
 
 	/**
 	 * Fetch issue labels for a given issue
 	 */
 	private async fetchIssueLabels(issue: Issue): Promise<string[]> {
-		return this.promptBuilder.fetchIssueLabels(issue);
+		return this.gitService.fetchIssueLabels(issue);
 	}
 
 	/**
@@ -5371,51 +4126,6 @@ ${taskSection}`;
 	}
 
 	/**
-	 * Resolve default model for a given runner from config with sensible built-in defaults.
-	 * Supports legacy config keys for backwards compatibility.
-	 */
-	private getDefaultModelForRunner(runnerType: RunnerType): string {
-		return this.runnerSelectionService.getDefaultModelForRunner(runnerType);
-	}
-
-	/**
-	 * Resolve default fallback model for a given runner from config with sensible built-in defaults.
-	 * Supports legacy Claude fallback key for backwards compatibility.
-	 */
-	private getDefaultFallbackModelForRunner(runnerType: RunnerType): string {
-		return this.runnerSelectionService.getDefaultFallbackModelForRunner(
-			runnerType,
-		);
-	}
-
-	/**
-	 * Instantiate the appropriate runner for the given type.
-	 */
-	private createRunnerForType(
-		runnerType: "claude" | "gemini" | "codex" | "cursor",
-		config: AgentRunnerConfig,
-	): IAgentRunner {
-		switch (runnerType) {
-			case "claude": {
-				// Inject the hosted SessionStore at the last moment so it only
-				// attaches to Claude runners (the field is Claude-specific).
-				const claudeConfig = this.claudeSessionStore
-					? { ...config, sessionStore: this.claudeSessionStore }
-					: config;
-				return new ClaudeRunner(claudeConfig, this.isWarmSessionsEnabled());
-			}
-			case "gemini":
-				return new GeminiRunner(config);
-			case "codex":
-				return new CodexRunner(config);
-			case "cursor":
-				return new CursorRunner(config);
-			default:
-				throw new Error(`Unknown runner type: ${runnerType satisfies never}`);
-		}
-	}
-
-	/**
 	 * Determine system prompt based on issue labels and repository configuration
 	 */
 	private async determineSystemPromptFromLabels(
@@ -5431,35 +4141,14 @@ ${taskSection}`;
 					| "scoper"
 					| "orchestrator"
 					| "graphite-orchestrator";
+				model?: string;
+				effort?: EffortLevel;
 		  }
 		| undefined
 	> {
 		return this.promptBuilder.determineSystemPromptFromLabels(labels, [
 			repository,
 		]);
-	}
-
-	/**
-	 * Build prompt for mention-triggered sessions
-	 * @param issue Full Linear issue object
-	 * @param repository Repository configuration
-	 * @param agentSession The agent session containing the mention
-	 * @param attachmentManifest Optional attachment manifest to append
-	 * @param guidance Optional agent guidance rules from Linear
-	 * @returns The constructed prompt and optional version tag
-	 */
-	private async buildMentionPrompt(
-		issue: Issue,
-		agentSession: WebhookAgentSession,
-		attachmentManifest: string = "",
-		guidance?: GuidanceRule[],
-	): Promise<{ prompt: string; version?: string }> {
-		return this.promptBuilder.buildMentionPrompt(
-			issue,
-			agentSession,
-			attachmentManifest,
-			guidance,
-		);
 	}
 
 	/**
@@ -5707,263 +4396,17 @@ ${taskSection}`;
 		return this.attachmentService.generateNewAttachmentManifest(result);
 	}
 
-	private async registerCyrusToolsMcpEndpoint(): Promise<void> {
-		if (this.cyrusToolsMcpRegistered) {
-			return;
-		}
-
-		const fastify = this.sharedApplicationServer.getFastifyInstance() as any;
-		if (
-			typeof fastify.register !== "function" ||
-			typeof fastify.addHook !== "function"
-		) {
-			console.warn(
-				"[EdgeWorker] Skipping cyrus-tools MCP endpoint registration: Fastify instance does not support register/addHook",
-			);
-			return;
-		}
-
-		fastify.addHook("onRequest", (request: any, _reply: any, done: any) => {
-			const rawUrl =
-				typeof request?.raw?.url === "string"
-					? request.raw.url
-					: typeof request?.url === "string"
-						? request.url
-						: "";
-			const requestPath = rawUrl.split("?")[0];
-
-			if (requestPath !== this.cyrusToolsMcpEndpoint) {
-				done();
-				return;
-			}
-
-			if (
-				!this.mcpConfigService.isAuthorizationValid(
-					request.headers?.authorization,
-				)
-			) {
-				_reply.code(401).send({
-					error: "Unauthorized cyrus-tools MCP request",
-				});
-				done();
-				return;
-			}
-
-			const rawContextHeader = request.headers?.["x-cyrus-mcp-context-id"];
-			const contextId = Array.isArray(rawContextHeader)
-				? rawContextHeader[0]
-				: rawContextHeader;
-
-			this.cyrusToolsMcpRequestContext.run({ contextId }, () => {
-				done();
-			});
-		});
-
-		this.cyrusToolsMcpSessions.on("connected", (sessionId) => {
-			console.log(
-				`[EdgeWorker] cyrus-tools MCP session connected: ${sessionId}`,
-			);
-		});
-
-		this.cyrusToolsMcpSessions.on("terminated", (sessionId) => {
-			console.log(
-				`[EdgeWorker] cyrus-tools MCP session terminated: ${sessionId}`,
-			);
-		});
-
-		this.cyrusToolsMcpSessions.on("error", (error) => {
-			console.error("[EdgeWorker] cyrus-tools MCP session error:", error);
-		});
-
-		await fastify.register(streamableHttp, {
-			stateful: true,
-			mcpEndpoint: this.cyrusToolsMcpEndpoint,
-			sessions: this.cyrusToolsMcpSessions,
-			createServer: async () => {
-				const contextId =
-					this.cyrusToolsMcpRequestContext.getStore()?.contextId;
-				if (!contextId) {
-					throw new Error(
-						"Missing x-cyrus-mcp-context-id header for cyrus-tools MCP request",
-					);
-				}
-
-				const context = this.mcpConfigService.getContext(contextId);
-				if (!context) {
-					throw new Error(
-						`Unknown cyrus-tools MCP context '${contextId}'. Build MCP config before connecting.`,
-					);
-				}
-
-				const sdkServer =
-					context.prebuiltServer ||
-					createCyrusToolsServer(
-						context.linearClient,
-						this.createCyrusToolsOptions(context.parentSessionId),
-					);
-				this.mcpConfigService.clearPrebuiltServer(contextId);
-
-				return sdkServer.server;
-			},
-		});
-
-		this.cyrusToolsMcpRegistered = true;
-		console.log(
-			`✅ Cyrus tools MCP endpoint registered at ${this.cyrusToolsMcpEndpoint}`,
-		);
-	}
-
-	private failureModesClient: FailureModesHttpClient | null = null;
-
-	/**
-	 * Lazily build the HTTP client used by `log_failure_mode` to POST to
-	 * cyrus-hosted. Uses `CYRUS_APP_URL` (the same env var the remote
-	 * session-store client reads, see top of this file) so preview
-	 * environments and prod share a single way to point at a control
-	 * plane. Returns null when either the URL or the `CYRUS_API_KEY` are
-	 * missing — in that mode the tool is simply not registered, so
-	 * customer-mode CLI users without a control plane don't see a broken
-	 * tool.
-	 */
-	private getFailureModesClient(): FailureModesHttpClient | null {
-		if (this.failureModesClient) return this.failureModesClient;
-		const apiKey = process.env.CYRUS_API_KEY?.trim();
-		if (!apiKey) return null;
-		const baseUrl = getCyrusAppUrl();
-		this.failureModesClient = createFetchFailureModesClient({
-			baseUrl,
-			apiKey,
-		});
-		return this.failureModesClient;
-	}
-
-	/**
-	 * Resolve a working-directory string to the agent session id that owns
-	 * that workspace. The `log_failure_mode` MCP tool calls this with the
-	 * agent's reported `cwd`. We normalize and compare against each known
-	 * session's `workspace.path` (and any sub-repo paths the session opens).
-	 */
-	/**
-	 * Resolve a working-directory string to the rich session bundle a
-	 * Cyrus team member needs to triage a failure-mode report: the
-	 * internal session id (for dedup), the runner session id + runner
-	 * type (so triage can pull the Claude/Gemini/Codex/Cursor transcript),
-	 * the Linear AgentSession + source-issue identifiers (so triage can
-	 * jump to the customer thread), and the workspace path (for repro).
-	 *
-	 * Returns null only when no session matches. We prefer an exact
-	 * workspace-path or sub-repo-path match; if neither hits, we fall
-	 * back to a prefix match for nested cwds (e.g. shells in a subdir).
-	 */
 	/**
 	 * Aggregator over every place active sessions live in this process.
-	 * Today: the primary AgentSessionManager (issue sessions) and the
-	 * ChatSessionHandler's private one (Slack / GitHub-PR-chat / future
-	 * chat platforms). New session origins should be added here so
-	 * downstream consumers (currently just resolveSessionFromCwd) keep
-	 * working without modification — single open extension point (OCP),
-	 * single responsibility (SRP: this method's only job is "where do
+	 * Today: the primary AgentSessionManager (issue sessions). New session
+	 * origins should be added here so downstream consumers (currently
+	 * CyrusToolsHost.resolveSessionFromCwd, injected via the getAllKnownSessions
+	 * callback) keep working without modification — single open extension point
+	 * (OCP), single responsibility (SRP: this method's only job is "where do
 	 * sessions live?", separate from "how do we match one by cwd?").
 	 */
 	private getAllKnownSessions(): CyrusAgentSession[] {
-		return [
-			...this.agentSessionManager.getAllSessions(),
-			...(this.chatSessionHandler?.getAllChatSessions() ?? []),
-		];
-	}
-
-	private resolveSessionFromCwd(cwd: string): ResolvedSession | null {
-		if (!cwd) return null;
-		const normalize = (p: string) => p.replace(/\/+$/, "");
-		const target = normalize(cwd);
-
-		const sessions = this.getAllKnownSessions();
-
-		const exact = sessions.find((session) => {
-			if (normalize(session.workspace?.path ?? "") === target) return true;
-			const repoPaths = session.workspace?.repoPaths;
-			if (repoPaths) {
-				for (const p of Object.values(repoPaths)) {
-					if (typeof p === "string" && normalize(p) === target) return true;
-				}
-			}
-			return false;
-		});
-
-		const prefix = exact
-			? undefined
-			: sessions.find((session) => {
-					const root = normalize(session.workspace?.path ?? "");
-					return root && target.startsWith(`${root}/`);
-				});
-
-		const session = exact ?? prefix;
-		if (!session) return null;
-
-		const runnerType = session.claudeSessionId
-			? "claude"
-			: session.geminiSessionId
-				? "gemini"
-				: session.codexSessionId
-					? "codex"
-					: session.cursorSessionId
-						? "cursor"
-						: null;
-		const runnerSessionId =
-			session.claudeSessionId ??
-			session.geminiSessionId ??
-			session.codexSessionId ??
-			session.cursorSessionId ??
-			null;
-
-		const sessionSource = session.id.startsWith("github-")
-			? "github"
-			: session.id.startsWith("gitlab-")
-				? "gitlab"
-				: session.id.startsWith("slack-")
-					? "slack"
-					: (session.issueContext?.trackerId ?? "linear");
-
-		// For Linear-source sessions, `session.id` is already the Linear
-		// AgentSession id (they're literally the same UUID — the v3 rename
-		// from `linearAgentActivitySessionId` to `id` kept the value). So we
-		// don't surface a separate `linearAgentSessionId` — the server keys
-		// dedup on `session_id` and that *is* the Linear AgentSession id when
-		// `session_source === 'linear'`.
-		return {
-			sessionId: session.id,
-			runnerSessionId,
-			runnerType,
-			sourceIssueIdentifier:
-				session.issueContext?.issueIdentifier ??
-				session.issue?.identifier ??
-				null,
-			workspacePath: session.workspace?.path ?? null,
-			sessionSource,
-		};
-	}
-
-	private createCyrusToolsOptions(parentSessionId?: string): CyrusToolsOptions {
-		const failureModesClient = this.getFailureModesClient();
-		const options: CyrusToolsOptions = {
-			parentSessionId,
-			onSessionCreated: (childSessionId: string, parentId: string) => {
-				this.handleChildSessionMapping(childSessionId, parentId);
-			},
-			onFeedbackDelivery: async (childSessionId: string, message: string) => {
-				return this.handleFeedbackDeliveryToChildSession(
-					childSessionId,
-					message,
-				);
-			},
-		};
-		if (failureModesClient) {
-			options.failureModes = {
-				resolveSessionFromCwd: (cwd: string) => this.resolveSessionFromCwd(cwd),
-				httpClient: failureModesClient,
-			};
-		}
-		return options;
+		return [...this.agentSessionManager.getAllSessions()];
 	}
 
 	private handleChildSessionMapping(
@@ -6042,29 +4485,17 @@ ${taskSection}`;
 				? `Received feedback from orchestrator (${parentIssueId}):\n\n---\n\n${message}\n\n---`
 				: `Received feedback from orchestrator:\n\n---\n\n${message}\n\n---`;
 
-			try {
-				const result = await issueTracker.createAgentActivity({
+			const activityId = await this.postActivityDirect(
+				issueTracker,
+				{
 					agentSessionId: childSessionId,
-					content: {
-						type: "thought",
-						body: feedbackThought,
-					},
-				});
-
-				if (result.success) {
-					console.log(
-						`[EdgeWorker] Posted feedback receipt thought for child session ${childSessionId}`,
-					);
-				} else {
-					console.error(
-						`[EdgeWorker] Failed to post feedback receipt thought:`,
-						result,
-					);
-				}
-			} catch (error) {
-				console.error(
-					`[EdgeWorker] Error posting feedback receipt thought:`,
-					error,
+					content: { type: "thought", body: feedbackThought },
+				},
+				"feedback receipt thought",
+			);
+			if (activityId) {
+				console.log(
+					`[EdgeWorker] Posted feedback receipt thought for child session ${childSessionId}`,
 				);
 			}
 		}
@@ -6105,17 +4536,6 @@ ${taskSection}`;
 		return true;
 	}
 
-	private getCyrusToolsMcpUrl(): string {
-		const server = this.sharedApplicationServer as {
-			getPort?: () => number;
-		};
-		const port =
-			typeof server.getPort === "function"
-				? server.getPort()
-				: this.config.serverPort || this.config.webhookPort || 3456;
-		return `http://127.0.0.1:${port}${this.cyrusToolsMcpEndpoint}`;
-	}
-
 	/**
 	 * Build the complete prompt for a session - shows full prompt assembly in one place
 	 *
@@ -6127,6 +4547,124 @@ ${taskSection}`;
 	 * 1. User comment
 	 * 2. Attachment manifest (if present)
 	 */
+	/**
+	 * Resolve the effective cold-resume summarize threshold (in tokens).
+	 *
+	 * Returns `undefined` when the feature is disabled (config unset) or when the
+	 * configured value is below the 20k minimum — a threshold that small would
+	 * summarize almost every resume, defeating the point, so we warn and ignore
+	 * it rather than silently applying a bad value.
+	 */
+	private resolveColdResumeThreshold(): number | undefined {
+		const configured = this.config.claudeColdResumeSummarizeThresholdTokens;
+		if (configured === undefined) {
+			return undefined;
+		}
+		const MIN_THRESHOLD = 20_000;
+		if (configured < MIN_THRESHOLD) {
+			this.logger.warn(
+				`Ignoring claudeColdResumeSummarizeThresholdTokens=${configured}: below the ${MIN_THRESHOLD} minimum (would summarize nearly every resume). Cold-resume summarization disabled.`,
+			);
+			return undefined;
+		}
+		return configured;
+	}
+
+	/**
+	 * Estimate the size (in tokens) of the context a cold resume would replay.
+	 *
+	 * Prefers the session's recorded usage totals (fresh input + cache read +
+	 * cache creation tokens) when available, since that is what actually gets
+	 * rewritten to the prompt cache on resume. Falls back to a rough
+	 * bytes/4 estimate from the transcript file size when no usage is recorded.
+	 */
+	private async estimateResumeContextTokens(
+		session: CyrusAgentSession,
+		transcriptPath: string,
+	): Promise<number> {
+		const usage = (session as { metadata?: { usage?: Record<string, number> } })
+			.metadata?.usage;
+		if (usage) {
+			return (
+				(usage.input_tokens ?? 0) +
+				(usage.cache_read_input_tokens ?? 0) +
+				(usage.cache_creation_input_tokens ?? 0)
+			);
+		}
+		try {
+			const { size } = await stat(transcriptPath);
+			return Math.floor(size / 4);
+		} catch {
+			return 0;
+		}
+	}
+
+	/**
+	 * Cold-resume summarize-and-restart. When a Claude session is resumed after
+	 * its keep-alive window and the transcript it would replay is estimated to
+	 * exceed `claudeColdResumeSummarizeThresholdTokens`, summarize the prior
+	 * transcript with a one-shot Haiku call and return the summary so the caller
+	 * can seed a fresh session with it instead of rewriting the whole transcript
+	 * to the prompt cache.
+	 *
+	 * Returns `undefined` — meaning "fall through to a normal resume" — when the
+	 * feature is disabled, the estimate is at/below the threshold, no transcript
+	 * is found, or summarization fails/times out. This can NEVER break a resume
+	 * that would otherwise succeed, and it NEVER clears `session.claudeSessionId`
+	 * (runner pinning and the init-message rebind both still depend on it).
+	 */
+	private async maybeSummarizeColdResume(
+		session: CyrusAgentSession,
+		linearAgentSessionId: string,
+		claudeSessionId: string,
+		linearWorkspaceId: string,
+	): Promise<string | undefined> {
+		const threshold = this.resolveColdResumeThreshold();
+		if (!threshold) {
+			return undefined;
+		}
+
+		const transcriptPath = await findTranscriptPath(claudeSessionId);
+		if (!transcriptPath) {
+			this.logger.debug(
+				`Cold-resume summarize: no transcript found for Claude session ${claudeSessionId}; resuming normally`,
+			);
+			return undefined;
+		}
+
+		const estimate = await this.estimateResumeContextTokens(
+			session,
+			transcriptPath,
+		);
+		if (estimate <= threshold) {
+			return undefined;
+		}
+
+		try {
+			const summary = await summarizeTranscript({
+				transcriptPath,
+				logger: this.logger,
+			});
+			await this.postThought(
+				linearAgentSessionId,
+				linearWorkspaceId,
+				`This session was resumed after its keep-alive window with a large stored transcript (~${estimate.toLocaleString()} tokens, over the ${threshold.toLocaleString()}-token threshold). To avoid replaying the whole transcript, I summarized the prior session with Haiku and am continuing from that summary. I'll check the current git / PR state before redoing any work.`,
+			);
+			this.logger.info(
+				`Cold-resume summarize: replaced a ~${estimate}-token resume with a Haiku summary for session ${linearAgentSessionId}`,
+			);
+			return summary;
+		} catch (error) {
+			// Any failure falls through to a normal resume — never break a resume
+			// that would otherwise succeed.
+			this.logger.warn(
+				`Cold-resume summarize failed for session ${linearAgentSessionId}; falling back to a normal resume`,
+				{ error: error instanceof Error ? error.message : String(error) },
+			);
+			return undefined;
+		}
+	}
+
 	private async buildSessionPrompt(
 		isNewSession: boolean,
 		session: CyrusAgentSession,
@@ -6151,14 +4689,14 @@ ${taskSection}`;
 			commentAuthor,
 			commentTimestamp,
 			attachmentManifest,
-			previousSessionSummary,
 			isNewSession,
 			isStreaming: false, // This path is only for non-streaming prompts
 			labels,
+			previousSessionSummary,
 		};
 
 		// Use unified prompt assembly
-		const assembly = await this.assemblePrompt(input);
+		const assembly = await this.promptAssembler.assemble(input);
 
 		// Log metadata for debugging
 		this.logger.debug(
@@ -6166,464 +4704,6 @@ ${taskSection}`;
 		);
 
 		return assembly.userPrompt;
-	}
-
-	/**
-	 * Assemble a complete prompt - unified entry point for all prompt building
-	 * This method contains all prompt assembly logic in one place
-	 */
-	private async assemblePrompt(
-		input: PromptAssemblyInput,
-	): Promise<PromptAssembly> {
-		// If actively streaming, just pass through the comment
-		if (input.isStreaming) {
-			return this.buildStreamingPrompt(input);
-		}
-
-		// If new session, build full prompt with all components
-		if (input.isNewSession) {
-			return this.buildNewSessionPrompt(input);
-		}
-
-		// Existing session continuation - just user comment + attachments
-		return this.buildContinuationPrompt(input);
-	}
-
-	/**
-	 * Build prompt for actively streaming session - pass through user comment as-is
-	 */
-	private buildStreamingPrompt(input: PromptAssemblyInput): PromptAssembly {
-		const components: PromptComponent[] = ["user-comment"];
-		if (input.attachmentManifest) {
-			components.push("attachment-manifest");
-		}
-
-		const parts: string[] = [input.userComment];
-		if (input.attachmentManifest) {
-			parts.push(input.attachmentManifest);
-		}
-
-		return {
-			systemPrompt: undefined,
-			userPrompt: parts.join("\n\n"),
-			metadata: {
-				components,
-				promptType: "continuation",
-				isNewSession: false,
-				isStreaming: true,
-			},
-		};
-	}
-
-	/**
-	 * Build prompt for new session - includes issue context and user comment
-	 */
-	private async buildNewSessionPrompt(
-		input: PromptAssemblyInput,
-	): Promise<PromptAssembly> {
-		const components: PromptComponent[] = [];
-		const parts: string[] = [];
-
-		// 1. Determine system prompt from labels
-		// Only for delegation (not mentions) or when /label-based-prompt is requested
-		const repositories = input.repositories ?? [input.repository];
-		let labelBasedSystemPrompt: string | undefined;
-		if (!input.isMentionTriggered || input.isLabelBasedPromptRequested) {
-			const result = await this.promptBuilder.determineSystemPromptFromLabels(
-				input.labels || [],
-				repositories,
-			);
-			labelBasedSystemPrompt = result?.prompt;
-		}
-
-		// 2. Determine system prompt based on prompt type
-		// Label-based: Use only the label-based system prompt
-		// Fallback: Use scenarios system prompt (shared instructions)
-		let systemPrompt: string;
-		if (labelBasedSystemPrompt) {
-			// Use label-based system prompt as-is (no shared instructions)
-			systemPrompt = labelBasedSystemPrompt;
-		} else {
-			// Use scenarios system prompt for fallback cases
-			const sharedInstructions = await this.loadSharedInstructions();
-			systemPrompt = sharedInstructions;
-		}
-
-		// 3. Append skills guidance — instruct the agent to use skills based on context.
-		// Skills hidden by per-skill scope (repo / Linear team / Linear label) are
-		// omitted from the guidance so the model doesn't reference skills it
-		// cannot invoke.
-		const skillsContext = this.buildSkillSessionContext(
-			repositories[0]!,
-			input.fullIssue,
-			input.session,
-		);
-		systemPrompt += await this.skillsPluginResolver.buildSkillsGuidance(
-			undefined,
-			skillsContext,
-		);
-
-		// 4. Append agent context — dynamic values for skills to reference
-		systemPrompt += this.buildAgentContextBlock();
-
-		// 5. Build issue context using appropriate builder
-		// Use label-based prompt ONLY if we have a label-based system prompt
-		const promptType = this.determinePromptType(
-			input,
-			!!labelBasedSystemPrompt,
-		);
-		// Build workspace repo paths map for prompt context.
-		// For multi-repo sessions, workspace.repoPaths maps each repo ID to its worktree.
-		// For single-repo sessions, use workspace.path as the worktree for the primary repo.
-		const workspaceRepoPaths =
-			input.session.workspace.repoPaths ??
-			(repositories.length === 1
-				? { [repositories[0]!.id]: input.session.workspace.path }
-				: undefined);
-		const issueContext = await this.buildIssueContextForPromptAssembly(
-			input.fullIssue,
-			repositories,
-			promptType,
-			input.attachmentManifest,
-			input.guidance,
-			input.agentSession,
-			input.resolvedBaseBranches,
-			workspaceRepoPaths,
-		);
-
-		parts.push(issueContext.prompt);
-		components.push("issue-context");
-
-		// 5b. Add previous-session summary (cold-resume-summarize restart).
-		// When a resume's transcript exceeded the configured threshold, the prior
-		// session was summarized by Haiku and a fresh session started; seed that
-		// summary here so the new session can continue the work.
-		if (input.previousSessionSummary?.trim()) {
-			parts.push(
-				this.buildPreviousSessionSummaryBlock(
-					input.session,
-					input.previousSessionSummary,
-				),
-			);
-			components.push("session-summary");
-		}
-
-		// 4. Add user comment (if present)
-		// Skip for mention-triggered prompts since the comment is already in the mention block
-		if (input.userComment.trim() && !input.isMentionTriggered) {
-			// If we have author/timestamp metadata, include it for multi-player context
-			if (input.commentAuthor || input.commentTimestamp) {
-				const author = input.commentAuthor || "Unknown";
-				const timestamp = input.commentTimestamp || new Date().toISOString();
-				parts.push(`<user_comment>
-  <author>${author}</author>
-  <timestamp>${timestamp}</timestamp>
-  <content>
-${input.userComment}
-  </content>
-</user_comment>`);
-			} else {
-				// Legacy format without metadata
-				parts.push(`<user_comment>\n${input.userComment}\n</user_comment>`);
-			}
-			components.push("user-comment");
-		}
-
-		// 6. Add guidance rules (if present)
-		if (input.guidance && input.guidance.length > 0) {
-			components.push("guidance-rules");
-		}
-
-		return {
-			systemPrompt,
-			userPrompt: parts.join("\n\n"),
-			metadata: {
-				components,
-				promptType,
-				isNewSession: true,
-				isStreaming: false,
-			},
-		};
-	}
-
-	/**
-	 * Build a `<previous_session_summary>` block for the cold-resume-summarize
-	 * restart path. Includes the branches the prior session was working on, the
-	 * Haiku-generated summary, and a note reminding the fresh session that work
-	 * may already exist on the branch / a PR may be open.
-	 */
-	private buildPreviousSessionSummaryBlock(
-		session: CyrusAgentSession,
-		summary: string,
-	): string {
-		const branches = Array.from(
-			new Set(
-				(session.repositories ?? [])
-					.map((repo) => repo.branchName)
-					.filter((b): b is string => Boolean(b)),
-			),
-		);
-		const branchLines =
-			branches.length > 0
-				? branches.map((b) => `    <branch>${b}</branch>`).join("\n")
-				: "";
-		const branchesBlock = branchLines
-			? `  <branches>\n${branchLines}\n  </branches>\n`
-			: "";
-
-		return `<previous_session_summary>
-${branchesBlock}  <summary>
-${summary.trim()}
-  </summary>
-  <note>This summary replaces a prior session that grew too large to resume directly. Work may already exist on the branch above and a pull request may already be open — check the current state with git and gh before redoing anything.</note>
-</previous_session_summary>`;
-	}
-
-	/**
-	 * Build an <agent_context> block with dynamic values that skills can reference.
-	 *
-	 * Provides bot usernames so skills (e.g. verify-and-ship) can refer to the
-	 * correct bot account without hardcoding.
-	 */
-	private buildAgentContextBlock(): string {
-		const githubBot = process.env.GITHUB_BOT_USERNAME || "";
-		const gitlabBot = process.env.GITLAB_BOT_USERNAME || "";
-
-		if (!githubBot && !gitlabBot) {
-			return "";
-		}
-
-		const lines: string[] = ["\n\n<agent_context>"];
-		if (githubBot) {
-			lines.push(`  <github_bot_username>${githubBot}</github_bot_username>`);
-		}
-		if (gitlabBot) {
-			lines.push(`  <gitlab_bot_username>${gitlabBot}</gitlab_bot_username>`);
-		}
-		lines.push("</agent_context>");
-
-		return lines.join("\n");
-	}
-
-	/**
-	 * Build prompt for existing session continuation - user comment and attachments only
-	 */
-	private buildContinuationPrompt(input: PromptAssemblyInput): PromptAssembly {
-		const components: PromptComponent[] = ["user-comment"];
-		if (input.attachmentManifest) {
-			components.push("attachment-manifest");
-		}
-
-		// Wrap comment in XML with author and timestamp for multi-player context
-		const author = input.commentAuthor || "Unknown";
-		const timestamp = input.commentTimestamp || new Date().toISOString();
-
-		const commentXml = `<new_comment>
-  <author>${author}</author>
-  <timestamp>${timestamp}</timestamp>
-  <content>
-${input.userComment}
-  </content>
-</new_comment>`;
-
-		const parts: string[] = [commentXml];
-		if (input.attachmentManifest) {
-			parts.push(input.attachmentManifest);
-		}
-
-		return {
-			systemPrompt: undefined,
-			userPrompt: parts.join("\n\n"),
-			metadata: {
-				components,
-				promptType: "continuation",
-				isNewSession: false,
-				isStreaming: false,
-			},
-		};
-	}
-
-	/**
-	 * Determine the prompt type based on input flags and system prompt availability
-	 */
-	private determinePromptType(
-		input: PromptAssemblyInput,
-		hasSystemPrompt: boolean,
-	): PromptType {
-		if (input.isMentionTriggered && input.isLabelBasedPromptRequested) {
-			return "label-based-prompt-command";
-		}
-		if (input.isMentionTriggered) {
-			return "mention";
-		}
-		if (hasSystemPrompt) {
-			return "label-based";
-		}
-		return "fallback";
-	}
-
-	/**
-	 * Load shared instructions that get appended to all system prompts
-	 */
-	private async loadSharedInstructions(): Promise<string> {
-		return this.promptBuilder.loadSharedInstructions();
-	}
-
-	/**
-	 * Adapter method for prompt assembly - routes to appropriate issue context builder
-	 */
-	private async buildIssueContextForPromptAssembly(
-		issue: Issue,
-		repositories: RepositoryConfig[],
-		promptType: PromptType,
-		attachmentManifest?: string,
-		guidance?: GuidanceRule[],
-		agentSession?: WebhookAgentSession,
-		resolvedBaseBranches?: Record<string, BaseBranchResolution>,
-		workspaceRepoPaths?: Record<string, string>,
-	): Promise<IssueContextResult> {
-		// Delegate to appropriate builder based on promptType
-		if (promptType === "mention") {
-			if (!agentSession) {
-				throw new Error(
-					"agentSession is required for mention-triggered prompts",
-				);
-			}
-			return this.buildMentionPrompt(
-				issue,
-				agentSession,
-				attachmentManifest,
-				guidance,
-			);
-		}
-		if (
-			promptType === "label-based" ||
-			promptType === "label-based-prompt-command"
-		) {
-			return this.promptBuilder.buildLabelBasedPrompt(
-				issue,
-				repositories,
-				attachmentManifest,
-				guidance,
-				resolvedBaseBranches,
-			);
-		}
-		// Fallback to standard issue context
-		return this.promptBuilder.buildIssueContextPrompt(
-			issue,
-			repositories,
-			undefined, // No new comment for initial prompt assembly
-			attachmentManifest,
-			guidance,
-			resolvedBaseBranches,
-			workspaceRepoPaths,
-		);
-	}
-
-	/**
-	 * Resolve the default runner type for SimpleRunner (classification) use.
-	 * Uses config.defaultRunner if set, otherwise auto-detects from API keys,
-	 * falling back to "claude".
-	 */
-	/**
-	 * Build agent runner configuration with common settings.
-	 * Delegates to RunnerConfigBuilder for shared config assembly.
-	 * @returns Object containing the runner config and runner type to use
-	 */
-	private async buildAgentRunnerConfig(
-		session: CyrusAgentSession,
-		repository: RepositoryConfig,
-		sessionId: string,
-		systemPrompt: string | undefined,
-		allowedTools: string[],
-		allowedDirectories: string[],
-		disallowedTools: string[],
-		resumeSessionId?: string,
-		labels?: string[],
-		issueDescription?: string,
-		maxTurns?: number,
-		linearWorkspaceId?: string,
-		skillContext?: SkillSessionContext,
-		/**
-		 * Which platform initiated the session — drives which
-		 * `EdgeWorkerConfig.<platform>McpConfigs` override list applies.
-		 * Defaults to `"linear"` (the pre-platform-aware behavior).
-		 */
-		sessionPlatform: "linear" | "github" | "gitlab" = "linear",
-	): Promise<{ config: AgentRunnerConfig; runnerType: RunnerType }> {
-		const log = this.logger.withContext({
-			sessionId,
-			platform: session.issueContext?.trackerId,
-			issueIdentifier: session.issueContext?.issueIdentifier,
-		});
-
-		// Resolve plugins once so we can also derive the per-session scoped
-		// skill allow-list from the same filesystem snapshot.
-		const plugins = await this.skillsPluginResolver.resolve();
-		const resolvedSkillContext: SkillSessionContext = skillContext ?? {
-			repositoryId: repository.id,
-			repoPaths: this.resolveSkillRepoPaths(repository, session),
-		};
-		const allowedSkillNames =
-			await this.skillsPluginResolver.discoverSkillNames(
-				plugins,
-				resolvedSkillContext,
-			);
-
-		const result = this.runnerConfigBuilder.buildIssueConfig({
-			session,
-			repository,
-			sessionId,
-			systemPrompt,
-			allowedTools,
-			allowedDirectories,
-			disallowedTools,
-			resumeSessionId,
-			labels,
-			issueDescription,
-			maxTurns,
-			// Per-platform MCP config paths — GitHub + GitLab share the
-			// `githubMcpConfigs` knob (single-repo PR contexts both); Linear
-			// gets `linearMcpConfigs`. Not a blanket override: the builder
-			// uses `repository.mcpConfigPath` when this repo has its own
-			// `allowedTools` override (so the repo's permission rules and
-			// MCP server set travel as a unit), and only falls through to
-			// this list when the repo inherits the platform allow-list.
-			platformMcpConfigOverrides:
-				sessionPlatform === "linear"
-					? this.config.linearMcpConfigs
-					: this.config.githubMcpConfigs,
-			linearWorkspaceId,
-			cyrusHome: this.cyrusHome,
-			logger: log,
-			plugins,
-			skills: allowedSkillNames,
-			sandboxSettings: this.sdkSandboxSettings ?? undefined,
-			egressCaCertPath: this.egressCaCertPath ?? undefined,
-			onMessage: (message: SDKMessage) => {
-				this.handleClaudeMessage(sessionId, message, repository.id);
-			},
-			onError: (error: Error) =>
-				this.handleClaudeError(error, sessionId, repository.id),
-			createAskUserQuestionCallback: (sid, wid) =>
-				this.createAskUserQuestionCallback(sid, wid)!,
-			requireLinearWorkspaceId,
-		});
-
-		// Attach pre-warmed session if available (only for Claude runner).
-		// Skipped entirely when warm sessions are not enabled.
-		if (result.runnerType === "claude" && this.isWarmSessionsEnabled()) {
-			const warmSession = this.warmInstances.get(sessionId);
-			if (warmSession) {
-				this.warmInstances.delete(sessionId);
-				(
-					result.config as AgentRunnerConfig & { warmSession?: WarmQuery }
-				).warmSession = warmSession;
-				log.debug("Attaching pre-warmed session to runner config");
-			}
-		}
-
-		return result;
 	}
 
 	/**
@@ -6653,6 +4733,15 @@ ${input.userComment}
 	/**
 	 * Build disallowed tools list following the same hierarchy as allowed tools.
 	 * Accepts single or multiple repositories (intersection for multi-repo).
+	 *
+	 * The verbose, rarely-used Linear MCP tools are appended here via
+	 * `withLinearMcpPruned` so they are removed from the model's context
+	 * (DEV-140). This is the single chokepoint every session path funnels
+	 * through (issue, warm-pool, multi-repo), so the prune applies uniformly
+	 * regardless of per-repo `disallowedTools` config. The Linear server is
+	 * still eager-loaded (`alwaysLoad`, see `McpConfigService`); pruning trims
+	 * its ~47-tool surface down to the essentials Cyrus actually uses. The local
+	 * `cyrus-tools` server remains available on demand instead of being eager.
 	 */
 	private buildDisallowedTools(
 		repositories: RepositoryConfig | RepositoryConfig[],
@@ -6663,9 +4752,11 @@ ${input.userComment}
 			| "orchestrator"
 			| "graphite-orchestrator",
 	): string[] {
-		return this.toolPermissionResolver.buildDisallowedTools(
-			repositories,
-			promptType,
+		return withLinearMcpPruned(
+			this.toolPermissionResolver.buildDisallowedTools(
+				repositories,
+				promptType,
+			),
 		);
 	}
 
@@ -6836,21 +4927,6 @@ ${input.userComment}
 	}
 
 	/**
-	 * Whether the warm-session feature is enabled.
-	 *
-	 * Warm sessions are an opt-in optimization that pre-spawns Claude Code
-	 * subprocesses on startup so the first query after a restart skips the
-	 * cold-start cost. Disabled by default; opt in by setting
-	 * `CYRUS_ENABLE_WARM_SESSIONS=1` (or `=true`).
-	 */
-	private isWarmSessionsEnabled(): boolean {
-		const raw = process.env.CYRUS_ENABLE_WARM_SESSIONS;
-		if (!raw) return false;
-		const v = raw.toLowerCase().trim();
-		return v === "1" || v === "true";
-	}
-
-	/**
 	 * Whether the remote Claude session store is explicitly disabled.
 	 *
 	 * The remote store mirrors SDK transcripts to the Cyrus hosted control
@@ -6864,185 +4940,6 @@ ${input.userComment}
 		if (!raw) return false;
 		const v = raw.toLowerCase().trim();
 		return v === "1" || v === "true";
-	}
-
-	/**
-	 * Pre-warm the N most recently updated Claude sessions so the first query
-	 * after a CLI restart has near-zero cold-start latency (~20x faster).
-	 *
-	 * Uses startup() from @anthropic-ai/claude-agent-sdk with MCP_CONNECTION_NONBLOCKING=true
-	 * so the warm instances are ready in ~500ms rather than ~4s.
-	 * Warm instances are stored in this.warmInstances keyed by agentSessionId and
-	 * consumed by buildAgentRunnerConfig() when the first message arrives.
-	 *
-	 * Gated by `isWarmSessionsEnabled()` — callers should check before invoking.
-	 */
-	private async warmupRecentSessions(count = 30): Promise<void> {
-		const allSessions = this.agentSessionManager.getAllSessions();
-
-		// Only warm Claude sessions that have a persisted session ID and a workspace path
-		const candidates = allSessions
-			.filter((s) => s.claudeSessionId && s.workspace?.path)
-			.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
-			.slice(0, count);
-
-		if (candidates.length === 0) {
-			this.logger.debug("No Claude sessions to pre-warm");
-			return;
-		}
-
-		this.logger.info(
-			`Pre-warming ${candidates.length} most recent Claude sessions...`,
-		);
-
-		const { startup } = await import("@anthropic-ai/claude-agent-sdk");
-
-		// Resolve the skill plugins once — they are global (same for every
-		// session), so there is no need to re-resolve per candidate. Without
-		// these, warm-resumed sessions get the Skill tool but an empty skill set,
-		// leaving them strictly weaker than a cold session (which resolves skills
-		// in buildAgentRunnerConfig()).
-		const warmPlugins = await this.skillsPluginResolver.resolve();
-
-		await Promise.all(
-			candidates.map(async (session) => {
-				try {
-					const repoId = this.sessionRepositories.get(session.id);
-					const repo = repoId ? this.repositories.get(repoId) : undefined;
-					if (!repo) {
-						this.logger.debug(
-							`No repo for session ${session.id}, skipping warmup`,
-						);
-						return;
-					}
-
-					// Build MCP config for this session (same as the live runner would use)
-					const linearWorkspaceId = requireLinearWorkspaceId(repo);
-					const mcpConfig = this.mcpConfigService.buildMcpConfig(
-						repo.id,
-						linearWorkspaceId,
-						session.id,
-					);
-
-					// Merge any file-based MCP configs (reuses shared normalization).
-					// Warmup paths reconstruct Linear-triggered issue sessions:
-					// if the repo has its own `allowedTools` override its
-					// mcpConfigPath stays scoped to that repo, otherwise the
-					// team-level `linearMcpConfigs` list applies. Same coupling
-					// the live `buildIssueConfig` path uses.
-					const mcpConfigPath = resolveIssueMcpConfigPath(
-						repo,
-						this.config.linearMcpConfigs,
-						this.mcpConfigService.buildMergedMcpConfigPath.bind(
-							this.mcpConfigService,
-						),
-					);
-					let mcpServers: Record<string, McpServerConfig> = { ...mcpConfig };
-					if (mcpConfigPath) {
-						const paths = Array.isArray(mcpConfigPath)
-							? mcpConfigPath
-							: [mcpConfigPath];
-						for (const filePath of paths) {
-							try {
-								if (existsSync(filePath)) {
-									const fileContent = JSON.parse(
-										readFileSync(filePath, "utf8"),
-									);
-									const servers = fileContent.mcpServers || {};
-									normalizeMcpHttpTransport(servers);
-									mcpServers = { ...mcpServers, ...servers };
-								}
-							} catch {
-								// Ignore unreadable MCP config files
-							}
-						}
-					}
-
-					const repoConfig = repo as unknown as Record<string, unknown>;
-					const model =
-						(session.metadata?.model as string | undefined) ||
-						(repoConfig.claudeDefaultModel as string | undefined) ||
-						(repoConfig.model as string | undefined) ||
-						"claude-opus-4-6";
-
-					// Build allowed/disallowed tools — same as what buildAgentRunnerConfig() uses.
-					// Without these, startup() inherits the user's defaultMode ("default"),
-					// which causes macOS permission prompts for file writes.
-					const allowedTools = this.buildAllowedTools(repo);
-
-					// Reconstruct the home-directory Read denials that ClaudeRunner.start()
-					// computes at query time. Warm sessions run warmSession.query()
-					// directly and never see those query-time options, so without
-					// re-deriving them here a resumed session could read ~/.ssh, ~/.aws,
-					// etc. Mirror the live allowedDirectories composition so the
-					// attachments/repo/git dirs stay readable.
-					const workspaceFolderName = basename(session.workspace.path);
-					const attachmentsDir = join(
-						this.cyrusHome,
-						workspaceFolderName,
-						"attachments",
-					);
-					const allowedDirectories = [
-						...new Set([
-							attachmentsDir,
-							repo.repositoryPath,
-							session.workspace.path,
-							...this.gitService.getGitMetadataDirectoriesForWorkspace(
-								session.workspace,
-							),
-						]),
-					];
-					const disallowedTools = [
-						...new Set([
-							...this.buildDisallowedTools(repo),
-							...buildHomeDirectoryDisallowedTools(
-								session.workspace.path,
-								allowedDirectories,
-							),
-						]),
-					];
-
-					// Skills for this session's repo/worktree — mirrors the live
-					// resolveSkillsConfig() path so warm sessions have the same skill
-					// set (and skill allow-list) as cold ones.
-					const skills = await this.skillsPluginResolver.discoverSkillNames(
-						warmPlugins,
-						{
-							repositoryId: repo.id,
-							repoPaths: [session.workspace.path],
-						},
-					);
-
-					const warm = await startup({
-						options: {
-							resume: session.claudeSessionId,
-							model,
-							cwd: session.workspace.path,
-							...(Object.keys(mcpServers).length > 0 && { mcpServers }),
-							...(allowedTools.length > 0 && { allowedTools }),
-							...(disallowedTools.length > 0 && { disallowedTools }),
-							...(warmPlugins.length > 0 && { plugins: warmPlugins }),
-							...(skills !== undefined && { skills }),
-							settingSources: ["user", "project", "local"],
-							// CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is intentionally not set here;
-							// see CYPACK-1108 and ClaudeRunner.start() for context.
-							env: buildBaseSessionEnv(),
-						},
-					});
-
-					this.warmInstances.set(session.id, warm);
-					this.logger.info(
-						`Pre-warmed session ${session.id} (${session.issueContext?.issueIdentifier ?? "unknown"})`,
-					);
-				} catch (err) {
-					this.logger.debug(`Failed to pre-warm session ${session.id}:`, err);
-				}
-			}),
-		);
-
-		this.logger.info(
-			`Session pre-warm complete: ${this.warmInstances.size} sessions ready`,
-		);
 	}
 
 	/**
@@ -7166,7 +5063,28 @@ ${input.userComment}
 		input: AgentActivityCreateInput,
 		label: string,
 	): Promise<string | null> {
-		return this.activityPoster.postActivityDirect(issueTracker, input, label);
+		// Route through the single sink post path. These call sites already have
+		// an issue tracker resolved, so wrap it in an ad-hoc LinearActivitySink.
+		const { agentSessionId, content, ephemeral, signalMetadata } =
+			input as AgentActivityCreateInput & {
+				ephemeral?: boolean;
+				signalMetadata?: Record<string, unknown>;
+			};
+		const activity = {
+			...(content as unknown as Activity),
+			...(ephemeral !== undefined && { ephemeral }),
+			...(signalMetadata && { signalMetadata }),
+		} as Activity;
+		try {
+			const result = await new LinearActivitySink(issueTracker, "adhoc").post(
+				agentSessionId,
+				activity,
+			);
+			return result.activityId ?? null;
+		} catch (error) {
+			this.logger.error(`Error creating ${label}:`, error);
+			return null;
+		}
 	}
 
 	/**
@@ -7176,9 +5094,10 @@ ${input.userComment}
 		sessionId: string,
 		linearWorkspaceId: string,
 	): Promise<void> {
-		return this.activityPoster.postInstantAcknowledgment(
+		await this.postThought(
 			sessionId,
 			linearWorkspaceId,
+			"I've received your request and I'm starting to work on it. Let me analyze the issue and prepare my approach.",
 		);
 	}
 
@@ -7189,9 +5108,10 @@ ${input.userComment}
 		sessionId: string,
 		linearWorkspaceId: string,
 	): Promise<void> {
-		return this.activityPoster.postParentResumeAcknowledgment(
+		await this.postThought(
 			sessionId,
 			linearWorkspaceId,
+			"Resuming from child session",
 		);
 	}
 
@@ -7204,30 +5124,23 @@ ${input.userComment}
 		repoLines: string[],
 		routingMethod?: string,
 	): Promise<void> {
-		return this.activityPoster.postRoutingActivity(
-			sessionId,
+		await this.postActivityViaSink(
 			linearWorkspaceId,
-			repoLines,
-			routingMethod,
+			sessionId,
+			formatRoutingThought(repoLines, routingMethod),
+			"routing",
 		);
 	}
 
 	/**
-	 * Handle prompt with streaming check - centralized logic for all input types
+	 * Handle prompt with streaming check — thin delegator to
+	 * {@link SessionOrchestrator.handlePromptWithStreamingCheck}.
 	 *
-	 * This method implements the unified pattern for handling prompts:
-	 * 1. Check if runner is actively streaming
-	 * 2. Add to stream if streaming, OR resume session if not
+	 * Retained (same signature) because tests spy this method on the EdgeWorker
+	 * instance, and the orchestrator's resume path routes back through this
+	 * instance's {@link resumeAgentSession} (via `resumeSessionDelegate`).
+	 * TODO(Phase G): delete.
 	 *
-	 * @param session The Cyrus agent session
-	 * @param repository Repository configuration
-	 * @param sessionId Linear agent activity session ID
-	 * @param agentSessionManager Agent session manager instance
-	 * @param promptBody The prompt text to send
-	 * @param attachmentManifest Optional attachment manifest to append
-	 * @param isNewSession Whether this is a new session
-	 * @param additionalAllowedDirs Additional directories to allow access to
-	 * @param logContext Context string for logging (e.g., "prompted webhook", "parent resume")
 	 * @returns true if message was added to stream, false if session was resumed
 	 */
 	private async handlePromptWithStreamingCheck(
@@ -7244,45 +5157,7 @@ ${input.userComment}
 		commentAuthor?: string,
 		commentTimestamp?: string,
 	): Promise<boolean> {
-		const log = this.logger.withContext({ sessionId });
-		const existingRunner = session.agentRunner;
-
-		// Handle running case - add message to existing stream (if supported)
-		if (
-			existingRunner?.isRunning() &&
-			existingRunner.supportsStreamingInput &&
-			existingRunner.addStreamMessage
-		) {
-			log.debug(
-				`Adding prompt to existing stream for ${sessionId} (${logContext})`,
-			);
-
-			// Append attachment manifest to the prompt if we have one
-			let fullPrompt = promptBody;
-			if (attachmentManifest) {
-				fullPrompt = `${promptBody}\n\n${attachmentManifest}`;
-			}
-
-			// `addStreamMessage` can reject the message if the turn ended in the
-			// race window between "still running" and "turn finished" (e.g. the
-			// Codex app-server backend, which only steers an active turn). Fall
-			// through to the resume path so the comment is never dropped. Claude's
-			// streaming input never throws here, so this is a no-op for Claude.
-			try {
-				existingRunner.addStreamMessage(fullPrompt);
-				return true; // Message added to stream
-			} catch (error) {
-				log.warn(
-					`Streaming message rejected for ${sessionId}; falling back to resume (${logContext})`,
-					{ error: error instanceof Error ? error.message : String(error) },
-				);
-			}
-		}
-
-		// Not streaming (or streaming was rejected) - resume/start session
-		log.debug(`Resuming Claude session for ${sessionId} (${logContext})`);
-
-		await this.resumeAgentSession(
+		return this.sessionOrchestrator.handlePromptWithStreamingCheck(
 			session,
 			repository,
 			sessionId,
@@ -7291,13 +5166,11 @@ ${input.userComment}
 			attachmentManifest,
 			isNewSession,
 			additionalAllowedDirs,
+			logContext,
 			linearWorkspaceId,
-			undefined, // maxTurns
 			commentAuthor,
 			commentTimestamp,
 		);
-
-		return false; // Session was resumed
 	}
 
 	/**
@@ -7309,151 +5182,18 @@ ${input.userComment}
 		linearWorkspaceId: string,
 		repositoryId: string,
 	): Promise<void> {
-		return this.activityPoster.postSystemPromptSelectionThought(
-			sessionId,
-			labels,
+		const repository = Array.from(this.repositories.values()).find(
+			(r) => r.id === repositoryId,
+		);
+		if (!repository) return;
+		const activity = formatLabelRoleThought(labels, repository);
+		if (!activity) return;
+		await this.postActivityViaSink(
 			linearWorkspaceId,
-			repositoryId,
+			sessionId,
+			activity,
+			"system prompt selection",
 		);
-	}
-
-	/** Minimum sane cold-resume summarize threshold; below this we warn + disable. */
-	private static readonly MIN_COLD_RESUME_THRESHOLD_TOKENS = 20_000;
-
-	/**
-	 * Resolve the effective cold-resume summarize threshold from config.
-	 * Returns undefined when disabled (unset) or when the configured value is
-	 * below the minimum sane value (warn + ignore). Mirrors the resolve-helper
-	 * pattern used for other bounded numeric config knobs.
-	 */
-	private resolveColdResumeThreshold(): number | undefined {
-		const configured = this.config.claudeColdResumeSummarizeThresholdTokens;
-		if (configured === undefined) return undefined;
-		if (configured < EdgeWorker.MIN_COLD_RESUME_THRESHOLD_TOKENS) {
-			this.logger.warn(
-				`claudeColdResumeSummarizeThresholdTokens=${configured} is below the minimum of ${EdgeWorker.MIN_COLD_RESUME_THRESHOLD_TOKENS}; ignoring (cold-resume summarize disabled)`,
-			);
-			return undefined;
-		}
-		return configured;
-	}
-
-	/**
-	 * Estimate the token size of a resume's prior context.
-	 *
-	 * Prefers the last turn's usage signal (input + cache-read + cache-write)
-	 * when present on the session; otherwise falls back to transcript file size
-	 * divided by 4 (a rough bytes-per-token estimate). Returns undefined if
-	 * neither signal is available.
-	 */
-	private async estimateResumeContextTokens(
-		session: CyrusAgentSession,
-		transcriptPath: string,
-	): Promise<number | undefined> {
-		const usage = session.metadata?.usage as
-			| Record<string, unknown>
-			| undefined;
-		if (usage) {
-			const num = (...keys: string[]): number => {
-				for (const key of keys) {
-					const value = usage[key];
-					if (typeof value === "number" && Number.isFinite(value)) {
-						return value;
-					}
-				}
-				return 0;
-			};
-			const fromUsage =
-				num("input_tokens", "inputTokens") +
-				num("cache_read_input_tokens", "cacheReadInputTokens") +
-				num("cache_creation_input_tokens", "cacheCreationInputTokens");
-			if (fromUsage > 0) return fromUsage;
-		}
-
-		try {
-			const { size } = await stat(transcriptPath);
-			return Math.floor(size / 4);
-		} catch {
-			return undefined;
-		}
-	}
-
-	/**
-	 * Cold-resume summarize-and-restart trigger.
-	 *
-	 * When a Claude resume's transcript has grown past the configured threshold,
-	 * summarize it with a one-shot Haiku call and return the summary so the
-	 * caller can start a fresh session seeded with it. Returns undefined (fall
-	 * through to a normal resume) when the feature is disabled, no transcript is
-	 * found, the estimate is under threshold, or summarization fails — the
-	 * feature must never break a resume that would otherwise have succeeded.
-	 */
-	private async maybeSummarizeColdResume(
-		session: CyrusAgentSession,
-		sessionId: string,
-		claudeSessionId: string,
-		workspaceId: string,
-	): Promise<string | undefined> {
-		const threshold = this.resolveColdResumeThreshold();
-		if (threshold === undefined) return undefined;
-
-		let transcriptPath: string | null = null;
-		try {
-			transcriptPath = await findTranscriptPath(claudeSessionId);
-		} catch (error) {
-			this.logger.warn(`Cold-resume: transcript lookup failed`, {
-				error: error instanceof Error ? error.message : String(error),
-			});
-			return undefined;
-		}
-		if (!transcriptPath) {
-			this.logger.debug(
-				`Cold-resume: no transcript found for ${claudeSessionId}; skipping summarize`,
-			);
-			return undefined;
-		}
-
-		const estimatedTokens = await this.estimateResumeContextTokens(
-			session,
-			transcriptPath,
-		);
-		if (estimatedTokens === undefined || estimatedTokens <= threshold) {
-			return undefined;
-		}
-
-		this.logger.info(
-			`Cold-resume: estimated ${estimatedTokens} tokens > threshold ${threshold}; summarizing ${transcriptPath}`,
-		);
-
-		try {
-			await this.activityPoster.postThoughtActivity(
-				sessionId,
-				workspaceId,
-				"Prior conversation exceeds the resume threshold — summarizing and starting fresh.",
-			);
-		} catch (error) {
-			// Best-effort thought; never block summarization on it.
-			this.logger.warn(`Cold-resume: failed to post summarize thought`, {
-				error: error instanceof Error ? error.message : String(error),
-			});
-		}
-
-		try {
-			const summary = await summarizeTranscript({
-				transcriptPath,
-				logger: this.logger,
-			});
-			this.logger.info(
-				`Cold-resume: summarized transcript into ${summary.length} chars; starting fresh session`,
-			);
-			return summary;
-		} catch (error) {
-			this.logger.warn(
-				`Cold-resume: summarization failed; falling through to normal resume`,
-				{ error: error instanceof Error ? error.message : String(error) },
-			);
-			return undefined;
-		}
 	}
 
 	/**
@@ -7481,203 +5221,20 @@ ${input.userComment}
 		commentAuthor?: string,
 		commentTimestamp?: string,
 	): Promise<void> {
-		const log = this.logger.withContext({ sessionId });
-		// Check for existing runner
-		const existingRunner = session.agentRunner;
-
-		// If there's an existing running runner that supports streaming, add to it
-		if (
-			existingRunner?.isRunning() &&
-			existingRunner.supportsStreamingInput &&
-			existingRunner.addStreamMessage
-		) {
-			let fullPrompt = promptBody;
-			if (attachmentManifest) {
-				fullPrompt = `${promptBody}\n\n${attachmentManifest}`;
-			}
-			// See handlePromptWithStreamingCheck: a steer-only backend can reject
-			// the message if the turn just ended. Fall through to a fresh resume
-			// turn rather than dropping the comment. No-op for Claude.
-			try {
-				existingRunner.addStreamMessage(fullPrompt);
-				return;
-			} catch (error) {
-				log.warn(
-					`Streaming message rejected for ${sessionId}; falling back to resume`,
-					{ error: error instanceof Error ? error.message : String(error) },
-				);
-			}
-		}
-
-		// Stop existing runner if it's not running
-		if (existingRunner) {
-			existingRunner.stop();
-		}
-
-		// Get issueId from issueContext (preferred) or deprecated issueId field
-		const issueIdForResume = session.issueContext?.issueId ?? session.issueId;
-		if (!issueIdForResume) {
-			log.error(`No issue ID found for session ${session.id}`);
-			throw new Error(`No issue ID found for session ${session.id}`);
-		}
-
-		// Fetch full issue details using workspace ID (from webhook context or repo fallback)
-		const resolvedWorkspaceId =
-			linearWorkspaceId ?? requireLinearWorkspaceId(repository);
-		const fullIssue = await this.fetchFullIssueDetails(
-			issueIdForResume,
-			resolvedWorkspaceId,
-		);
-		if (!fullIssue) {
-			log.error(`Failed to fetch full issue details for ${issueIdForResume}`);
-			throw new Error(
-				`Failed to fetch full issue details for ${issueIdForResume}`,
-			);
-		}
-
-		// Fetch issue labels early to determine runner type
-		const labels = await this.fetchIssueLabels(fullIssue);
-
-		// Determine which runner to use based on existing session IDs
-		const hasClaudeSession = !isNewSession && Boolean(session.claudeSessionId);
-		const hasGeminiSession = !isNewSession && Boolean(session.geminiSessionId);
-		const hasCodexSession = !isNewSession && Boolean(session.codexSessionId);
-		const hasCursorSession = !isNewSession && Boolean(session.cursorSessionId);
-		const needsNewSession =
-			isNewSession ||
-			(!hasClaudeSession &&
-				!hasGeminiSession &&
-				!hasCodexSession &&
-				!hasCursorSession);
-
-		// Fetch system prompt based on labels
-
-		const systemPromptResult = await this.determineSystemPromptFromLabels(
-			labels,
-			repository,
-		);
-		const systemPrompt = systemPromptResult?.prompt;
-		const promptType = systemPromptResult?.type;
-
-		// Build allowed and disallowed tools lists
-		const allowedTools = this.buildAllowedTools(repository, promptType);
-		const disallowedTools = this.buildDisallowedTools(repository, promptType);
-
-		// Set up attachments directory
-		const workspaceFolderName = basename(session.workspace.path);
-		const attachmentsDir = join(
-			this.cyrusHome,
-			workspaceFolderName,
-			"attachments",
-		);
-		await mkdir(attachmentsDir, { recursive: true });
-
-		const allowedDirectories = [
-			...new Set([
-				attachmentsDir,
-				repository.repositoryPath,
-				...additionalAllowedDirectories,
-				...this.gitService.getGitMetadataDirectoriesForWorkspace(
-					session.workspace,
-				),
-			]),
-		];
-
-		const resumeSessionId = needsNewSession
-			? undefined
-			: session.claudeSessionId
-				? session.claudeSessionId
-				: session.geminiSessionId
-					? session.geminiSessionId
-					: session.codexSessionId
-						? session.codexSessionId
-						: session.cursorSessionId;
-
-		console.log(
-			`[resumeAgentSession] needsNewSession=${needsNewSession}, resumeSessionId=${resumeSessionId ?? "none"}`,
-		);
-
-		// Cold-resume summarize-and-restart: when a Claude resume's transcript has
-		// grown past the configured threshold, resuming it rewrites the entire
-		// transcript to the prompt cache. Instead, summarize it with a one-shot
-		// Haiku call and start a fresh session seeded with the summary. On any
-		// failure we fall through to a normal resume — this feature must never
-		// break a resume that would otherwise have succeeded.
-		let effectiveResumeSessionId = resumeSessionId;
-		let previousSessionSummary: string | undefined;
-		let buildAsNewSession = isNewSession;
-		if (resumeSessionId && resumeSessionId === session.claudeSessionId) {
-			const summary = await this.maybeSummarizeColdResume(
-				session,
-				sessionId,
-				resumeSessionId,
-				resolvedWorkspaceId,
-			);
-			if (summary) {
-				// Success: build as a fresh session seeded with the summary.
-				// Crucially, do NOT clear session.claudeSessionId — runner pinning
-				// (RunnerConfigBuilder) and the init-message rebind
-				// (AgentSessionManager) both depend on it; the rebind overwrites it
-				// with the new Claude session ID once the fresh session initializes.
-				effectiveResumeSessionId = undefined;
-				previousSessionSummary = summary;
-				buildAsNewSession = true;
-			}
-		}
-
-		// Create runner configuration
-		// buildAgentRunnerConfig determines runner type from labels for new sessions
-		// For existing sessions, we still need labels for model override but ignore runner type
-		const { config: runnerConfig, runnerType } =
-			await this.buildAgentRunnerConfig(
-				session,
-				repository,
-				sessionId,
-				systemPrompt,
-				allowedTools,
-				allowedDirectories,
-				disallowedTools,
-				effectiveResumeSessionId,
-				labels, // Always pass labels to preserve model override
-				fullIssue.description || undefined, // Description tags can override label selectors
-				maxTurns, // Pass maxTurns if specified
-				resolvedWorkspaceId,
-				this.buildSkillSessionContext(repository, fullIssue, session),
-			);
-
-		// Create the appropriate runner based on session state
-		const runner = this.createRunnerForType(runnerType, runnerConfig);
-
-		// Store runner
-		agentSessionManager.addAgentRunner(sessionId, runner);
-
-		// Save state
-		await this.savePersistedState();
-
-		// Prepare the full prompt
-		const fullPrompt = await this.buildSessionPrompt(
-			buildAsNewSession,
+		return this.sessionOrchestrator.resumeSession(
 			session,
-			fullIssue,
 			repository,
+			sessionId,
+			agentSessionManager,
 			promptBody,
 			attachmentManifest,
+			isNewSession,
+			additionalAllowedDirectories,
+			linearWorkspaceId,
+			maxTurns,
 			commentAuthor,
 			commentTimestamp,
-			previousSessionSummary,
 		);
-
-		// Start session - use streaming mode if supported for ability to add messages later
-		try {
-			if (runner.supportsStreamingInput && runner.startStreaming) {
-				await runner.startStreaming(fullPrompt);
-			} else {
-				await runner.start(fullPrompt);
-			}
-		} catch (error) {
-			log.error(`Failed to start streaming session for ${sessionId}:`, error);
-			throw error;
-		}
 	}
 
 	/**
@@ -7688,22 +5245,13 @@ ${input.userComment}
 		linearWorkspaceId: string,
 		isStreaming: boolean,
 	): Promise<void> {
-		return this.activityPoster.postInstantPromptedAcknowledgment(
+		await this.postThought(
 			sessionId,
 			linearWorkspaceId,
-			isStreaming,
+			isStreaming
+				? "I've queued up your message as guidance"
+				: "Getting started on that...",
 		);
-	}
-
-	/**
-	 * Get the platform type for a workspace's issue tracker.
-	 */
-	private getRepositoryPlatform(linearWorkspaceId: string): string | undefined {
-		try {
-			return this.issueTrackers.get(linearWorkspaceId)?.getPlatformType();
-		} catch {
-			return undefined;
-		}
 	}
 
 	/**
@@ -7861,4 +5409,24 @@ ${input.userComment}
 			this.logger.error("Failed to save OAuth tokens:", error);
 		}
 	}
+}
+
+/**
+ * Composition root for the edge worker.
+ *
+ * Constructs the `EdgeWorker` and wires its collaborator graph. This is the
+ * single blessed way to create a worker: the constructor sets only primitive
+ * state and does not `new` any collaborator (Frozen decision #6), so a worker
+ * produced by `new EdgeWorker(config)` alone is intentionally incomplete —
+ * always go through `composeEdgeWorker()`.
+ *
+ * Construction is two-phase because collaborators bind to the worker instance
+ * (their dependency closures read `this.<method>` / `this.<stateMap>` lazily):
+ * the instance is created first, then `buildCollaborators(config)` wires the
+ * graph against it.
+ */
+export function composeEdgeWorker(config: EdgeWorkerConfig): EdgeWorker {
+	const worker = new EdgeWorker(config);
+	worker.buildCollaborators(config);
+	return worker;
 }

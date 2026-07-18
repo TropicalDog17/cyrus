@@ -2,7 +2,7 @@ import { LinearClient } from "@linear/sdk";
 import { LinearEventTransport } from "cyrus-linear-event-transport";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
-import { EdgeWorker } from "../src/EdgeWorker.js";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker.js";
 import { SharedApplicationServer } from "../src/SharedApplicationServer.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
 import { TEST_CYRUS_HOME } from "./test-dirs.js";
@@ -10,7 +10,6 @@ import { TEST_CYRUS_HOME } from "./test-dirs.js";
 vi.mock("fs/promises");
 vi.mock("cyrus-claude-runner");
 vi.mock("cyrus-mcp-tools");
-vi.mock("cyrus-codex-runner");
 vi.mock("cyrus-linear-event-transport");
 vi.mock("@linear/sdk");
 vi.mock("../src/SharedApplicationServer.js");
@@ -89,7 +88,7 @@ describe("EdgeWorker - reconcileInterruptedSessions", () => {
 			linearWorkspaces: { "test-workspace": { linearToken: "test-token" } },
 		} as EdgeWorkerConfig;
 
-		edgeWorker = new EdgeWorker(mockConfig);
+		edgeWorker = composeEdgeWorker(mockConfig);
 		(edgeWorker as any).agentSessionManager = mockAgentSessionManager;
 	});
 

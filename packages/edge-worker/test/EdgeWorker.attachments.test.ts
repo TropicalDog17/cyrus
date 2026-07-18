@@ -4,7 +4,7 @@ import type {
 	LinearIssue,
 } from "@linear/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { EdgeWorker } from "../src/EdgeWorker";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker";
 import type { EdgeWorkerConfig } from "../src/types";
 import { TEST_CYRUS_HOME } from "./test-dirs.js";
 
@@ -49,7 +49,7 @@ describe("EdgeWorker - Native Attachments", () => {
 			},
 		};
 
-		edgeWorker = new EdgeWorker(mockConfig);
+		edgeWorker = composeEdgeWorker(mockConfig);
 		mockFetch.mockReset();
 	});
 
@@ -100,16 +100,11 @@ describe("EdgeWorker - Native Attachments", () => {
 			// Verify attachments were fetched
 			expect(mockIssue.attachments).toHaveBeenCalled();
 
-			// Verify manifest includes native attachments
-			expect(result.manifest).toContain("### Linear Issue Links");
-			expect(result.manifest).toContain(
-				"Error: Rendered more hooks than during the previous render.",
-			);
-			expect(result.manifest).toContain(
-				"https://sentry.io/organizations/ceedar/issues/6785301401/",
-			);
-			expect(result.manifest).toContain("Performance Report");
-			expect(result.manifest).toContain("https://datadog.com/reports/123");
+			expect(result.manifest).toBe(`<attachments>
+  <link url="https://sentry.io/organizations/ceedar/issues/6785301401/">Error: Rendered more hooks than during the previous render.</link>
+  <link url="https://datadog.com/reports/123">Performance Report</link>
+  <warning>1 attachment failed to download.</warning>
+</attachments>`);
 		});
 
 		it("should handle when no native attachments are present", async () => {
@@ -135,10 +130,7 @@ describe("EdgeWorker - Native Attachments", () => {
 			);
 
 			expect(mockIssue.attachments).toHaveBeenCalled();
-			expect(result.manifest).not.toContain("### Linear Issue Links");
-			expect(result.manifest).toContain(
-				"No attachments were found in this issue.",
-			);
+			expect(result.manifest).toBe("");
 		});
 
 		it("should handle errors when fetching native attachments", async () => {
@@ -163,9 +155,7 @@ describe("EdgeWorker - Native Attachments", () => {
 			);
 
 			expect(mockIssue.attachments).toHaveBeenCalled();
-			expect(result.manifest).toContain(
-				"No attachments were found in this issue.",
-			);
+			expect(result.manifest).toBe("");
 		});
 	});
 
@@ -327,12 +317,10 @@ describe("EdgeWorker - Native Attachments", () => {
 				result,
 			);
 
-			expect(manifest).toContain("## New Attachments from Comment");
-			expect(manifest).toContain("Downloaded 2 new attachments");
-			expect(manifest).toContain("### New Images");
-			expect(manifest).toContain("image_1.png");
-			expect(manifest).toContain("### New Attachments");
-			expect(manifest).toContain("attachment_1.pdf");
+			expect(manifest).toBe(`<attachments>
+  <image>/tmp/attachments/image_1.png</image>
+  <file>/tmp/attachments/attachment_1.pdf</file>
+</attachments>`);
 		});
 
 		it("should return empty string when no new attachments", () => {
@@ -363,7 +351,26 @@ describe("EdgeWorker - Native Attachments", () => {
 			const manifest = (edgeWorker as any).generateNewAttachmentManifest(
 				result,
 			);
-			expect(manifest).toContain("Downloaded 1 new attachment (2 failed)");
+			expect(manifest).toBe(`<attachments>
+  <image>/tmp/attachments/image_1.png</image>
+  <warning>2 attachments failed to download.</warning>
+</attachments>`);
+		});
+
+		it("should retain a warning when every new attachment fails", () => {
+			const result = {
+				newAttachmentMap: {},
+				newImageMap: {},
+				totalNewAttachments: 0,
+				failedCount: 1,
+			};
+
+			const manifest = (edgeWorker as any).generateNewAttachmentManifest(
+				result,
+			);
+			expect(manifest).toBe(`<attachments>
+  <warning>1 attachment failed to download.</warning>
+</attachments>`);
 		});
 	});
 
@@ -390,13 +397,10 @@ describe("EdgeWorker - Native Attachments", () => {
 				edgeWorker as any
 			).attachmentService.generateAttachmentManifest(downloadResult);
 
-			expect(manifest).toContain("### Linear Issue Links");
-			expect(manifest).toContain("1. Sentry Error");
-			expect(manifest).toContain("   URL: https://sentry.io/error/123");
-			expect(manifest).toContain("2. GitHub Issue");
-			expect(manifest).toContain(
-				"   URL: https://github.com/org/repo/issues/456",
-			);
+			expect(manifest).toBe(`<attachments>
+  <link url="https://sentry.io/error/123">Sentry Error</link>
+  <link url="https://github.com/org/repo/issues/456">GitHub Issue</link>
+</attachments>`);
 		});
 
 		it("should handle mixed native and downloaded attachments", () => {
@@ -423,13 +427,57 @@ describe("EdgeWorker - Native Attachments", () => {
 				edgeWorker as any
 			).attachmentService.generateAttachmentManifest(downloadResult);
 
-			// Should include all sections
-			expect(manifest).toContain("### Linear Issue Links");
-			expect(manifest).toContain("Related Sentry Issue");
-			expect(manifest).toContain("### Images");
-			expect(manifest).toContain("image_1.png");
-			expect(manifest).toContain("### Other Attachments");
-			expect(manifest).toContain("attachment_1.pdf");
+			expect(manifest).toBe(`<attachments>
+  <image>/tmp/attachments/image_1.png</image>
+  <file>/tmp/attachments/attachment_1.pdf</file>
+  <link url="https://sentry.io/issue/789">Related Sentry Issue</link>
+</attachments>`);
+		});
+
+		it("should keep download-limit and failure warnings without summary prose", () => {
+			const manifest = (
+				edgeWorker as any
+			).attachmentService.generateAttachmentManifest({
+				attachmentMap: {},
+				imageMap: {},
+				totalFound: 3,
+				downloaded: 0,
+				imagesDownloaded: 0,
+				skipped: 2,
+				failed: 1,
+			});
+
+			expect(manifest).toBe(`<attachments>
+  <warning>2 attachments were skipped because the download limit was reached.</warning>
+  <warning>1 attachment failed to download.</warning>
+</attachments>`);
+		});
+
+		it("should escape paths and native links for XML prompt context", () => {
+			const manifest = (
+				edgeWorker as any
+			).attachmentService.generateAttachmentManifest({
+				attachmentMap: {},
+				imageMap: {
+					"source-url": "/tmp/attachments/image_<1>&.png",
+				},
+				totalFound: 1,
+				downloaded: 1,
+				imagesDownloaded: 1,
+				skipped: 0,
+				failed: 0,
+				nativeAttachments: [
+					{
+						title: "Logs <production>",
+						url: `https://example.com/?filter="failed"&owner='ops'`,
+					},
+				],
+			});
+
+			expect(manifest).toBe(`<attachments>
+  <image>/tmp/attachments/image_&lt;1&gt;&amp;.png</image>
+  <link url="https://example.com/?filter=&quot;failed&quot;&amp;owner=&apos;ops&apos;">Logs &lt;production&gt;</link>
+</attachments>`);
 		});
 	});
 });

@@ -23,9 +23,6 @@
 					"githubUrl": {
 						"type": "string"
 					},
-					"gitlabUrl": {
-						"type": "string"
-					},
 					"linearWorkspaceId": {
 						"type": "string"
 					},
@@ -77,6 +74,9 @@
 							"type": "string"
 						}
 					},
+					"readParentDirectory": {
+						"type": "boolean"
+					},
 					"mcpConfigPath": {
 						"anyOf": [
 							{
@@ -98,6 +98,10 @@
 					},
 					"fallbackModel": {
 						"type": "string"
+					},
+					"effort": {
+						"type": "string",
+						"enum": ["low", "medium", "high", "xhigh", "max"]
 					},
 					"labelPrompts": {
 						"type": "object",
@@ -150,6 +154,13 @@
 												"items": {
 													"type": "string"
 												}
+											},
+											"model": {
+												"type": "string"
+											},
+											"effort": {
+												"type": "string",
+												"enum": ["low", "medium", "high", "xhigh", "max"]
 											}
 										},
 										"required": ["labels"],
@@ -205,6 +216,13 @@
 												"items": {
 													"type": "string"
 												}
+											},
+											"model": {
+												"type": "string"
+											},
+											"effort": {
+												"type": "string",
+												"enum": ["low", "medium", "high", "xhigh", "max"]
 											}
 										},
 										"required": ["labels"],
@@ -260,6 +278,13 @@
 												"items": {
 													"type": "string"
 												}
+											},
+											"model": {
+												"type": "string"
+											},
+											"effort": {
+												"type": "string",
+												"enum": ["low", "medium", "high", "xhigh", "max"]
 											}
 										},
 										"required": ["labels"],
@@ -315,6 +340,13 @@
 												"items": {
 													"type": "string"
 												}
+											},
+											"model": {
+												"type": "string"
+											},
+											"effort": {
+												"type": "string",
+												"enum": ["low", "medium", "high", "xhigh", "max"]
 											}
 										},
 										"required": ["labels"],
@@ -370,6 +402,13 @@
 												"items": {
 													"type": "string"
 												}
+											},
+											"model": {
+												"type": "string"
+											},
+											"effort": {
+												"type": "string",
+												"enum": ["low", "medium", "high", "xhigh", "max"]
 											}
 										},
 										"required": ["labels"],
@@ -532,11 +571,42 @@
 			"exclusiveMinimum": 0,
 			"maximum": 9007199254740991
 		},
-		"geminiDefaultModel": {
+		"claudeAutoCompactWindow": {
+			"type": "integer",
+			"exclusiveMinimum": 0,
+			"maximum": 9007199254740991
+		},
+		"claudeDefaultEffort": {
+			"type": "string",
+			"enum": ["low", "medium", "high", "xhigh", "max"]
+		},
+		"claudeBashMaxOutputLength": {
+			"type": "integer",
+			"exclusiveMinimum": 0,
+			"maximum": 9007199254740991
+		},
+		"claudeMcpMaxOutputTokens": {
+			"type": "integer",
+			"exclusiveMinimum": 0,
+			"maximum": 9007199254740991
+		},
+		"claudeSubagentModel": {
 			"type": "string"
 		},
-		"codexDefaultModel": {
-			"type": "string"
+		"claudeSessionKeepAliveMinutes": {
+			"type": "integer",
+			"minimum": 0,
+			"maximum": 55
+		},
+		"claudeMaxWarmIdleSessions": {
+			"type": "integer",
+			"minimum": 0,
+			"maximum": 9007199254740991
+		},
+		"askUserQuestionTimeoutMinutes": {
+			"type": "integer",
+			"minimum": 0,
+			"maximum": 9007199254740991
 		},
 		"cursorDefaultModel": {
 			"type": "string"
@@ -544,9 +614,15 @@
 		"cursorDefaultFallbackModel": {
 			"type": "string"
 		},
+		"codexDefaultModel": {
+			"type": "string"
+		},
+		"codexDefaultFallbackModel": {
+			"type": "string"
+		},
 		"defaultRunner": {
 			"type": "string",
-			"enum": ["claude", "gemini", "codex", "cursor"]
+			"enum": ["claude", "cursor", "codex"]
 		},
 		"defaultModel": {
 			"type": "string"
@@ -575,19 +651,7 @@
 				"type": "string"
 			}
 		},
-		"slackAllowedTools": {
-			"type": "array",
-			"items": {
-				"type": "string"
-			}
-		},
 		"githubAllowedTools": {
-			"type": "array",
-			"items": {
-				"type": "string"
-			}
-		},
-		"slackMcpConfigs": {
 			"type": "array",
 			"items": {
 				"type": "string"
@@ -608,10 +672,10 @@
 		"issueUpdateTrigger": {
 			"type": "boolean"
 		},
-		"slackThreadFollowing": {
+		"prReviewTrigger": {
 			"type": "boolean"
 		},
-		"prReviewTrigger": {
+		"showUsageFooter": {
 			"type": "boolean"
 		},
 		"userAccessControl": {

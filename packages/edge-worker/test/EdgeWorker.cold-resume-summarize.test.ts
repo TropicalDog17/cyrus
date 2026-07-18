@@ -22,13 +22,36 @@ vi.mock("cyrus-claude-runner", async (importOriginal) => {
 });
 
 import { findTranscriptPath, summarizeTranscript } from "cyrus-claude-runner";
-import { createTestWorker } from "./prompt-assembly-utils.js";
+import { createLogger, LogLevel } from "cyrus-core";
+import { EdgeWorker } from "../src/EdgeWorker.js";
 
 const mockFindTranscriptPath = vi.mocked(findTranscriptPath);
 const mockSummarizeTranscript = vi.mocked(summarizeTranscript);
 
 const CLAUDE_SESSION_ID = "claude-session-123";
 const WORKSPACE_ID = "workspace-1";
+
+// The cold-resume helpers are private methods that only touch `this.config`,
+// `this.logger`, `this.postThought`, and each other — never the full
+// collaborator graph. So rather than stand up a real EdgeWorker (which needs
+// heavy FS/collaborator mocking that would clobber the `stat`-based estimate
+// test), we invoke the prototype methods against a minimal hand-built `this`.
+const proto = EdgeWorker.prototype as any;
+
+function createTestWorker() {
+	const logger = createLogger({
+		component: "cold-resume-test",
+		level: LogLevel.SILENT,
+	});
+	return {
+		config: {} as Record<string, unknown>,
+		logger,
+		postThought: vi.fn().mockResolvedValue(undefined),
+		resolveColdResumeThreshold: proto.resolveColdResumeThreshold,
+		estimateResumeContextTokens: proto.estimateResumeContextTokens,
+		maybeSummarizeColdResume: proto.maybeSummarizeColdResume,
+	};
+}
 
 function makeSession(usage?: Record<string, number>) {
 	return {
@@ -77,7 +100,7 @@ describe("EdgeWorker cold-resume summarize", () => {
 			mockFindTranscriptPath.mockResolvedValue("/tmp/transcript.jsonl");
 			mockSummarizeTranscript.mockResolvedValue("A summary");
 			const postThought = vi
-				.spyOn(worker.activityPoster, "postThoughtActivity")
+				.spyOn(worker, "postThought")
 				.mockResolvedValue(undefined);
 
 			const session = makeSession({
@@ -152,9 +175,7 @@ describe("EdgeWorker cold-resume summarize", () => {
 			setThreshold(worker, 60000);
 			mockFindTranscriptPath.mockResolvedValue("/tmp/transcript.jsonl");
 			mockSummarizeTranscript.mockRejectedValue(new Error("haiku boom"));
-			vi.spyOn(worker.activityPoster, "postThoughtActivity").mockResolvedValue(
-				undefined,
-			);
+			vi.spyOn(worker, "postThought").mockResolvedValue(undefined);
 			const session = makeSession({ input_tokens: 1_000_000 });
 
 			const summary = await worker.maybeSummarizeColdResume(

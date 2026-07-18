@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { EdgeWorker } from "../src/EdgeWorker.js";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker.js";
 import type { EdgeWorkerConfig } from "../src/types.js";
 import { TEST_CYRUS_HOME } from "./test-dirs.js";
 
@@ -14,7 +14,6 @@ vi.mock("fs/promises", () => ({
 
 // Mock other dependencies
 vi.mock("cyrus-claude-runner");
-vi.mock("cyrus-codex-runner");
 vi.mock("@linear/sdk", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@linear/sdk")>();
 	return {
@@ -84,7 +83,7 @@ describe("EdgeWorker - Version Tag Extraction", () => {
 			},
 		};
 
-		edgeWorker = new EdgeWorker(mockConfig);
+		edgeWorker = composeEdgeWorker(mockConfig);
 	});
 
 	afterEach(() => {
@@ -147,7 +146,7 @@ Repository: {{repository_name}}`;
 		const originalLogLevel = process.env.CYRUS_LOG_LEVEL;
 		process.env.CYRUS_LOG_LEVEL = "DEBUG";
 		// Recreate EdgeWorker with DEBUG log level
-		edgeWorker = new EdgeWorker(mockConfig);
+		edgeWorker = composeEdgeWorker(mockConfig);
 		process.env.CYRUS_LOG_LEVEL = originalLogLevel;
 
 		// Spy on console.log to check for version logging

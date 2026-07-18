@@ -194,7 +194,6 @@ For reliable cross-repository routing, prefer Description Tags as they are expli
 <available_repositories>
   <repository name="Frontend App" (current)>
     <github_url>https://github.com/myorg/frontend-app</github_url>
-    <gitlab_url>N/A</gitlab_url>
     <routing_methods>
     - Description tag: \`[repo=myorg/frontend-app]\` or \`[repo=myorg/frontend-app#branch]\` for base branch override
     - Routing labels: "frontend", "ui"
@@ -203,7 +202,6 @@ For reliable cross-repository routing, prefer Description Tags as they are expli
   </repository>
   <repository name="Backend API">
     <github_url>https://github.com/myorg/backend-api</github_url>
-    <gitlab_url>N/A</gitlab_url>
     <routing_methods>
     - Description tag: \`[repo=myorg/backend-api]\` or \`[repo=myorg/backend-api#branch]\` for base branch override
     - Routing labels: "backend", "api"
@@ -464,9 +462,7 @@ Check workspace isolation
 			workspace2RepoB,
 		]);
 
-		const promptBuilder = (worker as any).promptBuilder as {
-			generateRoutingContextForAllWorkspaces: () => string;
-		};
+		const promptBuilder = worker.promptBuilder;
 		const context = promptBuilder.generateRoutingContextForAllWorkspaces();
 
 		expect(context.match(/<repository_routing_context>/g)?.length || 0).toBe(2);

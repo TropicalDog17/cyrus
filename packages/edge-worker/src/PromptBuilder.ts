@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import {
 	type BaseBranchResolution,
 	type Comment,
+	type EffortLevel,
 	type GuidanceRule,
 	type IIssueTrackerService,
 	type ILogger,
@@ -14,6 +15,7 @@ import {
 	type WebhookAgentSession,
 	type WebhookComment,
 } from "cyrus-core";
+import type { GitHubUsernameResolver } from "./GitHubUsernameResolver.js";
 import type { GitService } from "./GitService.js";
 
 /**
@@ -24,6 +26,7 @@ export interface PromptBuilderDeps {
 	repositories: Map<string, RepositoryConfig>;
 	issueTrackers: Map<string, IIssueTrackerService>;
 	gitService: GitService;
+	gitHubUsernameResolver: GitHubUsernameResolver;
 }
 
 /**
@@ -38,6 +41,17 @@ export interface SystemPromptResult {
 		| "scoper"
 		| "orchestrator"
 		| "graphite-orchestrator";
+	/**
+	 * Model requested by the matched label-prompt config (complex form's
+	 * `model`). Only the runner-selection service resolves the final model; this
+	 * is just one precedence input it forwards.
+	 */
+	model?: string;
+	/**
+	 * Reasoning effort requested by the matched label-prompt config (complex
+	 * form's `effort`). Claude-only; highest-precedence effort source.
+	 */
+	effort?: EffortLevel;
 }
 
 /**
@@ -60,12 +74,14 @@ export class PromptBuilder {
 	private readonly repositories: Map<string, RepositoryConfig>;
 	private readonly issueTrackers: Map<string, IIssueTrackerService>;
 	private readonly gitService: GitService;
+	private readonly gitHubUsernameResolver: GitHubUsernameResolver;
 
 	constructor(deps: PromptBuilderDeps) {
 		this.logger = deps.logger;
 		this.repositories = deps.repositories;
 		this.issueTrackers = deps.issueTrackers;
 		this.gitService = deps.gitService;
+		this.gitHubUsernameResolver = deps.gitHubUsernameResolver;
 	}
 
 	// ========================================================================
@@ -252,6 +268,14 @@ export class PromptBuilder {
 			const configuredLabels = Array.isArray(promptConfig)
 				? promptConfig
 				: promptConfig?.labels;
+			// model/effort live only on the complex (object) form; the simple
+			// string[] form carries labels alone.
+			const promptModel = Array.isArray(promptConfig)
+				? undefined
+				: promptConfig?.model;
+			const promptEffort = Array.isArray(promptConfig)
+				? undefined
+				: promptConfig?.effort;
 
 			const matchesLabel =
 				promptType === "orchestrator"
@@ -289,6 +313,8 @@ export class PromptBuilder {
 						prompt: promptContent,
 						version: promptVersion,
 						type: promptType,
+						...(promptModel !== undefined && { model: promptModel }),
+						...(promptEffort !== undefined && { effort: promptEffort }),
 					};
 				} catch (error) {
 					this.logger.error(
@@ -372,7 +398,7 @@ export class PromptBuilder {
 						// Resolve GitHub username from gitHubUserId
 						if (assignee.gitHubUserId) {
 							assigneeGitHubUserId = assignee.gitHubUserId;
-							const ghUsername = await this.resolveGitHubUsername(
+							const ghUsername = await this.gitHubUsernameResolver.resolve(
 								assignee.gitHubUserId,
 							);
 							if (ghUsername) {
@@ -610,9 +636,7 @@ export class PromptBuilder {
 			// Description tag routing (always available)
 			const repoIdentifier = repo.githubUrl
 				? repo.githubUrl.replace("https://github.com/", "")
-				: repo.gitlabUrl
-					? repo.gitlabUrl.replace(/https?:\/\/[^/]+\//, "")
-					: repo.name;
+				: repo.name;
 			routingMethods.push(
 				`    - Description tag: \`[repo=${repoIdentifier}]\` or \`[repo=${repoIdentifier}#branch]\` for base branch override`,
 			);
@@ -643,7 +667,6 @@ export class PromptBuilder {
 
 			return `  <repository name="${repo.name}"${currentMarker}>
     <github_url>${repo.githubUrl || "N/A"}</github_url>
-    <gitlab_url>${repo.gitlabUrl || "N/A"}</gitlab_url>
     <routing_methods>
 ${routingMethods.join("\n")}
     </routing_methods>
@@ -697,7 +720,11 @@ ${repoDescriptions.join("\n")}
 			const mentionContent = agentSession.comment?.body || "";
 			const authorName =
 				agentSession.creator?.name || agentSession.creator?.id || "Unknown";
-			const timestamp = agentSession.createdAt || new Date().toISOString();
+			// Use the agent session's own creation timestamp; omit the line when
+			// no source timestamp exists so the prompt stays reproducible.
+			const timestampLine = agentSession.createdAt
+				? `\n  <timestamp>${agentSession.createdAt}</timestamp>`
+				: "";
 
 			// Build a focused prompt with comment metadata
 			let prompt = `You were mentioned in a Linear comment on this issue:
@@ -710,8 +737,7 @@ ${repoDescriptions.join("\n")}
 </linear_issue>
 
 <mention_comment>
-  <author>${authorName}</author>
-  <timestamp>${timestamp}</timestamp>
+  <author>${authorName}</author>${timestampLine}
   <content>
 ${mentionContent}
   </content>
@@ -755,6 +781,7 @@ Focus on addressing the specific request in the mention. You can use the Linear 
 		guidance?: GuidanceRule[],
 		resolvedBaseBranches?: Record<string, BaseBranchResolution>,
 		workspaceRepoPaths?: Record<string, string>,
+		excludedCommentThreadId?: string,
 	): Promise<PromptResult> {
 		const repository = repositories[0]!;
 		this.logger.debug(
@@ -814,7 +841,10 @@ Focus on addressing the specific request in the mention. You can use the Linear 
 
 					const commentNodes = comments.nodes;
 					if (commentNodes.length > 0) {
-						commentThreads = await this.formatCommentThreads(commentNodes);
+						commentThreads = await this.formatCommentThreads(
+							commentNodes,
+							excludedCommentThreadId,
+						);
 						this.logger.debug(
 							`Formatted ${commentNodes.length} comments into threads`,
 						);
@@ -838,7 +868,7 @@ Focus on addressing the specific request in the mention. You can use the Linear 
 						assigneeLinearProfileUrl = assignee.url || "";
 						if (assignee.gitHubUserId) {
 							assigneeGitHubUserId = assignee.gitHubUserId;
-							const ghUsername = await this.resolveGitHubUsername(
+							const ghUsername = await this.gitHubUsernameResolver.resolve(
 								assignee.gitHubUserId,
 							);
 							if (ghUsername) {
@@ -920,14 +950,20 @@ IMPORTANT: Focus specifically on addressing the new comment above. This is a new
 				);
 
 				// Now replace the new comment variables
-				// We'll need to fetch the comment author
+				// We'll need to fetch the comment author and its creation time.
+				// Use the comment's own createdAt (deterministic) rather than a
+				// wall-clock / locale-dependent value so the prompt is reproducible.
 				let authorName = "Unknown";
+				let commentTimestamp = newComment.createdAt ?? "";
 				if (issueTracker) {
 					try {
 						const fullComment = await issueTracker.fetchComment(newComment.id);
 						const user = await fullComment.user;
 						authorName =
 							user?.displayName || user?.name || user?.email || "Unknown";
+						if (fullComment.createdAt) {
+							commentTimestamp = new Date(fullComment.createdAt).toISOString();
+						}
 					} catch (error) {
 						this.logger.error("Failed to fetch comment author:", error);
 					}
@@ -935,7 +971,7 @@ IMPORTANT: Focus specifically on addressing the new comment above. This is a new
 
 				prompt = prompt
 					.replace(/{{new_comment_author}}/g, authorName)
-					.replace(/{{new_comment_timestamp}}/g, new Date().toLocaleString())
+					.replace(/{{new_comment_timestamp}}/g, commentTimestamp)
 					.replace(/{{new_comment_content}}/g, newComment.body || "");
 			} else {
 				// Remove the new comment section entirely (including preceding newlines)
@@ -1021,13 +1057,17 @@ ${newComment ? `New comment to address:\n${newComment.body}\n\n` : ""}Please ana
 			description?: string;
 			attachments?: unknown;
 		},
+		timestamp?: string,
 	): string {
-		const timestamp = new Date().toISOString();
 		const parts: string[] = [];
 
 		parts.push(`<issue_update>`);
 		parts.push(`  <identifier>${issueIdentifier}</identifier>`);
-		parts.push(`  <timestamp>${timestamp}</timestamp>`);
+		// Use the webhook's own update timestamp; omit the line when no source
+		// timestamp exists so the prompt stays reproducible.
+		if (timestamp) {
+			parts.push(`  <timestamp>${timestamp}</timestamp>`);
+		}
 
 		// Add title change if title was updated
 		if ("title" in updatedFrom) {
@@ -1098,8 +1138,31 @@ ${newComment ? `New comment to address:\n${newComment.body}\n\n` : ""}Please ana
 	 * @param comments Array of Linear comments
 	 * @returns Formatted string showing comment threads
 	 */
-	async formatCommentThreads(comments: Comment[]): Promise<string> {
+	async formatCommentThreads(
+		comments: Comment[],
+		excludedThreadId?: string,
+	): Promise<string> {
 		if (comments.length === 0) {
+			return "No comments yet.";
+		}
+
+		const commentsWithParents = await Promise.all(
+			[...comments]
+				.sort(
+					(a, b) =>
+						new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+				)
+				.map(async (comment) => ({
+					comment,
+					parent: await comment.parent,
+				})),
+		);
+		const visibleComments = commentsWithParents.filter(
+			({ comment, parent }) =>
+				comment.id !== excludedThreadId && parent?.id !== excludedThreadId,
+		);
+
+		if (visibleComments.length === 0) {
 			return "No comments yet.";
 		}
 
@@ -1108,8 +1171,7 @@ ${newComment ? `New comment to address:\n${newComment.body}\n\n` : ""}Please ana
 		const rootComments: Comment[] = [];
 
 		// First pass: identify root comments and create thread structure
-		for (const comment of comments) {
-			const parent = await comment.parent;
+		for (const { comment, parent } of visibleComments) {
 			if (!parent) {
 				// This is a root comment
 				rootComments.push(comment);
@@ -1118,8 +1180,7 @@ ${newComment ? `New comment to address:\n${newComment.body}\n\n` : ""}Please ana
 		}
 
 		// Second pass: assign replies to their threads
-		for (const comment of comments) {
-			const parent = await comment.parent;
+		for (const { comment, parent } of visibleComments) {
 			if (parent?.id) {
 				const thread = threads.get(parent.id);
 				if (thread) {
@@ -1139,7 +1200,7 @@ ${newComment ? `New comment to address:\n${newComment.body}\n\n` : ""}Please ana
 			const rootUser = await rootComment.user;
 			const rootAuthor =
 				rootUser?.displayName || rootUser?.name || rootUser?.email || "Unknown";
-			const rootTime = new Date(rootComment.createdAt).toLocaleString();
+			const rootTime = new Date(rootComment.createdAt).toISOString();
 
 			let threadText = `<comment_thread>
 	<root_comment>
@@ -1160,7 +1221,7 @@ ${rootComment.body}
 						replyUser?.name ||
 						replyUser?.email ||
 						"Unknown";
-					const replyTime = new Date(reply.createdAt).toLocaleString();
+					const replyTime = new Date(reply.createdAt).toISOString();
 
 					threadText += `
 		<reply>
@@ -1223,51 +1284,6 @@ ${reply.body}
 		const version = versionTagMatch ? versionTagMatch[1] : undefined;
 		// Return undefined for empty strings
 		return version?.trim() ? version : undefined;
-	}
-
-	/**
-	 * Resolve a GitHub user ID (numeric string from Linear) to a GitHub username.
-	 * Uses the public GitHub REST API: GET https://api.github.com/user/{id}
-	 * @param gitHubUserId The numeric GitHub user ID from Linear's gitHubUserId field
-	 * @returns The GitHub username (login), or undefined if resolution fails
-	 */
-	async resolveGitHubUsername(
-		gitHubUserId: string,
-	): Promise<string | undefined> {
-		try {
-			const response = await fetch(
-				`https://api.github.com/user/${gitHubUserId}`,
-				{
-					headers: {
-						Accept: "application/vnd.github.v3+json",
-						"User-Agent": "Cyrus-Agent",
-					},
-				},
-			);
-
-			if (!response.ok) {
-				this.logger.warn(
-					`GitHub API returned ${response.status} for user ID ${gitHubUserId}`,
-				);
-				return undefined;
-			}
-
-			const data = (await response.json()) as { login?: string };
-			if (data.login) {
-				this.logger.debug(
-					`Resolved GitHub user ID ${gitHubUserId} to username: ${data.login}`,
-				);
-				return data.login;
-			}
-
-			return undefined;
-		} catch (error) {
-			this.logger.warn(
-				`Failed to resolve GitHub username for user ID ${gitHubUserId}:`,
-				error,
-			);
-			return undefined;
-		}
 	}
 
 	// ========================================================================
@@ -1335,194 +1351,18 @@ ${reply.body}
 			return result;
 		}
 
-		// Pre-compute shared issue-level data once (Graphite check, parent, blocking issues)
-		const isGraphiteIssue = await this.hasGraphiteLabel(issue, repositories);
-
-		let blockingIssues: Issue[] | undefined;
-		if (isGraphiteIssue) {
-			blockingIssues = await this.fetchBlockingIssues(issue);
-		}
-
-		let parent: Issue | undefined;
-		try {
-			parent = (await issue.parent) ?? undefined;
-		} catch {
-			// Parent field might not exist or couldn't be fetched
-		}
-
+		// No pre-resolved values: delegate per-repo resolution to the canonical
+		// GitService.determineBaseBranch (which owns graphite/parent/default
+		// fallback). Preserves the per-repo Map shape these prompt builders depend on.
 		for (const repository of repositories) {
-			const baseBranch = await this.determineBaseBranchForRepo(
+			const resolution = await this.gitService.determineBaseBranch(
 				issue,
 				repository,
-				isGraphiteIssue,
-				blockingIssues,
-				parent,
 			);
-			result.set(repository.id, baseBranch);
+			result.set(repository.id, resolution.branch);
 		}
 
 		return result;
-	}
-
-	/**
-	 * Determine the base branch for a single repository.
-	 * Internal helper used by determineBaseBranch.
-	 */
-	private async determineBaseBranchForRepo(
-		issue: Issue,
-		repository: RepositoryConfig,
-		isGraphiteIssue: boolean,
-		blockingIssues?: Issue[],
-		parent?: Issue,
-	): Promise<string> {
-		let baseBranch = repository.baseBranch;
-
-		if (isGraphiteIssue && blockingIssues && blockingIssues.length > 0) {
-			const blockingIssue = blockingIssues[0]!;
-			this.logger.debug(
-				`Issue ${issue.identifier} has graphite label and is blocked by ${blockingIssue.identifier}`,
-			);
-
-			const blockingRawBranchName =
-				blockingIssue.branchName ||
-				`${blockingIssue.identifier}-${(blockingIssue.title ?? "")
-					.toLowerCase()
-					.replace(/\s+/g, "-")
-					.substring(0, 30)}`;
-			const blockingBranchName = this.gitService.sanitizeBranchName(
-				blockingRawBranchName,
-			);
-
-			const blockingBranchExists = await this.gitService.branchExists(
-				blockingBranchName,
-				repository.repositoryPath,
-			);
-
-			if (blockingBranchExists) {
-				this.logger.debug(
-					`Using blocking issue branch '${blockingBranchName}' as base for Graphite-stacked issue ${issue.identifier} in repo ${repository.name}`,
-				);
-				return blockingBranchName;
-			}
-			this.logger.debug(
-				`Blocking issue branch '${blockingBranchName}' not found in repo ${repository.name}, falling back to parent/default`,
-			);
-		}
-
-		if (parent) {
-			this.logger.debug(
-				`Issue ${issue.identifier} has parent: ${parent.identifier}`,
-			);
-
-			const parentRawBranchName =
-				parent.branchName ||
-				`${parent.identifier}-${parent.title
-					?.toLowerCase()
-					.replace(/\s+/g, "-")
-					.substring(0, 30)}`;
-			const parentBranchName =
-				this.gitService.sanitizeBranchName(parentRawBranchName);
-
-			const parentBranchExists = await this.gitService.branchExists(
-				parentBranchName,
-				repository.repositoryPath,
-			);
-
-			if (parentBranchExists) {
-				baseBranch = parentBranchName;
-				this.logger.debug(
-					`Using parent issue branch '${parentBranchName}' as base for sub-issue ${issue.identifier} in repo ${repository.name}`,
-				);
-			} else {
-				this.logger.debug(
-					`Parent branch '${parentBranchName}' not found in repo ${repository.name}, using default base branch '${repository.baseBranch}'`,
-				);
-			}
-		} else {
-			this.logger.debug(
-				`No parent issue found for ${issue.identifier}, using default base branch '${repository.baseBranch}' for repo ${repository.name}`,
-			);
-		}
-
-		return baseBranch;
-	}
-
-	/**
-	 * Check if an issue has the graphite label defined in any repository's labelPrompts.graphite config
-	 *
-	 * @param issue The issue to check
-	 * @param repositories The repository configurations to check
-	 * @returns True if the issue has the graphite label in any repo
-	 */
-	async hasGraphiteLabel(
-		issue: Issue,
-		repositories: RepositoryConfig[],
-	): Promise<boolean> {
-		const issueLabels = await this.fetchIssueLabels(issue);
-
-		for (const repository of repositories) {
-			const graphiteConfig = repository.labelPrompts?.graphite;
-			const graphiteLabels = Array.isArray(graphiteConfig)
-				? graphiteConfig
-				: (graphiteConfig?.labels ?? ["graphite"]);
-
-			if (graphiteLabels.some((label: string) => issueLabels.includes(label))) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	/**
-	 * Fetch issues that block this issue (i.e., issues this one is "blocked by")
-	 * Uses the inverseRelations field with type "blocks"
-	 *
-	 * Linear relations work like this:
-	 * - When Issue A "blocks" Issue B, a relation is created with:
-	 *   - issue = A (the blocker)
-	 *   - relatedIssue = B (the blocked one)
-	 *   - type = "blocks"
-	 *
-	 * So to find "who blocks Issue B", we need inverseRelations (where B is the relatedIssue)
-	 * and look for type === "blocks", then get the `issue` field (the blocker).
-	 *
-	 * @param issue The issue to fetch blocking issues for
-	 * @returns Array of issues that block this one, or empty array if none
-	 */
-	async fetchBlockingIssues(issue: Issue): Promise<Issue[]> {
-		try {
-			// inverseRelations contains relations where THIS issue is the relatedIssue
-			// When type is "blocks", it means the `issue` field blocks THIS issue
-			const inverseRelations = await issue.inverseRelations();
-			if (!inverseRelations?.nodes) {
-				return [];
-			}
-
-			const blockingIssues: Issue[] = [];
-
-			for (const relation of inverseRelations.nodes) {
-				// "blocks" type in inverseRelations means the `issue` blocks this one
-				if (relation.type === "blocks") {
-					// The `issue` field is the one that blocks THIS issue
-					const blockingIssue = await relation.issue;
-					if (blockingIssue) {
-						blockingIssues.push(blockingIssue);
-					}
-				}
-			}
-
-			this.logger.debug(
-				`Issue ${issue.identifier} is blocked by ${blockingIssues.length} issue(s): ${blockingIssues.map((i) => i.identifier).join(", ") || "none"}`,
-			);
-
-			return blockingIssues;
-		} catch (error) {
-			this.logger.error(
-				`Failed to fetch blocking issues for ${issue.identifier}:`,
-				error,
-			);
-			return [];
-		}
 	}
 
 	/**
@@ -1536,18 +1376,5 @@ ${reply.body}
 			description: issue.description || undefined,
 			branchName: issue.branchName, // Use the real branchName property!
 		};
-	}
-
-	/**
-	 * Fetch issue labels for a given issue
-	 */
-	async fetchIssueLabels(issue: Issue): Promise<string[]> {
-		try {
-			const labels = await issue.labels();
-			return labels.nodes.map((label) => label.name);
-		} catch (error) {
-			this.logger.error(`Failed to fetch labels for issue ${issue.id}:`, error);
-			return [];
-		}
 	}
 }

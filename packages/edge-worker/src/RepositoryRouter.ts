@@ -1,5 +1,4 @@
 import {
-	AgentActivitySignal,
 	type AgentSessionCreatedWebhook,
 	type AgentSessionPromptedWebhook,
 	createLogger,
@@ -8,6 +7,7 @@ import {
 	type RepositoryConfig,
 	type Webhook,
 } from "cyrus-core";
+import { LinearActivitySink } from "./sinks/LinearActivitySink.js";
 
 /**
  * Repository routing result types
@@ -412,13 +412,11 @@ export class RepositoryRouter {
 
 					let isMatch = false;
 
-					// Match by GitHub/GitLab URL path segment (e.g., "org/repo-name" or "repo-name")
+					// Match by GitHub URL path segment (e.g., "org/repo-name" or "repo-name")
 					// Use endsWith to avoid substring false positives (e.g., "cyrus" matching "cyrus-hosted")
 					if (
 						repo.githubUrl?.endsWith(`/${repoTag.repo}`) ||
-						repo.githubUrl?.endsWith(`/${repoTag.repo}.git`) ||
-						repo.gitlabUrl?.endsWith(`/${repoTag.repo}`) ||
-						repo.gitlabUrl?.endsWith(`/${repoTag.repo}.git`)
+						repo.githubUrl?.endsWith(`/${repoTag.repo}.git`)
 					) {
 						this.logger.debug(
 							`Matched repo tag "${repoTag.repo}" to repository ${repo.name} via hosting URL`,
@@ -576,7 +574,7 @@ export class RepositoryRouter {
 
 				const fullIssue = await issueTracker.fetchIssue(issueId);
 				const project = await fullIssue?.project;
-				if (!project || !project.name) {
+				if (!project?.name) {
 					this.logger.debug(
 						`No project name found for issue ${issueId} in repository ${repo.name}`,
 					);
@@ -646,20 +644,20 @@ export class RepositoryRouter {
 
 		// Create repository options
 		const options = workspaceRepos.map((repo) => ({
-			value: repo.githubUrl || repo.gitlabUrl || repo.name,
+			value: repo.githubUrl || repo.name,
 		}));
 
-		// Post elicitation activity
+		// Post elicitation activity through the single sink post path
 		try {
-			await issueTracker.createAgentActivity({
+			await new LinearActivitySink(issueTracker, webhook.organizationId).post(
 				agentSessionId,
-				content: {
+				{
 					type: "elicitation",
 					body: "Which repository should I work in for this issue?",
+					signal: "select",
+					signalMetadata: { options },
 				},
-				signal: AgentActivitySignal.Select,
-				signalMetadata: { options },
-			});
+			);
 
 			this.logger.info(
 				`Posted repository selection elicitation with ${options.length} options`,
@@ -692,12 +690,9 @@ export class RepositoryRouter {
 		const errorMessage = errorObj?.message || String(error);
 
 		try {
-			await issueTracker.createAgentActivity({
-				agentSessionId,
-				content: {
-					type: "error",
-					body: `Failed to display repository selection: ${errorMessage}`,
-				},
+			await new LinearActivitySink(issueTracker, "adhoc").post(agentSessionId, {
+				type: "error",
+				body: `Failed to display repository selection: ${errorMessage}`,
 			});
 			this.logger.info(
 				`Posted error activity for repository selection failure`,
@@ -729,11 +724,10 @@ export class RepositoryRouter {
 		// Remove from pending map
 		this.pendingSelections.delete(agentSessionId);
 
-		// Find selected repository by GitHub/GitLab URL or name
+		// Find selected repository by GitHub URL or name
 		const selectedRepo = pendingData.workspaceRepos.find(
 			(repo) =>
 				repo.githubUrl === selectedRepositoryName ||
-				repo.gitlabUrl === selectedRepositoryName ||
 				repo.name === selectedRepositoryName,
 		);
 

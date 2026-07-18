@@ -2,6 +2,8 @@ packages:
   - packages/*
   - apps/*
 
+enableGlobalVirtualStore: true
+
 onlyBuiltDependencies:
   - '@tailwindcss/oxide'
   - core-js
@@ -9,6 +11,7 @@ onlyBuiltDependencies:
   - electron-winstaller
   - esbuild
   - sharp
+  - sqlite3
   - workerd
 
 overrides:

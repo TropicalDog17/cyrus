@@ -22,6 +22,9 @@ export const availableTools = [
 
 	// Execution tools
 	"Bash",
+	// Hosted Claude variants expose delegation as Agent; older/current local
+	// variants may still report Task. Keep both so availability stays portable.
+	"Agent",
 	"Task",
 
 	// Web tools
@@ -90,6 +93,7 @@ export const readOnlyTools: ToolName[] = [
 	"TaskUpdate",
 	"TaskGet",
 	"TaskList",
+	"Agent",
 	"Task",
 	"Skill",
 	"Monitor",

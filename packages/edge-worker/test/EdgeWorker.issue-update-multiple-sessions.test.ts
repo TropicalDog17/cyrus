@@ -4,7 +4,7 @@ import { LinearEventTransport } from "cyrus-linear-event-transport";
 import { createCyrusToolsServer } from "cyrus-mcp-tools";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
-import { EdgeWorker } from "../src/EdgeWorker.js";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker.js";
 import { SharedApplicationServer } from "../src/SharedApplicationServer.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
 import { TEST_CYRUS_HOME } from "./test-dirs.js";
@@ -13,7 +13,6 @@ import { TEST_CYRUS_HOME } from "./test-dirs.js";
 vi.mock("fs/promises");
 vi.mock("cyrus-claude-runner");
 vi.mock("cyrus-mcp-tools");
-vi.mock("cyrus-codex-runner");
 vi.mock("cyrus-linear-event-transport");
 vi.mock("@linear/sdk");
 vi.mock("../src/SharedApplicationServer.js");
@@ -206,7 +205,7 @@ describe("EdgeWorker - Issue Update Session Delivery (CYPACK-954)", () => {
 			},
 		};
 
-		edgeWorker = new EdgeWorker(mockConfig);
+		edgeWorker = composeEdgeWorker(mockConfig);
 
 		// Set up repositories map
 		(edgeWorker as any).repositories.set("test-repo", mockRepository);
@@ -251,13 +250,20 @@ describe("EdgeWorker - Issue Update Session Delivery (CYPACK-954)", () => {
 			]);
 			cacheRepository();
 
-			await (edgeWorker as any).handleIssueContentUpdate(
-				createIssueUpdateWebhook(),
-			);
+			const webhook = createIssueUpdateWebhook();
+			webhook.data.updatedAt = "2026-07-17T10:00:00.000Z";
+			await (edgeWorker as any).handleIssueContentUpdate(webhook);
 
 			expect(
 				runningSession.agentRunner!.addStreamMessage,
 			).toHaveBeenCalledTimes(1);
+			// The prompt uses the webhook's own updatedAt (deterministic ISO),
+			// not a wall-clock fallback.
+			const streamedPrompt =
+				runningSession.agentRunner!.addStreamMessage.mock.calls[0][0];
+			expect(streamedPrompt).toContain(
+				"<timestamp>2026-07-17T10:00:00.000Z</timestamp>",
+			);
 		});
 
 		it("should NOT resume idle sessions — updates are streaming-only", async () => {

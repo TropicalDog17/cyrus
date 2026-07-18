@@ -1,7 +1,8 @@
 {
 	"name": "cyrus-codex-runner",
 	"version": "0.2.66",
-	"description": "Codex CLI process wrapper for Cyrus",
+	"private": true,
+	"description": "OpenAI Codex runner for Cyrus, driven over the Agent Client Protocol (ACP)",
 	"type": "module",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -16,17 +17,13 @@
 		"typecheck": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@openai/codex": "^0.137.0",
-		"@openai/codex-sdk": "^0.137.0",
-		"cyrus-core": "workspace:*",
-		"cyrus-simple-agent-runner": "workspace:*"
+		"@agentclientprotocol/codex-acp": "^1.1.4",
+		"@agentclientprotocol/sdk": "^1.2.1",
+		"cyrus-core": "workspace:*"
 	},
 	"devDependencies": {
 		"@types/node": "^20.0.0",
 		"typescript": "^5.3.3",
-		"vitest": "^4.1.0"
-	},
-	"publishConfig": {
-		"access": "public"
+		"vitest": "^4.1.9"
 	}
 }

@@ -1,81 +1,182 @@
 /**
  * Prompt Assembly Test Utilities
  *
- * Provides a human-readable DSL for testing EdgeWorker.assemblePrompt() method.
+ * Provides a human-readable DSL for testing PromptAssembler.assemble().
+ *
+ * The harness builds a REAL PromptAssembler wired to a REAL PromptBuilder and a
+ * REAL SkillsPluginResolver (so the byte-exact `## Skills` guidance renders),
+ * with the Linear-touching collaborators (IIssueTrackerService, GitService,
+ * GitHubUsernameResolver) replaced by deterministic stubs. No `(worker as any)`
+ * casts remain — the DSL mutates the shared Maps directly.
  */
 
-import type { RepositoryConfig } from "cyrus-core";
+import {
+	createLogger,
+	type IIssueTrackerService,
+	type ILogger,
+	type Issue,
+	LogLevel,
+	type RepositoryConfig,
+} from "cyrus-core";
 import { expect } from "vitest";
-import { EdgeWorker } from "../src/EdgeWorker.js";
-import type { EdgeWorkerConfig } from "../src/types.js";
+import type { GitHubUsernameResolver } from "../src/GitHubUsernameResolver.js";
+import type { GitService } from "../src/GitService.js";
+import { PromptBuilder } from "../src/PromptBuilder.js";
+import { PromptAssembler } from "../src/prompt-assembly/PromptAssembler.js";
+import type { PromptAssemblyInput } from "../src/prompt-assembly/types.js";
+import {
+	type SkillSessionContext,
+	SkillsPluginResolver,
+} from "../src/SkillsPluginResolver.js";
 import { TEST_CYRUS_HOME } from "./test-dirs.js";
 
 /**
- * Create an EdgeWorker instance for testing
+ * Test harness exposing the assembler and its shared collaborator Maps so the
+ * scenario DSL (and the routing-context test) can inspect/mutate them.
  */
-export function createTestWorker(
-	repositories: RepositoryConfig[] = [],
-	linearWorkspaceSlug?: string,
-): EdgeWorker {
-	// Create mock IssueTrackerServices for each repository
-	const issueTrackers = new Map();
-	for (const repo of repositories) {
-		// Create a minimal mock IssueTrackerService with required methods
-		const mockIssueTracker = {
-			getComments: () => Promise.resolve([]),
-			getComment: () => Promise.resolve(null),
-			getIssueLabels: () => Promise.resolve([]),
-			getClient: () => ({}),
-			client: {
-				rawRequest: () => Promise.resolve({ data: { comment: { body: "" } } }),
-			},
-		};
-		issueTrackers.set(
-			repo.linearWorkspaceId ?? repo.id,
-			mockIssueTracker as any,
-		);
-	}
+export interface PromptAssemblyHarness {
+	assembler: PromptAssembler;
+	promptBuilder: PromptBuilder;
+	issueTrackers: Map<string, IIssueTrackerService>;
+	repositories: Map<string, RepositoryConfig>;
+}
 
-	// Auto-generate linearWorkspaces from repository configs
-	const linearWorkspaces: Record<
-		string,
-		{ linearToken: string; linearWorkspaceSlug?: string }
-	> = {};
-	for (const repo of repositories) {
-		if (repo.linearWorkspaceId && !linearWorkspaces[repo.linearWorkspaceId]) {
-			linearWorkspaces[repo.linearWorkspaceId] = {
-				linearToken: "test-token",
-				...(linearWorkspaceSlug ? { linearWorkspaceSlug } : {}),
-			};
+/**
+ * Build a minimal mock IssueTrackerService implementing the real methods the
+ * prompt builders call: fetchComments, fetchComment, fetchTeams, fetchLabels.
+ */
+function createMockIssueTracker(): IIssueTrackerService {
+	return {
+		fetchComments: async () => ({ nodes: [] }),
+		fetchComment: async () => ({ user: Promise.resolve(null), body: "" }),
+		fetchTeams: async () => ({ nodes: [] }),
+		fetchLabels: async () => ({ nodes: [] }),
+	} as unknown as IIssueTrackerService;
+}
+
+/**
+ * Mirror EdgeWorker.buildSkillSessionContext so the injected function behaves
+ * identically to production (repoPaths from workspace, team/label passthrough).
+ */
+function buildSkillSessionContext(
+	repository: RepositoryConfig,
+	fullIssue?: Issue,
+	session?: any,
+): SkillSessionContext {
+	const repoPaths = session?.workspace?.repoPaths as
+		| Record<string, string>
+		| undefined;
+	let resolvedPaths: string[] = [];
+	if (repoPaths) {
+		const paths = Object.values(repoPaths).filter(
+			(p): p is string => typeof p === "string" && p.length > 0,
+		);
+		if (paths.length > 0) {
+			resolvedPaths = [...new Set(paths)];
+		}
+	}
+	if (resolvedPaths.length === 0) {
+		const worktreePath = session?.workspace?.path;
+		if (typeof worktreePath === "string" && worktreePath.length > 0) {
+			resolvedPaths = [worktreePath];
 		}
 	}
 
-	const config: EdgeWorkerConfig = {
-		cyrusHome: TEST_CYRUS_HOME,
-		claudeDefaultModel: "sonnet",
-		repositories,
-		linearWorkspaces,
+	const context: SkillSessionContext = {
+		repositoryId: repository.id,
+		repoPaths: resolvedPaths,
+	};
+	const anyIssue = fullIssue as any;
+	if (anyIssue?.teamId) {
+		context.linearTeamId = anyIssue.teamId;
+	}
+	if (Array.isArray(anyIssue?.labelIds) && anyIssue.labelIds.length > 0) {
+		context.linearLabelIds = [...anyIssue.labelIds];
+	}
+	return context;
+}
+
+/**
+ * Create a PromptAssembler test harness.
+ *
+ * @param repositories Repository configs to pre-populate (routing-context tests
+ *   rely on these being visible in the PromptBuilder's repositories Map).
+ * @param _linearWorkspaceSlug Retained for signature compatibility; unused now
+ *   that prompt building no longer reads workspace slugs.
+ */
+export function createTestWorker(
+	repositories: RepositoryConfig[] = [],
+	_linearWorkspaceSlug?: string,
+): PromptAssemblyHarness {
+	const logger: ILogger = createLogger({
+		component: "prompt-assembly-test",
+		level: LogLevel.SILENT,
+	});
+
+	const repositoriesMap = new Map<string, RepositoryConfig>();
+	const issueTrackers = new Map<string, IIssueTrackerService>();
+	for (const repo of repositories) {
+		repositoriesMap.set(repo.id, repo);
+		const workspaceKey = repo.linearWorkspaceId ?? repo.id;
+		if (!issueTrackers.has(workspaceKey)) {
+			issueTrackers.set(workspaceKey, createMockIssueTracker());
+		}
+	}
+
+	const gitService = {
+		sanitizeBranchName: (name?: string) => name ?? "",
+		branchExists: async () => false,
+		determineBaseBranch: async (_issue: Issue, repo: RepositoryConfig) => ({
+			branch: repo.baseBranch,
+			source: "default" as const,
+		}),
+	} as unknown as GitService;
+
+	const gitHubUsernameResolver = {
+		resolve: async () => undefined,
+	} as unknown as GitHubUsernameResolver;
+
+	const promptBuilder = new PromptBuilder({
+		logger,
+		repositories: repositoriesMap,
 		issueTrackers,
-		mcpServers: {},
-		// Store default slug so withRepository() can inherit it for dynamically added workspaces
-		_testDefaultWorkspaceSlug: linearWorkspaceSlug,
-	} as EdgeWorkerConfig & { _testDefaultWorkspaceSlug?: string };
-	return new EdgeWorker(config);
+		gitService,
+		gitHubUsernameResolver,
+	});
+
+	const skillsPluginResolver = new SkillsPluginResolver(
+		TEST_CYRUS_HOME,
+		logger,
+	);
+
+	const assembler = new PromptAssembler({
+		logger,
+		promptBuilder,
+		skillsPluginResolver,
+		buildSkillSessionContext,
+	});
+
+	return {
+		assembler,
+		promptBuilder,
+		issueTrackers,
+		repositories: repositoriesMap,
+	};
 }
 
 /**
  * Scenario builder for test cases - provides human-readable DSL
  */
 export class PromptScenario {
-	private worker: EdgeWorker;
+	private harness: PromptAssemblyHarness;
 	private input: any = {};
 	private expectedUserPrompt?: string;
 	private expectedSystemPrompt?: string;
 	private expectedComponents?: string[];
 	private expectedPromptType?: string;
 
-	constructor(worker: EdgeWorker) {
-		this.worker = worker;
+	constructor(harness: PromptAssemblyHarness) {
+		this.harness = harness;
 	}
 
 	// ===== Input Builders =====
@@ -167,7 +268,7 @@ export class PromptScenario {
 		};
 		this.input.repository = fullRepo;
 		this.input.repositories = [fullRepo];
-		// Also ensure the worker has an IssueTrackerService for this repository
+		// Also ensure the harness has an IssueTrackerService for this repository
 		this.ensureIssueTracker(fullRepo);
 		return this;
 	}
@@ -177,6 +278,7 @@ export class PromptScenario {
 			baseBranch: "main",
 			labelPrompts: {},
 			repositoryPath: repo.repositoryPath ?? repo.path ?? "/test/repo",
+			linearWorkspaceId: repo.linearWorkspaceId ?? repo.id,
 			...repo,
 		}));
 		this.input.repositories = fullRepos;
@@ -189,28 +291,8 @@ export class PromptScenario {
 
 	private ensureIssueTracker(repo: any) {
 		const workspaceKey = repo.linearWorkspaceId ?? repo.id;
-		if (!(this.worker as any).issueTrackers.has(workspaceKey)) {
-			const mockIssueTracker = {
-				getComments: () => Promise.resolve([]),
-				getComment: () => Promise.resolve(null),
-				getIssueLabels: () => Promise.resolve([]),
-				client: {
-					rawRequest: () =>
-						Promise.resolve({ data: { comment: { body: "" } } }),
-				},
-			};
-			(this.worker as any).issueTrackers.set(workspaceKey, mockIssueTracker);
-		}
-		// Ensure the worker has a linearWorkspaces entry for this workspace
-		if (!(this.worker as any).config.linearWorkspaces?.[workspaceKey]) {
-			if (!(this.worker as any).config.linearWorkspaces) {
-				(this.worker as any).config.linearWorkspaces = {};
-			}
-			const defaultSlug = (this.worker as any).config._testDefaultWorkspaceSlug;
-			(this.worker as any).config.linearWorkspaces[workspaceKey] = {
-				linearToken: "test-token",
-				...(defaultSlug ? { linearWorkspaceSlug: defaultSlug } : {}),
-			};
+		if (!this.harness.issueTrackers.has(workspaceKey)) {
+			this.harness.issueTrackers.set(workspaceKey, createMockIssueTracker());
 		}
 	}
 
@@ -254,11 +336,15 @@ export class PromptScenario {
 	// ===== Execution =====
 
 	async build() {
-		return await (this.worker as any).assemblePrompt(this.input);
+		return await this.harness.assembler.assemble(
+			this.input as PromptAssemblyInput,
+		);
 	}
 
 	async verify() {
-		const result = await (this.worker as any).assemblePrompt(this.input);
+		const result = await this.harness.assembler.assemble(
+			this.input as PromptAssemblyInput,
+		);
 
 		if (this.expectedUserPrompt !== undefined) {
 			expect(result.userPrompt).toBe(this.expectedUserPrompt);
@@ -283,6 +369,6 @@ export class PromptScenario {
 /**
  * Start building a test scenario
  */
-export function scenario(worker: EdgeWorker): PromptScenario {
-	return new PromptScenario(worker);
+export function scenario(harness: PromptAssemblyHarness): PromptScenario {
+	return new PromptScenario(harness);
 }

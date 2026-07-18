@@ -4,7 +4,7 @@ import { LinearEventTransport } from "cyrus-linear-event-transport";
 import { createCyrusToolsServer } from "cyrus-mcp-tools";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
-import { EdgeWorker } from "../src/EdgeWorker.js";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker.js";
 import { SharedApplicationServer } from "../src/SharedApplicationServer.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
 import { TEST_CYRUS_HOME } from "./test-dirs.js";
@@ -13,7 +13,6 @@ import { TEST_CYRUS_HOME } from "./test-dirs.js";
 vi.mock("fs/promises");
 vi.mock("cyrus-claude-runner");
 vi.mock("cyrus-mcp-tools");
-vi.mock("cyrus-codex-runner");
 vi.mock("cyrus-linear-event-transport");
 vi.mock("@linear/sdk");
 vi.mock("../src/SharedApplicationServer.js");
@@ -170,7 +169,7 @@ describe("EdgeWorker - Feedback Delivery Timeout Issue", () => {
 			},
 		};
 
-		edgeWorker = new EdgeWorker(mockConfig);
+		edgeWorker = composeEdgeWorker(mockConfig);
 
 		// Setup parent-child mapping in GlobalSessionRegistry (single source of truth)
 		(edgeWorker as any).globalSessionRegistry.setParentSession(

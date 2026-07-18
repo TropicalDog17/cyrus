@@ -46,19 +46,15 @@ cyrus/
 │   ├── cli/        # Main CLI application (the `cyrus-ai` npm package)
 │   └── f1/         # F1 testing framework for end-to-end test drives
 └── packages/
-    ├── core/                     # Shared types and session management
-    ├── edge-worker/              # Edge worker implementation
-    ├── claude-runner/            # Claude CLI execution wrapper
-    ├── codex-runner/             # Codex CLI execution wrapper
-    ├── cursor-runner/            # Cursor CLI execution wrapper
-    ├── gemini-runner/            # Gemini CLI execution wrapper
-    ├── simple-agent-runner/      # Simple agent runner
-    ├── config-updater/           # Configuration update utilities
+    ├── core/                     # Shared types, config schemas, issue-tracker interfaces
+    ├── edge-worker/              # Edge worker orchestrator
+    ├── claude-runner/            # Claude Code SDK wrapper
+    ├── cursor-runner/            # Cursor Agent SDK wrapper
+    ├── config-updater/           # Remote config push from CYHOST
     ├── cloudflare-tunnel-client/ # Cloudflare tunnel management
-    ├── mcp-tools/                # MCP tool definitions
-    ├── linear-event-transport/   # Linear webhook event handling
-    ├── github-event-transport/   # GitHub event handling
-    └── slack-event-transport/    # Slack event handling
+    ├── mcp-tools/                # cyrus-tools MCP server
+    ├── linear-event-transport/   # Linear webhook + issue tracker adapter
+    └── github-event-transport/   # GitHub webhook handling
 ```
 
 ## Pull Requests
@@ -71,11 +67,12 @@ cyrus/
    pnpm typecheck            # TypeScript type checking
    pnpm lint                 # Biome lint check
    ```
-4. Update `CHANGELOG.md` under the `## [Unreleased]` section with your changes:
-   - Use subsections: `### Added`, `### Changed`, `### Fixed`, `### Removed`
-   - Include the PR number/link and Linear issue identifier (e.g., `CYPACK-123`)
-   - Focus on end-user impact, not implementation details
-   - For internal-only changes, update `CHANGELOG.internal.md` instead
+4. Record anything durable you learned where it will actually be re-read. This repo
+   keeps no changelog — git history is the log, and it is better at it.
+   - An invariant that causes silent breakage → `agent-docs/dev-gotchas.md`
+   - A decision, and why it beat the alternative → `docs/adr/`
+   - Anything derivable from the diff (file lists, symbol inventories, test
+     manifests) → nowhere; `git log -p` already has it
 5. Issue your pull request
 
 ## Testing

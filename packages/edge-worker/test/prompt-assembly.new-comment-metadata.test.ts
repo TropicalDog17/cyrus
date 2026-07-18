@@ -104,6 +104,76 @@ Focus on addressing the specific request in the mention. You can use the Linear 
 			.verify();
 	});
 
+	it("should omit the mention timestamp line when the agent session has no createdAt", async () => {
+		const worker = createTestWorker();
+
+		const session = {
+			issueId: "test-issue-123",
+			workspace: { path: "/test/repo" },
+			metadata: {},
+		};
+
+		const issue = {
+			id: "test-issue-123",
+			identifier: "TEST-123",
+			title: "Test Issue",
+			description: "Test description",
+		};
+
+		const repository = {
+			id: "repo-123",
+			path: "/test/repo",
+		};
+
+		// No createdAt on the agent session — the <timestamp> line must be
+		// omitted rather than filled with a wall-clock fallback.
+		const agentSession = {
+			id: "agent-session-123",
+			creator: {
+				id: "user-123",
+				name: "Alice Smith",
+			},
+			comment: {
+				id: "comment-123",
+				body: "Please help with this issue",
+			},
+		};
+
+		await scenario(worker)
+			.newSession()
+			.withSession(session)
+			.withIssue(issue)
+			.withRepository(repository)
+			.withUserComment("Please help with this issue")
+			.withCommentAuthor("Alice Smith")
+			.withAgentSession(agentSession)
+			.withMentionTriggered(true)
+			.withLabels()
+			.expectUserPrompt(
+				`You were mentioned in a Linear comment on this issue:
+
+<linear_issue>
+  <id>test-issue-123</id>
+  <identifier>TEST-123</identifier>
+  <title>Test Issue</title>
+  <url>undefined</url>
+</linear_issue>
+
+<mention_comment>
+  <author>Alice Smith</author>
+  <content>
+Please help with this issue
+  </content>
+</mention_comment>
+
+Focus on addressing the specific request in the mention. You can use the Linear MCP tools to fetch additional context if needed.`,
+			)
+			.expectSystemPrompt(undefined)
+			.expectPromptType("mention")
+			.expectComponents("issue-context")
+			.verify();
+	});
+
 	it("should include author and timestamp metadata when building issue context with new comment", async () => {
 		const worker = createTestWorker();
 
@@ -174,21 +244,15 @@ No comments yet.
 This is a new comment on the issue
   </content>
 </user_comment>`)
-			.expectSystemPrompt(`<task_management_instructions>
-CRITICAL: You MUST use the Task tools (TaskCreate, TaskUpdate, TaskGet, TaskList) extensively:
-- IMMEDIATELY create a comprehensive task list at the beginning of your work using TaskCreate
-- Break down complex tasks into smaller, actionable items
-- Update tasks to 'in_progress' when you start them using TaskUpdate
-- Update tasks to 'completed' immediately after finishing them using TaskUpdate
-- Only have ONE task 'in_progress' at a time
-- Add new tasks as you discover them during your work using TaskCreate
-- Your first response should focus on creating a thorough task breakdown
+			.expectSystemPrompt(`<work_management>
+Use TaskCreate and TaskUpdate only when substantial multi-step work benefits from
+a visible checklist. Skip task bookkeeping for simple requests.
 
-Remember: Your first message is internal planning. Use this time to:
-1. Thoroughly analyze the issue and requirements
-2. Create detailed tasks using TaskCreate
-3. Plan your approach systematically
-</task_management_instructions>
+Use Agent for bounded, independent reconnaissance that would otherwise load many
+files into the main conversation. Keep edits and integration decisions in the
+main session.
+</work_management>
+
 
 ## Skills
 

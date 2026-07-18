@@ -1,6 +1,7 @@
 {
 	"name": "cyrus-ai",
 	"version": "0.2.66",
+	"private": true,
 	"description": "AI-powered Linear issue automation using Claude",
 	"main": "dist/src/app.js",
 	"types": "dist/src/app.d.ts",
@@ -15,16 +16,12 @@
 		"test": "vitest run",
 		"test:run": "vitest run --passWithNoTests",
 		"test:watch": "vitest",
-		"typecheck": "tsc --noEmit",
-		"prepublishOnly": "cd ../.. && pnpm build"
+		"typecheck": "tsc --noEmit"
 	},
 	"files": [
 		"dist",
 		"README.md"
 	],
-	"publishConfig": {
-		"access": "public"
-	},
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/ceedaragents/cyrus.git",
@@ -48,7 +45,6 @@
 		"cyrus-config-updater": "workspace:*",
 		"cyrus-core": "workspace:*",
 		"cyrus-edge-worker": "workspace:*",
-		"cyrus-slack-event-transport": "workspace:*",
 		"dotenv": "^16.5.0",
 		"express": "^5.2.0",
 		"fastify": "^5.8.5",

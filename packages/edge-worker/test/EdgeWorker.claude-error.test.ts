@@ -2,7 +2,7 @@ import { LinearClient } from "@linear/sdk";
 import { LinearEventTransport } from "cyrus-linear-event-transport";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
-import { EdgeWorker } from "../src/EdgeWorker.js";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker.js";
 import { SharedApplicationServer } from "../src/SharedApplicationServer.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
 import { TEST_CYRUS_HOME } from "./test-dirs.js";
@@ -10,7 +10,6 @@ import { TEST_CYRUS_HOME } from "./test-dirs.js";
 vi.mock("fs/promises");
 vi.mock("cyrus-claude-runner");
 vi.mock("cyrus-mcp-tools");
-vi.mock("cyrus-codex-runner");
 vi.mock("cyrus-linear-event-transport");
 vi.mock("@linear/sdk");
 vi.mock("../src/SharedApplicationServer.js");
@@ -94,7 +93,7 @@ describe("EdgeWorker - handleClaudeError (runner-crash surfacing)", () => {
 			},
 		} as EdgeWorkerConfig;
 
-		edgeWorker = new EdgeWorker(mockConfig);
+		edgeWorker = composeEdgeWorker(mockConfig);
 		(edgeWorker as any).agentSessionManager = mockAgentSessionManager;
 	});
 
@@ -104,7 +103,9 @@ describe("EdgeWorker - handleClaudeError (runner-crash surfacing)", () => {
 
 	it("surfaces a genuine crash to Linear and reclaims the warm slot", async () => {
 		const sessionId = "sess-crash";
-		(edgeWorker as any).warmInstances.set(sessionId, { fake: "warm" });
+		// warmInstances moved onto WarmSessionPool; seed its internal slot so we
+		// can assert the crash path reclaims it via warmPool.release().
+		(edgeWorker as any).warmPool.warmInstances.set(sessionId, { fake: "warm" });
 		const savedSpy = vi
 			.spyOn(edgeWorker as any, "savePersistedState")
 			.mockResolvedValue(undefined);
@@ -120,7 +121,9 @@ describe("EdgeWorker - handleClaudeError (runner-crash surfacing)", () => {
 			mockAgentSessionManager.failSession.mock.calls[0];
 		expect(failedSessionId).toBe(sessionId);
 		expect(body).toContain("Claude Code process exited with code 1");
-		expect((edgeWorker as any).warmInstances.has(sessionId)).toBe(false);
+		expect((edgeWorker as any).warmPool.warmInstances.has(sessionId)).toBe(
+			false,
+		);
 		expect(savedSpy).toHaveBeenCalled();
 	});
 

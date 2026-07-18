@@ -22,7 +22,8 @@ import type {
 	IIssueTrackerService,
 	ILogger,
 } from "cyrus-core";
-import { AgentActivitySignal, createLogger } from "cyrus-core";
+import { createLogger } from "cyrus-core";
+import { LinearActivitySink } from "./sinks/LinearActivitySink.js";
 
 /**
  * Pending question data stored while awaiting user response
@@ -45,6 +46,13 @@ export interface AskUserQuestionHandlerDeps {
 	 * @param organizationId - Linear organization/workspace ID
 	 */
 	getIssueTracker: (organizationId: string) => IIssueTrackerService | null;
+	/**
+	 * Optional per-question timeout override in milliseconds. Re-read on each
+	 * question so config hot-reload takes effect without restart. When omitted
+	 * or returns `undefined`, falls back to constructor config / default.
+	 * `0` means wait indefinitely.
+	 */
+	getTimeoutMs?: () => number | undefined;
 }
 
 /**
@@ -70,10 +78,26 @@ export interface AskUserQuestionHandlerConfig {
 
 /**
  * Default time to wait for a user's response before unblocking the agent.
- * 30 minutes: long enough for an attentive user, short enough to avoid a
- * session hanging for hours on a lost response webhook.
+ * 10 minutes: long enough for an attentive user to reply, short enough to keep
+ * a blocking question from dominating a session's wall-clock time. Trace audits
+ * (DEV-144) found the previous 30-minute default accounted for ~42% of wall
+ * clock while sessions sat idle waiting on a response. Lowering it lets a
+ * session unblock and proceed using its best judgment sooner.
+ *
+ * Override via the `askUserQuestionTimeoutMinutes` config; set that to `0` to
+ * wait indefinitely.
  */
-export const DEFAULT_QUESTION_TIMEOUT_MS = 30 * 60 * 1000;
+export const DEFAULT_QUESTION_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * Convert `askUserQuestionTimeoutMinutes` config to milliseconds for the handler.
+ * `undefined` means use the handler default; `0` means wait indefinitely.
+ */
+export function questionTimeoutMsFromMinutes(
+	minutes: number | undefined,
+): number | undefined {
+	return minutes != null ? minutes * 60_000 : undefined;
+}
 
 /**
  * Handler for presenting AskUserQuestion tool calls to users via Linear's select signal.
@@ -196,17 +220,17 @@ export class AskUserQuestionHandler {
 
 		const elicitationBody = `${question.question}\n\n${optionsText}\n\n_Select an option above, or reply with your own answer._`;
 
-		// Post elicitation to Linear
+		// Post elicitation to Linear through the single sink post path
 		try {
-			await issueTracker.createAgentActivity({
-				agentSessionId: linearAgentSessionId,
-				content: {
+			await new LinearActivitySink(issueTracker, organizationId).post(
+				linearAgentSessionId,
+				{
 					type: "elicitation",
 					body: elicitationBody,
+					signal: "select",
+					signalMetadata: { options },
 				},
-				signal: AgentActivitySignal.Select,
-				signalMetadata: { options },
-			});
+			);
 
 			this.logger.debug(
 				`Posted elicitation with ${options.length} options for session ${linearAgentSessionId}`,
@@ -225,6 +249,7 @@ export class AskUserQuestionHandler {
 		// through `finalize`: a user response, session abort, or timeout. A
 		// timeout is essential — without it a lost "prompted" webhook leaves the
 		// Claude subprocess blocked on this tool result forever.
+		const timeoutMs = this.deps.getTimeoutMs?.() ?? this.timeoutMs;
 		return new Promise<AskUserQuestionResult>((resolve) => {
 			let settled = false;
 			let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -263,17 +288,17 @@ export class AskUserQuestionHandler {
 			// Guard against a never-delivered response webhook deadlocking the
 			// tool call. On timeout, unblock the agent with a denial that tells
 			// it to proceed rather than hang.
-			if (this.timeoutMs > 0) {
+			if (timeoutMs > 0) {
 				timeoutId = setTimeout(() => {
-					const minutes = Math.round(this.timeoutMs / 60000);
+					const minutes = Math.round(timeoutMs / 60000);
 					this.logger.warn(
-						`AskUserQuestion for session ${linearAgentSessionId} timed out after ${this.timeoutMs}ms with no response`,
+						`AskUserQuestion for session ${linearAgentSessionId} timed out after ${timeoutMs}ms with no response`,
 					);
 					finalize({
 						answered: false,
 						message: `No response was received within ${minutes} minute(s). Proceed using your best judgment (for example, your recommended default), and ask again later if you still need the user's decision.`,
 					});
-				}, this.timeoutMs);
+				}, timeoutMs);
 				// Don't let this timer keep the process alive on its own.
 				timeoutId.unref?.();
 			}

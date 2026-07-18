@@ -70,6 +70,21 @@ Routes Linear issues with specific labels to this repository. This is useful whe
 
 Example: `["backend", "api"]` - Only process issues that have the "backend" or "api" label
 
+### `readParentDirectory` (boolean)
+
+Grants sessions **read-only** access to the repository's parent directory — every folder sitting next to the repo checkout (sibling repositories, a shared requirements spec, a canonical schema kept one level up). By default a session can only read the repository it is working in (plus its own worktree and issue attachments); everything else under your home directory is denied at both the tool-permission and OS-sandbox layers. Enable this per repository when a task needs to read files that live *beside* the checkout rather than inside it.
+
+```json
+{
+  "repositoryPath": "/home/dev/projects/life-wallet-backend",
+  "readParentDirectory": true
+}
+```
+
+With `repositoryPath` above, the session may read anything under `/home/dev/projects/` (its sibling folders), while home secrets such as `~/.ssh` and `~/.aws` stay denied.
+
+Defaults to `false`. The grant is strictly read-only regardless of this setting — the session can still only **write** inside its own worktree. Leave it off unless you need the wider read scope; it deliberately widens what a session can see.
+
 ---
 
 ## Routing Priority Order
@@ -138,7 +153,97 @@ Routes issues to different AI modes based on Linear labels and optionally config
 
 - **Custom array**: Specify exact tools needed, e.g., `["Read", "Edit", "Task"]`
 
+The advanced format also accepts a per-mode **`model`** and **`effort`** (Claude runner only) — see [Model & Effort Selection](#model--effort-selection):
+
+```json
+{
+  "debugger": {
+    "labels": ["Bug"],
+    "allowedTools": "readOnly",
+    "model": "opus",
+    "effort": "high"
+  }
+}
+```
+
 Note: Linear MCP tools (`mcp__linear`) are always included automatically. Slack MCP tools (`mcp__slack`) are included when the `SLACK_BOT_TOKEN` environment variable is set (Linear and Slack sessions only; excluded from GitHub sessions).
+
+### Atlassian MCP (Jira / Confluence)
+
+Cyrus can query Jira ticket (or Confluence page) content for context — for example, pulling in a Jira ticket referenced by a Linear issue. Atlassian MCP tools (`mcp__atlassian`) are included automatically when the integration is configured via environment variables:
+
+- **`ATLASSIAN_MCP_TOKEN`** — Bearer token used to authenticate with the Atlassian MCP server. For Atlassian's official [remote MCP server](https://www.atlassian.com/platform/remote-mcp-server) this is an OAuth access token; for a self-hosted/community Atlassian MCP server it may be an API token. Sent as `Authorization: Bearer <token>`.
+- **`ATLASSIAN_MCP_URL`** *(optional)* — Override the MCP endpoint. Defaults to `https://mcp.atlassian.com/v1/mcp` (the official streamable-HTTP endpoint). A URL whose path ends in `/sse` is treated as the SSE transport, so `https://mcp.atlassian.com/v1/sse` also works. Point this at a self-hosted server for Jira Data Center / Server.
+
+The server is injected only when `ATLASSIAN_MCP_TOKEN` or `ATLASSIAN_MCP_URL` is set; otherwise it is skipped entirely. Whether a session can call these tools is still gated by its allowed-tools list (`mcp__atlassian`), which is granted by default for Linear, GitHub, and read-only sessions.
+
+---
+
+## Model & Effort Selection
+
+Which model a session runs on, and how hard it reasons, can be set at several levels. Cyrus resolves them centrally, so the precedence is the same everywhere.
+
+### Model precedence
+
+For a given session the model is chosen from the first source that is set:
+
+1. **Description tag** — a `model:` (or `cyrus-model:`) tag in the issue description. Highest priority; lets a single issue override everything.
+2. **Model label** — a Linear label whose name maps to a model (e.g. `opus`, `sonnet`).
+3. **Label-prompt `model`** — the `model` on the matched `labelPrompts` entry (advanced format).
+4. **Repository `model`** — the repository-level default below.
+5. **Runner default** — the built-in default for the selected runner (`claudeDefaultModel`, `cursorDefaultModel`, …).
+
+A model implies a runner (a `composer-*` model selects Cursor, a `gpt-*`/`o3`/`codex` model selects Codex, an `opus`/`sonnet`/`haiku` model selects Claude). If a **`model`** or **`fallbackModel`** override names a family that conflicts with the runner already resolved for the session, that override is ignored rather than silently switching runners — Cyrus does not change repositories or runner families mid-issue.
+
+### `model` (string, repository-level)
+
+Default model for sessions on this repository, used when the issue itself doesn't pin one via a tag or label. Accepts a model alias (`opus`, `sonnet`, `haiku`) or a full model id.
+
+```json
+{
+  "repositoryPath": "/path/to/repo",
+  "model": "opus",
+  "fallbackModel": "sonnet"
+}
+```
+
+### `fallbackModel` (string, repository-level)
+
+Model Cyrus falls back to when the primary model is unavailable (e.g. capacity/overload). Subject to the same runner-family guard as `model`.
+
+### `effort` (string)
+
+Reasoning-effort level for **Claude** sessions: one of `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. Steers how much the model reasons before acting; there is no separate `thinking` knob. Cursor and Codex ignore it.
+
+Effort is resolved with the same first-set-wins precedence, narrowest scope first:
+
+1. **Label-prompt `effort`** — the `effort` on the matched `labelPrompts` entry.
+2. **Repository `effort`** — the repository-level default below.
+3. **`claudeDefaultEffort`** — the global default (see [Global Configuration](#claudedefaulteffort-string)).
+
+```json
+{
+  "repositoryPath": "/path/to/repo",
+  "effort": "high"
+}
+```
+
+When none of the three is set, no effort is passed and the SDK keeps its own default (`high`). Levels the running model doesn't support are silently downgraded by the SDK.
+
+---
+
+## LLMOps Observability (Langfuse)
+
+Cyrus can export a full trace of every Claude Code session — each model request (model, token usage, prompt, response) and tool call (input + output) — to [Langfuse](https://langfuse.com/) for LLM observability. The export happens once, when a session ends, by parsing the session transcript and pushing it to Langfuse's ingestion API; nothing extra runs during the session itself.
+
+Configure it entirely through environment variables (put these in `~/.cyrus/.env`, alongside your other secrets):
+
+- **`LANGFUSE_PUBLIC_KEY`** — Your Langfuse project public key (`pk-lf-...`).
+- **`LANGFUSE_SECRET_KEY`** — Your Langfuse project secret key (`sk-lf-...`).
+- **`LANGFUSE_HOST`** *(optional)* — Langfuse base URL. Defaults to `https://cloud.langfuse.com` (EU region). Use `https://us.cloud.langfuse.com` for the US region, or your own URL for a self-hosted Langfuse.
+- **`CYRUS_TELEMETRY_DISABLED`** *(optional)* — Set to `1` (or `true`/`yes`/`on`) to force telemetry off even when the keys above are present.
+
+When both `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set, Cyrus registers an internal `SessionEnd` hook that exports the completed transcript to Langfuse when the session terminates. When either key is missing, telemetry stays off and nothing changes. Export is best-effort: any failure (network error, unreachable host) is logged and swallowed, so it can never disrupt a session.
 
 ---
 
@@ -408,6 +513,132 @@ the full-transcript cache rewrite.
 The fresh session's prompt includes a `<previous_session_summary>` block with
 the branch(es) the prior session worked on and a note to check the current git
 / PR state before redoing work.
+
+### `claudeAutoCompactWindow` (number)
+
+Effective context-window size, in tokens, at which Claude sessions auto-compact their conversation. Applies to all repositories; Claude runner only (Cursor manages its own context).
+
+By default Claude's built-in auto-compaction only triggers near the model's full context window — for a 1M-token model, a long issue with many follow-ups and subroutines can accumulate hundreds of thousands of tokens of conversation that are re-sent on every turn (the dominant driver of cost and latency) before it ever compacts. Setting a smaller window makes Cyrus compact much earlier, capping the per-turn context cost.
+
+```json
+{
+  "claudeAutoCompactWindow": 120000
+}
+```
+
+When omitted, the SDK's default (model-context-sized) behavior is preserved and nothing changes. A value around `120000`–`150000` is a reasonable starting point for long-running issues; lower values compact more aggressively (cheaper, but more summarization of earlier context).
+
+**Valid range: `100000` to `1000000`.** Claude Code silently discards a window outside that range, so the session would compact at the model's native window as though the setting were never there. Cyrus now ignores an out-of-range value and logs a warning rather than letting it look effective.
+
+### `claudeDefaultEffort` (string)
+
+Default reasoning-effort level for all Claude sessions: one of `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. Applies to all repositories; Claude runner only (Cursor and Codex ignore it).
+
+```json
+{
+  "claudeDefaultEffort": "high"
+}
+```
+
+This is the lowest-priority effort source — a repository-level `effort` or a label-prompt `effort` overrides it for the sessions they cover (see [Model & Effort Selection](#effort-string)). When omitted, no effort is passed and the SDK keeps its own default (`high`).
+
+### `claudeBashMaxOutputLength` (number) and `claudeMcpMaxOutputTokens` (number)
+
+Caps on how much a single tool result can contribute to the conversation. Applies to all repositories; Claude runner only (Cursor manages its own tool output).
+
+- `claudeBashMaxOutputLength` — maximum length, in **characters**, of a single Bash tool result (forwarded as `BASH_MAX_OUTPUT_LENGTH`).
+- `claudeMcpMaxOutputTokens` — maximum number of **tokens** a single MCP tool result may contribute (forwarded as `MAX_MCP_OUTPUT_TOKENS`).
+
+A single oversized tool result — a multi-megabyte build log, a `cat` of a huge file, a chatty MCP response — otherwise lands in the transcript verbatim and is re-sent to the prompt cache on **every** subsequent turn, so one giant output keeps being paid for long after it stops being useful. Setting these caps truncates such results at the source, bounding that tax.
+
+```json
+{
+  "claudeBashMaxOutputLength": 30000,
+  "claudeMcpMaxOutputTokens": 25000
+}
+```
+
+When either is omitted, the bundled Claude CLI's own built-in default applies and nothing changes for that tool. `30000` / `25000` are reasonable starting points; lower values truncate more aggressively (cheaper, but a truncated result may drop information the agent needed, so it may re-run the command).
+
+### `claudeSubagentModel` (string)
+
+Model used by the read-only `explore` subagent, which the agent can hand broad codebase searches to instead of reading every candidate file into the main conversation. Accepts a model alias (`haiku`, `sonnet`, `opus`) or a full model id. Applies to all repositories; Claude runner only.
+
+```json
+{
+  "claudeSubagentModel": "haiku"
+}
+```
+
+Delegating a search is not automatically cheaper. A subagent accumulates and re-sends *its own* context on every turn, exactly like the main session does, so a subagent that inherits the session's model (Opus) largely **moves** the cost rather than removing it — on traced sessions, the subagents' own re-reads were the bulk of what they cost. What makes delegation pay is running that work on a cheaper model: Opus 4.8 re-reads cached context at $0.50 per million tokens, against Haiku 4.5's $0.10.
+
+The trade-off is quality: the explorer is what finds the code, and a weaker model can miss things or misreport where something lives. It is restricted to reading and searching (`Read`, `Grep`, `Glob`) and cannot edit, and the agent is told to read files it is about to change directly rather than trusting a summary — but if you see it acting on bad reconnaissance, move it up to `sonnet` or remove the setting.
+
+When omitted, no `explore` agent is registered and delegation falls back to the built-in agents, which inherit the session's model — i.e. omitting it is exactly the previous behavior.
+
+### `claudeSessionKeepAliveMinutes` (number)
+
+How long a finished Claude session stays alive waiting for a follow-up comment before shutting down. Defaults to `50`; set `0` to disable. Claude runner only (Cursor manages its own session lifetime).
+
+Once a session's process has exited, a follow-up comment has to *resume* it: the whole stored conversation is replayed into a new process and re-written to the prompt cache, which on a long issue means 150k–250k tokens and around a dollar — every time. While the process is still alive the comment is simply appended to the running conversation, costing roughly a thousand tokens.
+
+```json
+{
+  "claudeSessionKeepAliveMinutes": 50
+}
+```
+
+The maximum is `55`, because an appended turn only stays cheap while the conversation is still in Anthropic's one-hour prompt cache; idling any longer would pay the full re-read anyway. Each waiting session holds an idle subprocess, so lower the window (or set `0`) if you run many concurrent issues on a small machine.
+
+Note that with keep-alive on, a first "stop" comment interrupts the session rather than killing its process outright; a second stop still forces it down.
+
+### `claudeMaxWarmIdleSessions` (number)
+
+Caps how many kept-alive Claude sessions may sit idle at the same time. When more than this many sessions are idle-warm, the least-recently-used one is shut down gracefully (its next comment resumes normally). Sessions with scheduled/background work pending are never evicted. Claude runner only.
+
+```json
+{
+  "claudeSessionKeepAliveMinutes": 50,
+  "claudeMaxWarmIdleSessions": 20
+}
+```
+
+Defaults to `0`, meaning unbounded — the keep-alive window alone limits accumulation to sessions active in the last few minutes. Set a positive cap if you run many concurrent issues and want a hard ceiling on how many idle subprocesses are held at once. Only meaningful alongside a non-zero `claudeSessionKeepAliveMinutes`.
+
+### `askUserQuestionTimeoutMinutes` (number)
+
+How long (in minutes) Cyrus waits for your answer when the agent asks a question via Linear's select signal before unblocking the agent with a "no response" denial. Claude runner only.
+
+When the agent uses AskUserQuestion, the session blocks until you pick an option or reply with a comment. If no response arrives within this window, the agent is told to proceed with its best judgment rather than waiting indefinitely.
+
+```json
+{
+  "askUserQuestionTimeoutMinutes": 10
+}
+```
+
+When omitted, defaults to 10 minutes. Set `0` to wait indefinitely (legacy behavior). Applies to questions asked after a config change — no restart needed.
+
+---
+
+### `showUsageFooter` (boolean)
+
+Whether to append a cumulative usage/cost footer to final (non-error) responses. The footer looks like:
+
+```
+---
+$0.42 · 12.3k in / 3.1k out · 85% cached
+```
+
+The figures are per-session totals across every turn (cost, fresh input tokens, output tokens, and the share of input served from the prompt cache).
+
+```json
+{
+  "showUsageFooter": false
+}
+```
+
+Defaults to `true` (on when omitted). Set `false` to opt out. The footer is also suppressed automatically when every counter is zero and never appears on error responses.
 
 ---
 

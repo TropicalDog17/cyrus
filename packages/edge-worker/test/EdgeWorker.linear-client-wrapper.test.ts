@@ -1,7 +1,7 @@
 import { LinearClient } from "@linear/sdk";
 import type { EdgeWorkerConfig } from "cyrus-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { EdgeWorker } from "../src/EdgeWorker.js";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker.js";
 
 // Mock modules
 vi.mock("@linear/sdk");
@@ -113,7 +113,7 @@ describe("EdgeWorker LinearClient Wrapper", () => {
 				title: "Test Issue",
 			});
 
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 			const issueTrackers = (edgeWorker as any).issueTrackers;
 			const issueTracker = issueTrackers.get("workspace-123");
 
@@ -128,7 +128,7 @@ describe("EdgeWorker LinearClient Wrapper", () => {
 			(error as any).status = 500;
 			mockLinearClient.issue.mockRejectedValueOnce(error);
 
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 			const issueTrackers = (edgeWorker as any).issueTrackers;
 			const issueTracker = issueTrackers.get("workspace-123");
 
@@ -144,7 +144,7 @@ describe("EdgeWorker LinearClient Wrapper", () => {
 			// Setup config without refresh token
 			mockConfig.linearWorkspaces!["workspace-123"].linearRefreshToken =
 				undefined;
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 
 			// The issueTracker should be created but without OAuth config
 			const issueTrackers = (edgeWorker as any).issueTrackers;
@@ -159,7 +159,7 @@ describe("EdgeWorker LinearClient Wrapper", () => {
 			delete process.env.LINEAR_CLIENT_ID;
 			delete process.env.LINEAR_CLIENT_SECRET;
 
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 
 			// The issueTracker should be created but without OAuth config
 			const issueTrackers = (edgeWorker as any).issueTrackers;
@@ -172,7 +172,7 @@ describe("EdgeWorker LinearClient Wrapper", () => {
 
 	describe("OAuth config setup", () => {
 		it("should configure OAuth with correct credentials", async () => {
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 
 			const issueTrackers = (edgeWorker as any).issueTrackers;
 			const issueTracker = issueTrackers.get("workspace-123");
@@ -189,7 +189,7 @@ describe("EdgeWorker LinearClient Wrapper", () => {
 
 	describe("Dynamic Linear token updates", () => {
 		it("should call setAccessToken on existing issue trackers when workspace token changes", () => {
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 
 			const issueTrackers = (edgeWorker as any).issueTrackers;
 			const issueTracker = issueTrackers.get("workspace-123");
@@ -212,7 +212,7 @@ describe("EdgeWorker LinearClient Wrapper", () => {
 		});
 
 		it("should not call setAccessToken when token has not changed", () => {
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 
 			const issueTrackers = (edgeWorker as any).issueTrackers;
 			const issueTracker = issueTrackers.get("workspace-123");
@@ -236,7 +236,7 @@ describe("EdgeWorker LinearClient Wrapper", () => {
 		});
 
 		it("should update AttachmentService when workspace token changes", () => {
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 
 			const attachmentService = (edgeWorker as any).attachmentService;
 			const setLinearWorkspacesSpy = vi.spyOn(
@@ -263,7 +263,7 @@ describe("EdgeWorker LinearClient Wrapper", () => {
 		});
 
 		it("should create a new issue tracker for a previously unknown workspace", () => {
-			edgeWorker = new EdgeWorker(mockConfig);
+			edgeWorker = composeEdgeWorker(mockConfig);
 
 			const issueTrackers = (edgeWorker as any).issueTrackers;
 			expect(issueTrackers.has("workspace-456")).toBe(false);

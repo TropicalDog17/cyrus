@@ -4,6 +4,12 @@ import { TEST_CYRUS_HOME } from "./test-dirs.js";
 // Mock dependencies BEFORE imports
 vi.mock("cyrus-claude-runner", () => ({
 	ClaudeRunner: vi.fn(),
+	WarmSessionRegistry: vi.fn(function (this: any) {
+		this.markIdle = vi.fn();
+		this.remove = vi.fn();
+		this.setMaxIdleSessions = vi.fn();
+		this.getMaxIdleSessions = vi.fn(() => 0);
+	}),
 	getSafeTools: vi.fn(() => [
 		"Read",
 		"Edit",
@@ -132,11 +138,12 @@ vi.mock("fs/promises", () => ({
 import { LinearClient } from "@linear/sdk";
 import {
 	LINEAR_DEFAULT_ALLOWED_TOOLS,
-	SLACK_DEFAULT_ALLOWED_TOOLS,
+	READONLY_DEFAULT_ALLOWED_TOOLS,
+	withLinearMcpPruned,
 } from "cyrus-core";
 import { LinearEventTransport } from "cyrus-linear-event-transport";
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
-import { EdgeWorker } from "../src/EdgeWorker.js";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker.js";
 import { SharedApplicationServer } from "../src/SharedApplicationServer.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
 
@@ -231,7 +238,7 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			};
 		} as any);
 
-		edgeWorker = new EdgeWorker(mockConfig);
+		edgeWorker = composeEdgeWorker(mockConfig);
 	});
 
 	afterEach(() => {
@@ -284,10 +291,10 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 			const tools = buildAllowedTools([repoA, repoB], "debugger");
 
-			// "readOnly" preset resolves to SLACK_DEFAULT_ALLOWED_TOOLS
+			// "readOnly" preset resolves to READONLY_DEFAULT_ALLOWED_TOOLS
 			// (the curated read-only set). Union with repoB's verbatim list.
 			const expectedUnion = [
-				...new Set([...SLACK_DEFAULT_ALLOWED_TOOLS, "Read", "Bash", "Edit"]),
+				...new Set([...READONLY_DEFAULT_ALLOWED_TOOLS, "Read", "Bash", "Edit"]),
 			];
 			expect(tools).toEqual(expectedUnion);
 		});
@@ -327,7 +334,7 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 			const tools = buildAllowedTools([repoA, repoB]);
 
-			// mcp__slack only lives in SLACK_DEFAULT_ALLOWED_TOOLS, never
+			// mcp__slack is not a known tool in this fork and is never
 			// auto-injected into Linear/GitHub paths.
 			expect(tools).not.toContain("mcp__slack");
 		});
@@ -345,7 +352,7 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 				...mockConfig,
 				linearAllowedTools: undefined,
 			};
-			const ew = new EdgeWorker(configNoDefaults);
+			const ew = composeEdgeWorker(configNoDefaults);
 			const buildAllowedTools = getBuildAllowedTools(ew);
 			const tools = buildAllowedTools([]);
 
@@ -395,6 +402,10 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 		const getBuildDisallowedTools = (ew: EdgeWorker) =>
 			(ew as any).buildDisallowedTools.bind(ew);
 
+		// `buildDisallowedTools` appends the Linear MCP prune list to whatever the
+		// multi-repo intersection resolves to (DEV-140), so each expectation is the
+		// resolved intersection wrapped in `withLinearMcpPruned`.
+
 		it("should intersect disallowed tools across multiple repositories", () => {
 			const repoA: RepositoryConfig = {
 				...mockConfig.repositories[0],
@@ -409,8 +420,7 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			const tools = buildDisallowedTools([repoA, repoB]);
 
 			// Intersection: only Bash and SystemAccess are in both
-			expect(tools).toEqual(expect.arrayContaining(["Bash", "SystemAccess"]));
-			expect(tools).toHaveLength(2);
+			expect(tools).toEqual(withLinearMcpPruned(["Bash", "SystemAccess"]));
 			expect(tools).not.toContain("Write");
 			expect(tools).not.toContain("Edit");
 		});
@@ -428,8 +438,8 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			const buildDisallowedTools = getBuildDisallowedTools(edgeWorker);
 			const tools = buildDisallowedTools([repoA, repoB]);
 
-			// No overlap
-			expect(tools).toEqual([]);
+			// No overlap — only the unconditional prune list remains
+			expect(tools).toEqual(withLinearMcpPruned([]));
 		});
 
 		it("should return all tools when all repos have the same disallowed list", () => {
@@ -445,8 +455,7 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			const buildDisallowedTools = getBuildDisallowedTools(edgeWorker);
 			const tools = buildDisallowedTools([repoA, repoB]);
 
-			expect(tools).toEqual(expect.arrayContaining(["Bash", "SystemAccess"]));
-			expect(tools).toHaveLength(2);
+			expect(tools).toEqual(withLinearMcpPruned(["Bash", "SystemAccess"]));
 		});
 
 		it("should handle one repo with empty disallowed tools (intersection = empty)", () => {
@@ -462,8 +471,8 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			const buildDisallowedTools = getBuildDisallowedTools(edgeWorker);
 			const tools = buildDisallowedTools([repoA, repoB]);
 
-			// Intersection with empty = empty
-			expect(tools).toEqual([]);
+			// Intersection with empty = empty (only the prune list remains)
+			expect(tools).toEqual(withLinearMcpPruned([]));
 		});
 
 		it("should handle empty repository array with global defaults", () => {
@@ -471,11 +480,11 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 				...mockConfig,
 				defaultDisallowedTools: ["Bash", "DangerousTool"],
 			};
-			const ew = new EdgeWorker(configWithDefaults);
+			const ew = composeEdgeWorker(configWithDefaults);
 			const buildDisallowedTools = getBuildDisallowedTools(ew);
 			const tools = buildDisallowedTools([]);
 
-			expect(tools).toEqual(["Bash", "DangerousTool"]);
+			expect(tools).toEqual(withLinearMcpPruned(["Bash", "DangerousTool"]));
 		});
 
 		it("should still work with a single repository (backwards compatible)", () => {
@@ -487,7 +496,7 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			const buildDisallowedTools = getBuildDisallowedTools(edgeWorker);
 			const tools = buildDisallowedTools(repository);
 
-			expect(tools).toEqual(["Bash", "Write"]);
+			expect(tools).toEqual(withLinearMcpPruned(["Bash", "Write"]));
 		});
 
 		it("should intersect across 3 repositories", () => {
@@ -514,8 +523,7 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			const tools = buildDisallowedTools([repoA, repoB, repoC]);
 
 			// Only Bash and SystemAccess are in ALL three
-			expect(tools).toEqual(expect.arrayContaining(["Bash", "SystemAccess"]));
-			expect(tools).toHaveLength(2);
+			expect(tools).toEqual(withLinearMcpPruned(["Bash", "SystemAccess"]));
 		});
 
 		it("should use prompt-type config for intersection across repos", () => {
@@ -544,8 +552,7 @@ describe("EdgeWorker - Multi-Repo Tool Authorization", () => {
 			const tools = buildDisallowedTools([repoA, repoB], "debugger");
 
 			// Intersection: Bash and DangerousTool
-			expect(tools).toEqual(expect.arrayContaining(["Bash", "DangerousTool"]));
-			expect(tools).toHaveLength(2);
+			expect(tools).toEqual(withLinearMcpPruned(["Bash", "DangerousTool"]));
 		});
 	});
 

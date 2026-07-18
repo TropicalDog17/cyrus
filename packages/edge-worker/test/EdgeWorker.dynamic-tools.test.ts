@@ -1,6 +1,7 @@
 import {
 	LINEAR_DEFAULT_ALLOWED_TOOLS,
-	SLACK_DEFAULT_ALLOWED_TOOLS,
+	READONLY_DEFAULT_ALLOWED_TOOLS,
+	withLinearMcpPruned,
 } from "cyrus-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TEST_CYRUS_HOME } from "./test-dirs.js";
@@ -8,6 +9,12 @@ import { TEST_CYRUS_HOME } from "./test-dirs.js";
 // Mock dependencies BEFORE imports
 vi.mock("cyrus-claude-runner", () => ({
 	ClaudeRunner: vi.fn(),
+	WarmSessionRegistry: vi.fn(function (this: any) {
+		this.markIdle = vi.fn();
+		this.remove = vi.fn();
+		this.setMaxIdleSessions = vi.fn();
+		this.getMaxIdleSessions = vi.fn(() => 0);
+	}),
 	getSafeTools: vi.fn(() => [
 		"Read",
 		"Edit",
@@ -110,7 +117,7 @@ import { LinearClient } from "@linear/sdk";
 import { getAllTools, getSafeTools } from "cyrus-claude-runner";
 import { LinearEventTransport } from "cyrus-linear-event-transport";
 import { AgentSessionManager } from "../src/AgentSessionManager.js";
-import { EdgeWorker } from "../src/EdgeWorker.js";
+import { composeEdgeWorker, type EdgeWorker } from "../src/EdgeWorker.js";
 import { SharedApplicationServer } from "../src/SharedApplicationServer.js";
 import type { EdgeWorkerConfig, RepositoryConfig } from "../src/types.js";
 
@@ -203,7 +210,7 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 			};
 		} as any);
 
-		edgeWorker = new EdgeWorker(mockConfig);
+		edgeWorker = composeEdgeWorker(mockConfig);
 	});
 
 	afterEach(() => {
@@ -249,9 +256,9 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 			// preset/list includes them.
 
 			// Test debugger prompt with readOnly preset (resolves to the
-			// Slack platform default — the curated read-only set).
+			// curated read-only set).
 			const debuggerTools = buildAllowedTools(repository, "debugger");
-			expect(debuggerTools).toEqual([...SLACK_DEFAULT_ALLOWED_TOOLS]);
+			expect(debuggerTools).toEqual([...READONLY_DEFAULT_ALLOWED_TOOLS]);
 
 			// Test builder prompt with custom array (returned verbatim).
 			const builderTools = buildAllowedTools(repository, "builder");
@@ -278,7 +285,7 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 				},
 			};
 
-			const edgeWorkerWithDefaults = new EdgeWorker(configWithDefaults);
+			const edgeWorkerWithDefaults = composeEdgeWorker(configWithDefaults);
 			const buildAllowedTools = getBuildAllowedTools(edgeWorkerWithDefaults);
 
 			const repository: RepositoryConfig = {
@@ -327,7 +334,7 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 				linearAllowedTools: undefined,
 			};
 
-			const edgeWorkerNoDefaults = new EdgeWorker(configWithoutDefaults);
+			const edgeWorkerNoDefaults = composeEdgeWorker(configWithoutDefaults);
 			const buildAllowedTools = getBuildAllowedTools(edgeWorkerNoDefaults);
 
 			const repository: RepositoryConfig = {
@@ -362,8 +369,8 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 				const buildAllowedTools = getBuildAllowedTools(edgeWorker);
 				const tools = buildAllowedTools(repository);
 
-				// Linear path returns the repo list verbatim. mcp__slack lives in
-				// SLACK_DEFAULT_ALLOWED_TOOLS only and is never appended here.
+				// Linear path returns the repo list verbatim. mcp__slack is not a
+				// known tool in this fork and is never appended here.
 				expect(tools).toEqual(["Read", "Write"]);
 				expect(tools).not.toContain("mcp__slack");
 			} finally {
@@ -591,6 +598,11 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 		const getBuildDisallowedTools = (ew: EdgeWorker) =>
 			(ew as any).buildDisallowedTools.bind(ew);
 
+		// `buildDisallowedTools` appends the Linear MCP prune list to whatever the
+		// resolution hierarchy returns (DEV-140), so each expectation is the
+		// resolved list wrapped in `withLinearMcpPruned`. These cases assert the
+		// hierarchy; the prune suffix is verified directly in cyrus-core.
+
 		it("should use repository-specific prompt type configuration when available", () => {
 			const repository: RepositoryConfig = {
 				...mockConfig.repositories[0],
@@ -606,7 +618,7 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 			const buildDisallowedTools = getBuildDisallowedTools(edgeWorker);
 			const tools = buildDisallowedTools(repository, "debugger");
 
-			expect(tools).toEqual(["Bash", "Write"]);
+			expect(tools).toEqual(withLinearMcpPruned(["Bash", "Write"]));
 		});
 
 		it("should use global prompt defaults when repository-specific config is not available", () => {
@@ -623,12 +635,12 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 					},
 				},
 			};
-			const ew = new EdgeWorker(configWithPromptDefaults);
+			const ew = composeEdgeWorker(configWithPromptDefaults);
 
 			const buildDisallowedTools = getBuildDisallowedTools(ew);
 			const tools = buildDisallowedTools(repository, "debugger");
 
-			expect(tools).toEqual(["Bash", "SystemAccess"]);
+			expect(tools).toEqual(withLinearMcpPruned(["Bash", "SystemAccess"]));
 		});
 
 		it("should fall back to repository-level disallowed tools when no prompt type is specified", () => {
@@ -640,7 +652,7 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 			const buildDisallowedTools = getBuildDisallowedTools(edgeWorker);
 			const tools = buildDisallowedTools(repository);
 
-			expect(tools).toEqual(["WebFetch", "WebSearch"]);
+			expect(tools).toEqual(withLinearMcpPruned(["WebFetch", "WebSearch"]));
 		});
 
 		it("should fall back to global default disallowed tools when no other config is available", () => {
@@ -653,12 +665,12 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 				...mockConfig,
 				defaultDisallowedTools: ["Bash", "DangerousTool"],
 			};
-			const ew = new EdgeWorker(configWithDefaults);
+			const ew = composeEdgeWorker(configWithDefaults);
 
 			const buildDisallowedTools = getBuildDisallowedTools(ew);
 			const tools = buildDisallowedTools(repository);
 
-			expect(tools).toEqual(["Bash", "DangerousTool"]);
+			expect(tools).toEqual(withLinearMcpPruned(["Bash", "DangerousTool"]));
 		});
 
 		it("should return empty array when no configuration is provided (no defaults)", () => {
@@ -669,8 +681,9 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 			const buildDisallowedTools = getBuildDisallowedTools(edgeWorker);
 			const tools = buildDisallowedTools(repository);
 
-			// Unlike allowedTools, disallowedTools has no defaults
-			expect(tools).toEqual([]);
+			// Unlike allowedTools, disallowedTools has no defaults — only the
+			// unconditional Linear MCP prune list remains.
+			expect(tools).toEqual(withLinearMcpPruned([]));
 		});
 
 		it("should handle prompt type with repository-level fallback", () => {
@@ -690,7 +703,7 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 			const tools = buildDisallowedTools(repository, "builder");
 
 			// Should fall back to repository-level disallowedTools
-			expect(tools).toEqual(["Bash"]);
+			expect(tools).toEqual(withLinearMcpPruned(["Bash"]));
 		});
 
 		it("should handle backward compatibility with old array-based labelPrompts", () => {
@@ -711,11 +724,11 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 
 			// Old format should fall back to repository defaults
 			const debuggerTools = buildDisallowedTools(repository, "debugger");
-			expect(debuggerTools).toEqual(["OldDefault"]);
+			expect(debuggerTools).toEqual(withLinearMcpPruned(["OldDefault"]));
 
 			// New format should work as expected
 			const builderTools = buildDisallowedTools(repository, "builder");
-			expect(builderTools).toEqual(["NewFormat"]);
+			expect(builderTools).toEqual(withLinearMcpPruned(["NewFormat"]));
 		});
 
 		it("should respect priority hierarchy", () => {
@@ -740,17 +753,17 @@ describe("EdgeWorker - Dynamic Tools Configuration", () => {
 					},
 				},
 			};
-			const ew = new EdgeWorker(configWithAllLevels);
+			const ew = composeEdgeWorker(configWithAllLevels);
 
 			const buildDisallowedTools = getBuildDisallowedTools(ew);
 
 			// Should use label-level config (highest priority)
 			const tools = buildDisallowedTools(repository, "debugger");
-			expect(tools).toEqual(["LabelLevel"]);
+			expect(tools).toEqual(withLinearMcpPruned(["LabelLevel"]));
 
 			// Without prompt type, should use repository level
 			const noPromptTools = buildDisallowedTools(repository);
-			expect(noPromptTools).toEqual(["RepoLevel"]);
+			expect(noPromptTools).toEqual(withLinearMcpPruned(["RepoLevel"]));
 		});
 	});
 });

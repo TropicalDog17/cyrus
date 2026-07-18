@@ -1,75 +1,40 @@
 import type {
-	ApprovalMode,
-	ModelReasoningEffort,
-	SandboxMode,
-	WebSearchMode,
-} from "@openai/codex-sdk";
-import type {
+	AgentMessage,
 	AgentRunnerConfig,
 	AgentSessionInfo,
-	SDKMessage,
 } from "cyrus-core";
-import type { CyrusSandboxFilesystem } from "./config/sandboxPolicy.js";
 
-export type CodexConfigValue =
-	| string
-	| number
-	| boolean
-	| CodexConfigValue[]
-	| { [key: string]: CodexConfigValue };
-
-export type CodexConfigOverrides = { [key: string]: CodexConfigValue };
-
-/**
- * Configuration for CodexRunner.
- */
 export interface CodexRunnerConfig extends AgentRunnerConfig {
-	/** Path to codex CLI binary (defaults to `codex` in PATH) */
+	/**
+	 * API key for the Codex CLI. Falls back to `CODEX_API_KEY`, then
+	 * `OPENAI_API_KEY`. Forwarded to the ACP adapter's environment so it can
+	 * authenticate the underlying Codex session.
+	 */
+	codexApiKey?: string;
+
+	/**
+	 * Command that launches the Codex ACP adapter (a stdio JSON-RPC server that
+	 * bridges the Codex runtime to ACP). When unset, the runner spawns
+	 * `npx -y @agentclientprotocol/codex-acp`. Override via the
+	 * `CODEX_ACP_COMMAND` env var (whitespace-separated `command arg arg`).
+	 */
+	acpCommand?: string;
+
+	/**
+	 * Path to a specific Codex executable for the adapter to drive instead of its
+	 * bundled dependency. Forwarded as `CODEX_PATH`. Falls back to the
+	 * `CODEX_PATH` env var.
+	 */
 	codexPath?: string;
-	/**
-	 * Override Codex home directory.
-	 * Defaults to process `CODEX_HOME`, then `~/.codex`.
-	 */
-	codexHome?: string;
-	/**
-	 * Override Codex reasoning effort.
-	 * If omitted, CodexRunner applies a safe default for known model constraints.
-	 */
-	modelReasoningEffort?: ModelReasoningEffort;
-	/** Sandbox mode for Codex shell/tool execution */
-	sandbox?: SandboxMode;
-	/** Approval policy for Codex tool/shell execution */
-	askForApproval?: ApprovalMode;
-	/** Enable Codex web search tool */
-	includeWebSearch?: boolean;
-	/** Explicit Codex web search mode (takes precedence over includeWebSearch) */
-	webSearchMode?: WebSearchMode;
-	/** Allow execution outside git repo (defaults to true) */
-	skipGitRepoCheck?: boolean;
-	/** Additional global Codex config overrides passed through SDK `config` */
-	configOverrides?: CodexConfigOverrides;
-	/** JSON Schema for structured output (passed to turn/start as outputSchema) */
-	outputSchema?: unknown;
-	/**
-	 * Filesystem sandbox intent (allow/deny read, allow write). When present, the
-	 * session runs under a granular per-thread sandbox policy instead of the
-	 * coarse default mode. Paths must be absolute.
-	 */
-	sandboxSettings?: CyrusSandboxFilesystem;
 }
 
-/**
- * Session metadata for CodexRunner.
- */
 export interface CodexSessionInfo extends AgentSessionInfo {
+	/** The ACP session id assigned by the Codex adapter on `session/new`. */
 	sessionId: string | null;
 }
 
-/**
- * Event emitter interface for CodexRunner.
- */
 export interface CodexRunnerEvents {
-	message: (message: SDKMessage) => void;
+	message: (message: AgentMessage) => void;
 	error: (error: Error) => void;
-	complete: (messages: SDKMessage[]) => void;
+	complete: (messages: AgentMessage[]) => void;
 }

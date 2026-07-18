@@ -1,5 +1,24 @@
 // Logging
 
+// Access policy — single owner of effective read/write access
+export type {
+	AccessPolicyInput,
+	ClaudeToolPatterns,
+	CursorPermissions,
+	DirEntry,
+	DirLister,
+	EffectiveAccessPolicy,
+	PolicyPath,
+	SandboxFilesystem,
+} from "./access-policy/AccessPolicy.js";
+export {
+	compute,
+	nodeDirLister,
+	toClaudeToolPatterns,
+	toCursorPermissions,
+	toSandboxFilesystem,
+} from "./access-policy/AccessPolicy.js";
+
 // Error reporting
 export type {
 	ErrorReporter,
@@ -29,10 +48,26 @@ export { createLogger, LogLevel } from "./logging/index.js";
 
 // Agent Runner types
 export type {
+	AgentAssistantContentBlock,
+	AgentAssistantMessage,
+	AgentCompactBoundaryMessage,
 	AgentMessage,
 	AgentPendingWork,
+	AgentRateLimitInfo,
+	AgentRateLimitMessage,
+	AgentResultErrorMessage,
+	AgentResultMessage,
+	AgentResultSuccessMessage,
 	AgentRunnerConfig,
 	AgentSessionInfo,
+	AgentStatusMessage,
+	AgentSystemInitMessage,
+	AgentTextBlock,
+	AgentThinkingBlock,
+	AgentToolResultBlock,
+	AgentToolUseBlock,
+	AgentUsage,
+	AgentUserContentBlock,
 	AgentUserMessage,
 	AskUserQuestion,
 	AskUserQuestionAnswers,
@@ -43,7 +78,6 @@ export type {
 	HookCallbackMatcher,
 	HookEvent,
 	IAgentRunner,
-	IMessageFormatter,
 	McpServerConfig,
 	OnAskUserQuestion,
 	SDKAssistantMessage,
@@ -60,7 +94,9 @@ export {
 	GITHUB_DEFAULT_ALLOWED_TOOLS,
 	getDefaultAllowedTools,
 	LINEAR_DEFAULT_ALLOWED_TOOLS,
-	SLACK_DEFAULT_ALLOWED_TOOLS,
+	LINEAR_MCP_PRUNED_TOOLS,
+	READONLY_DEFAULT_ALLOWED_TOOLS,
+	withLinearMcpPruned,
 } from "./allowed-tools-defaults.js";
 export type {
 	BaseBranchResolution,
@@ -76,9 +112,11 @@ export type {
 	EdgeConfig,
 	EdgeConfigPayload,
 	EdgeWorkerConfig,
+	EffortLevel,
 	LinearWorkspaceConfig,
 	NetworkPolicy,
 	OAuthCallbackHandler,
+	PathFieldMeta,
 	RepoSetupHookEvent,
 	RepoSetupHookEventHandler,
 	RepoSetupHookStatus,
@@ -90,12 +128,17 @@ export type {
 	UserIdentifier,
 } from "./config-types.js";
 export {
+	DEFAULT_CLAUDE_SESSION_KEEP_ALIVE_MINUTES,
 	EdgeConfigPayloadSchema,
 	// Zod schemas for runtime validation
 	EdgeConfigSchema,
+	EffortLevelSchema,
+	getReadParentDirectories,
 	LinearWorkspaceConfigSchema,
 	migrateEdgeConfig,
 	NetworkPolicySchema,
+	normalizeConfigPaths,
+	pathRegistry,
 	RepositoryConfigPayloadSchema,
 	RepositoryConfigSchema,
 	RunnerTypeSchema,
@@ -266,14 +309,6 @@ export {
 	LINEAR_WEBHOOK_IPS,
 	WebhookIpValidator,
 } from "./security/index.js";
-// Simple Agent Runner types
-export type {
-	IAgentProgressEvent,
-	ISimpleAgentQueryOptions,
-	ISimpleAgentResult,
-	ISimpleAgentRunner,
-	ISimpleAgentRunnerConfig,
-} from "./simple-agent-runner-types.js";
 // Platform-agnostic webhook type aliases - exported from issue-tracker
 // These are now defined in issue-tracker/types.ts as aliases to Linear SDK webhook types
 // EdgeWorker and other high-level code should use these generic names via issue-tracker exports
