@@ -660,6 +660,9 @@
 		"prReviewTrigger": {
 			"type": "boolean"
 		},
+		"showUsageFooter": {
+			"type": "boolean"
+		},
 		"userAccessControl": {
 			"type": "object",
 			"properties": {

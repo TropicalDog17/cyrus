@@ -51,6 +51,7 @@ const EDGE_CONFIG: EdgeConfig = {
 	githubMcpConfigs: ["/tmp/github-mcp.json"],
 	issueUpdateTrigger: true,
 	prReviewTrigger: false,
+	showUsageFooter: false,
 	userAccessControl: undefined,
 	promptDefaults: undefined,
 	sandbox: undefined,

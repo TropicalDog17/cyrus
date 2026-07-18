@@ -576,6 +576,27 @@ When omitted, defaults to 10 minutes. Set `0` to wait indefinitely (legacy behav
 
 ---
 
+### `showUsageFooter` (boolean)
+
+Whether to append a cumulative usage/cost footer to final (non-error) responses. The footer looks like:
+
+```
+---
+$0.42 · 12.3k in / 3.1k out · 85% cached
+```
+
+The figures are per-session totals across every turn (cost, fresh input tokens, output tokens, and the share of input served from the prompt cache).
+
+```json
+{
+  "showUsageFooter": false
+}
+```
+
+Defaults to `true` (on when omitted). Set `false` to opt out. The footer is also suppressed automatically when every counter is zero and never appears on error responses.
+
+---
+
 ## Tool Configuration Priority
 
 When determining allowed tools, Cyrus follows this priority order:
