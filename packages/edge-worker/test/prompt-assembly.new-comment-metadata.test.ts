@@ -104,6 +104,76 @@ Focus on addressing the specific request in the mention. You can use the Linear 
 			.verify();
 	});
 
+	it("should omit the mention timestamp line when the agent session has no createdAt", async () => {
+		const worker = createTestWorker();
+
+		const session = {
+			issueId: "test-issue-123",
+			workspace: { path: "/test/repo" },
+			metadata: {},
+		};
+
+		const issue = {
+			id: "test-issue-123",
+			identifier: "TEST-123",
+			title: "Test Issue",
+			description: "Test description",
+		};
+
+		const repository = {
+			id: "repo-123",
+			path: "/test/repo",
+		};
+
+		// No createdAt on the agent session — the <timestamp> line must be
+		// omitted rather than filled with a wall-clock fallback.
+		const agentSession = {
+			id: "agent-session-123",
+			creator: {
+				id: "user-123",
+				name: "Alice Smith",
+			},
+			comment: {
+				id: "comment-123",
+				body: "Please help with this issue",
+			},
+		};
+
+		await scenario(worker)
+			.newSession()
+			.withSession(session)
+			.withIssue(issue)
+			.withRepository(repository)
+			.withUserComment("Please help with this issue")
+			.withCommentAuthor("Alice Smith")
+			.withAgentSession(agentSession)
+			.withMentionTriggered(true)
+			.withLabels()
+			.expectUserPrompt(
+				`You were mentioned in a Linear comment on this issue:
+
+<linear_issue>
+  <id>test-issue-123</id>
+  <identifier>TEST-123</identifier>
+  <title>Test Issue</title>
+  <url>undefined</url>
+</linear_issue>
+
+<mention_comment>
+  <author>Alice Smith</author>
+  <content>
+Please help with this issue
+  </content>
+</mention_comment>
+
+Focus on addressing the specific request in the mention. You can use the Linear MCP tools to fetch additional context if needed.`,
+			)
+			.expectSystemPrompt(undefined)
+			.expectPromptType("mention")
+			.expectComponents("issue-context")
+			.verify();
+	});
+
 	it("should include author and timestamp metadata when building issue context with new comment", async () => {
 		const worker = createTestWorker();
 

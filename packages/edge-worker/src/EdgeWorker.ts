@@ -2837,11 +2837,13 @@ ${taskSection}`;
 			}
 		}
 
-		// Build the XML-formatted prompt showing old vs new values
+		// Build the XML-formatted prompt showing old vs new values.
+		// Use the webhook's own updatedAt so the prompt is reproducible.
 		const promptBody = this.buildIssueUpdatePrompt(
 			issueIdentifier,
 			issueData,
 			updatedFrom,
+			issueData.updatedAt,
 		);
 
 		// CYPACK-954: Issue update events are ONLY delivered to the first running
@@ -3160,11 +3162,13 @@ ${taskSection}`;
 			description?: string;
 			attachments?: unknown;
 		},
+		timestamp?: string,
 	): string {
 		return this.promptBuilder.buildIssueUpdatePrompt(
 			issueIdentifier,
 			issueData,
 			updatedFrom,
+			timestamp,
 		);
 	}
 

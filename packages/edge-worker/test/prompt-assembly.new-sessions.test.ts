@@ -301,7 +301,7 @@ Use only task-relevant comments
 <comment_thread>
 	<root_comment>
 		<author>@Alice</author>
-		<timestamp>${olderRootTime.toLocaleString()}</timestamp>
+		<timestamp>${olderRootTime.toISOString()}</timestamp>
 		<content>
 Older context
 		</content>
@@ -309,14 +309,14 @@ Older context
   <replies>
 		<reply>
 			<author>@Alice</author>
-			<timestamp>${olderReplyTime.toLocaleString()}</timestamp>
+			<timestamp>${olderReplyTime.toISOString()}</timestamp>
 			<content>
 First detail
 			</content>
 		</reply>
 		<reply>
 			<author>@Bob</author>
-			<timestamp>${newerReplyTime.toLocaleString()}</timestamp>
+			<timestamp>${newerReplyTime.toISOString()}</timestamp>
 			<content>
 Second detail
 			</content>
@@ -327,7 +327,7 @@ Second detail
 <comment_thread>
 	<root_comment>
 		<author>@Bob</author>
-		<timestamp>${newerRootTime.toLocaleString()}</timestamp>
+		<timestamp>${newerRootTime.toISOString()}</timestamp>
 		<content>
 Newer context
 		</content>
