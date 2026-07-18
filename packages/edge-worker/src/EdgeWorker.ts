@@ -785,8 +785,8 @@ export class EdgeWorker extends EventEmitter {
 			async (changes: RepositoryChanges) => {
 				this.updateLinearWorkspaceTokens(changes.newConfig);
 				await this.removeDeletedRepositories(changes.removed);
-				await this.updateModifiedRepositories(changes.modified);
-				await this.addNewRepositories(changes.added);
+				this.configManager.applyModifiedRepositories(changes.modified);
+				this.configManager.applyAddedRepositories(changes.added);
 				// Live-update sandbox / egress proxy settings
 				await this.sandboxManager.applyConfigChanges(changes.newConfig.sandbox);
 				// `changes.newConfig` is reconcile's already-normalized `merged`.
@@ -1602,19 +1602,11 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 	 * and pushes the updated workspace configs to `AttachmentService`.
 	 */
 	private updateLinearWorkspaceTokens(newConfig: EdgeWorkerConfig): void {
-		const oldWorkspaces = this.config.linearWorkspaces ?? {};
+		const tokenChanges =
+			this.configManager.computeWorkspaceTokenChanges(newConfig);
 		const newWorkspaces = newConfig.linearWorkspaces ?? {};
 
-		let anyTokenChanged = false;
-
-		for (const [workspaceId, newWsConfig] of Object.entries(newWorkspaces)) {
-			const oldToken = oldWorkspaces[workspaceId]?.linearToken;
-			const newToken = newWsConfig.linearToken;
-
-			if (oldToken === newToken) continue;
-
-			anyTokenChanged = true;
-
+		for (const { workspaceId, newToken } of tokenChanges) {
 			// Update existing issue tracker in-place
 			const issueTracker = this.issueTrackers.get(workspaceId);
 			if (issueTracker) {
@@ -1639,74 +1631,9 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 			}
 		}
 
-		if (anyTokenChanged) {
+		if (tokenChanges.length > 0) {
 			// Push refreshed workspace configs to AttachmentService
 			this.attachmentService.setLinearWorkspaces(newWorkspaces);
-		}
-	}
-
-	/**
-	 * Add new repositories to the running EdgeWorker
-	 */
-	private async addNewRepositories(repos: RepositoryConfig[]): Promise<void> {
-		for (const repo of repos) {
-			if (repo.isActive === false) {
-				this.logger.info(`⏭️  Skipping inactive repository: ${repo.name}`);
-				continue;
-			}
-
-			try {
-				this.logger.info(`➕ Adding repository: ${repo.name} (${repo.id})`);
-
-				// Paths already normalized by reconcile's normalizeConfigPaths.
-				this.repositories.set(repo.id, repo);
-
-				this.logger.info(`✅ Repository added successfully: ${repo.name}`);
-			} catch (error) {
-				this.logger.error(`❌ Failed to add repository ${repo.name}:`, error);
-			}
-		}
-	}
-
-	/**
-	 * Update existing repositories
-	 */
-	private async updateModifiedRepositories(
-		repos: RepositoryConfig[],
-	): Promise<void> {
-		for (const repo of repos) {
-			try {
-				const oldRepo = this.repositories.get(repo.id);
-				if (!oldRepo) {
-					this.logger.warn(
-						`⚠️  Repository ${repo.id} not found for update, skipping`,
-					);
-					continue;
-				}
-
-				this.logger.info(`🔄 Updating repository: ${repo.name} (${repo.id})`);
-
-				// Paths already normalized by reconcile's normalizeConfigPaths.
-				this.repositories.set(repo.id, repo);
-
-				// If active status changed
-				if (oldRepo.isActive !== repo.isActive) {
-					if (repo.isActive === false) {
-						this.logger.info(
-							`  ⏸️  Repository set to inactive - existing sessions will continue`,
-						);
-					} else {
-						this.logger.info(`  ▶️  Repository reactivated`);
-					}
-				}
-
-				this.logger.info(`✅ Repository updated successfully: ${repo.name}`);
-			} catch (error) {
-				this.logger.error(
-					`❌ Failed to update repository ${repo.name}:`,
-					error,
-				);
-			}
 		}
 	}
 
@@ -1718,8 +1645,6 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 	): Promise<void> {
 		for (const repo of repos) {
 			try {
-				this.logger.info(`🗑️  Removing repository: ${repo.name} (${repo.id})`);
-
 				// Check for active sessions for this repository
 				const allActiveSessions = this.agentSessionManager.getActiveSessions();
 				const activeSessions = allActiveSessions.filter(
@@ -1782,9 +1707,7 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 				// needed by other repositories in the same workspace, or by new
 				// repositories about to be added in the same configChanged cycle.
 				// They will be naturally replaced when workspace tokens are updated.
-				this.repositories.delete(repo.id);
-
-				this.logger.info(`✅ Repository removed successfully: ${repo.name}`);
+				this.configManager.applyRemovedRepositories([repo]);
 			} catch (error) {
 				this.logger.error(
 					`❌ Failed to remove repository ${repo.name}:`,
