@@ -456,6 +456,31 @@ export const EdgeConfigSchema = z.object({
 	claudeDefaultEffort: EffortLevelSchema.optional(),
 
 	/**
+	 * Maximum length, in characters, of a single Bash tool result before the
+	 * bundled Claude CLI truncates it. Forwarded to the CLI subprocess as the
+	 * `BASH_MAX_OUTPUT_LENGTH` env var.
+	 *
+	 * A giant command output (a build log, `cat` of a huge file) otherwise lands
+	 * in the transcript verbatim and is re-written to the prompt cache on every
+	 * subsequent turn — dead weight that grows the per-turn context tax. Capping
+	 * per-command output keeps that bounded. When unset, the CLI's built-in
+	 * default applies. Claude runner only; Cursor manages its own tool output.
+	 */
+	claudeBashMaxOutputLength: z.number().int().positive().optional(),
+
+	/**
+	 * Maximum number of tokens a single MCP tool result may contribute before the
+	 * bundled Claude CLI truncates it. Forwarded to the CLI subprocess as the
+	 * `MAX_MCP_OUTPUT_TOKENS` env var.
+	 *
+	 * Same transcript- and cache-bloat motivation as
+	 * `claudeBashMaxOutputLength`, applied to oversized MCP responses. When
+	 * unset, the CLI's built-in default applies. Claude runner only; Cursor
+	 * manages its own tool output.
+	 */
+	claudeMcpMaxOutputTokens: z.number().int().positive().optional(),
+
+	/**
 	 * Model for the read-only `explore` subagent Cyrus registers (an alias like
 	 * `haiku` / `sonnet`, or a full model id). Claude runner only.
 	 *

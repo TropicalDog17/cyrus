@@ -44,6 +44,7 @@ export {
 } from "./sandbox-requirements.js";
 export {
 	buildBaseSessionEnv,
+	buildToolOutputCapEnv,
 	CYRUS_SESSION_ENV,
 	normalizeMcpHttpTransport,
 } from "./session-env.js";

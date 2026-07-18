@@ -893,6 +893,11 @@ export class SessionOrchestrator {
 				config.claudeAutoCompactWindow,
 				this.deps.logger,
 			),
+			// Tool-output caps (Claude runner only). Bound how much a single
+			// oversized Bash/MCP result can bloat the transcript — and every
+			// subsequent prompt-cache write. Unset preserves the CLI defaults.
+			bashMaxOutputLength: config.claudeBashMaxOutputLength,
+			mcpMaxOutputTokens: config.claudeMcpMaxOutputTokens,
 			// Model for the read-only `explore` subagent (Claude runner only).
 			// Unset registers no such agent, so delegation keeps inheriting the
 			// session model — today's behavior.

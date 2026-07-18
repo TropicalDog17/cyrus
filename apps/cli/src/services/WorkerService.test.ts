@@ -31,6 +31,8 @@ const EDGE_CONFIG: EdgeConfig = {
 	claudeDefaultFallbackModel: "haiku",
 	claudeAutoCompactWindow: 120_000,
 	claudeDefaultEffort: "high",
+	claudeBashMaxOutputLength: 30_000,
+	claudeMcpMaxOutputTokens: 25_000,
 	claudeSubagentModel: "haiku",
 	claudeSessionKeepAliveMinutes: 30,
 	claudeMaxWarmIdleSessions: 4,

@@ -76,6 +76,31 @@ export function buildBaseSessionEnv(
 }
 
 /**
+ * Build the env vars that cap how much a single tool result can contribute to
+ * the transcript. The bundled Claude CLI honors `BASH_MAX_OUTPUT_LENGTH` (Bash
+ * result characters) and `MAX_MCP_OUTPUT_TOKENS` (MCP result tokens); without a
+ * cap an oversized result lands in the transcript verbatim and is re-written to
+ * the prompt cache on every subsequent turn.
+ *
+ * Only configured caps are emitted, so an unset value preserves the CLI's own
+ * default. Kept here (not inline in ClaudeRunner) so the cold-start and
+ * warm-pool paths emit an identical set of keys from one source of truth.
+ */
+export function buildToolOutputCapEnv(caps: {
+	bashMaxOutputLength?: number;
+	mcpMaxOutputTokens?: number;
+}): Record<string, string> {
+	const env: Record<string, string> = {};
+	if (caps.bashMaxOutputLength !== undefined) {
+		env.BASH_MAX_OUTPUT_LENGTH = String(caps.bashMaxOutputLength);
+	}
+	if (caps.mcpMaxOutputTokens !== undefined) {
+		env.MAX_MCP_OUTPUT_TOKENS = String(caps.mcpMaxOutputTokens);
+	}
+	return env;
+}
+
+/**
  * Normalize MCP server configs loaded from JSON files.
  *
  * Config files (.mcp.json, mcp-*.json) often omit the `type` field,

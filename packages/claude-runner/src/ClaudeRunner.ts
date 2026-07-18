@@ -49,6 +49,7 @@ import {
 } from "./sandbox-requirements.js";
 import {
 	buildBaseSessionEnv,
+	buildToolOutputCapEnv,
 	normalizeMcpHttpTransport,
 } from "./session-env.js";
 import type {
@@ -802,6 +803,16 @@ export class ClaudeRunner
 						// See: CYPACK-1108.
 						...this.repositoryEnv,
 						...this.config.additionalEnv,
+						// Cap oversized tool output so a single huge Bash/MCP result
+						// doesn't bloat the transcript and get re-written to the prompt
+						// cache every turn. Emitted as first-class env vars AFTER
+						// additionalEnv, never via it: buildSandboxConfig assigns
+						// additionalEnv wholesale and would otherwise clobber these. Only
+						// configured caps appear, so unset preserves the CLI defaults.
+						...buildToolOutputCapEnv({
+							bashMaxOutputLength: this.config.bashMaxOutputLength,
+							mcpMaxOutputTokens: this.config.mcpMaxOutputTokens,
+						}),
 						// When logging at DEBUG level, enable the SDK's own debug output so
 						// --debug-to-stderr and DEBUG=1 propagate to the Claude subprocess.
 						// Explicitly set or unset to override any leaked value from process.env.

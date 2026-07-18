@@ -71,6 +71,22 @@ export interface ClaudeRunnerConfig extends AgentRunnerConfig {
 	 */
 	effort?: EffortLevel;
 	/**
+	 * Maximum length (characters) of a single Bash tool result before the CLI
+	 * truncates it. Emitted to the Claude subprocess as the
+	 * `BASH_MAX_OUTPUT_LENGTH` env var. When unset, the CLI's built-in default
+	 * applies. Capping oversized command output keeps it out of the transcript
+	 * and off every subsequent prompt-cache write.
+	 */
+	bashMaxOutputLength?: number;
+	/**
+	 * Maximum tokens a single MCP tool result may contribute before the CLI
+	 * truncates it. Emitted to the Claude subprocess as the
+	 * `MAX_MCP_OUTPUT_TOKENS` env var. When unset, the CLI's built-in default
+	 * applies. Same transcript/cache-bloat motivation as
+	 * {@link ClaudeRunnerConfig.bashMaxOutputLength}.
+	 */
+	mcpMaxOutputTokens?: number;
+	/**
 	 * Model for the read-only `explore` subagent Cyrus registers (an alias like
 	 * `haiku` / `sonnet`, or a full model id). When unset, no such agent is
 	 * registered and delegation falls back to the SDK's built-in agents, which
