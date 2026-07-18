@@ -215,6 +215,9 @@ export class ConfigManager extends EventEmitter {
 					parsedConfig.defaultFallbackModel ||
 					this.config.claudeDefaultFallbackModel ||
 					this.config.defaultFallbackModel,
+				claudeColdResumeSummarizeThresholdTokens:
+					parsedConfig.claudeColdResumeSummarizeThresholdTokens ??
+					this.config.claudeColdResumeSummarizeThresholdTokens,
 				geminiDefaultModel:
 					parsedConfig.geminiDefaultModel || this.config.geminiDefaultModel,
 				codexDefaultModel:
@@ -340,6 +343,7 @@ export class ConfigManager extends EventEmitter {
 			"defaultRunner",
 			"claudeDefaultModel",
 			"claudeDefaultFallbackModel",
+			"claudeColdResumeSummarizeThresholdTokens",
 			"geminiDefaultModel",
 			"codexDefaultModel",
 			"cursorDefaultModel",

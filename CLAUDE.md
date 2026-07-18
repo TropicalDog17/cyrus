@@ -456,6 +456,10 @@ The agent automatically moves issues to the "started" state when assigned. Linea
 
    Symptom of forgetting this: self-host sessions crash with `ENOENT: no such file or directory, open '~/.cyrus/...'` while cloud sessions (which get absolute paths from cyrus-hosted) work fine. This bit us with the three platform MCP config arrays added in CYHOST-967 / v0.2.53 — they were the only path-bearing fields on `EdgeWorkerConfig` that bypassed normalization, and crashed every self-host session that had a connected platform MCP integration.
 
+12. **Cold-resume summarize-and-restart (`claudeColdResumeSummarizeThresholdTokens`)**: When an oversized Claude resume is replaced by a Haiku-summarized fresh session (`EdgeWorker.maybeSummarizeColdResume`), you **must NOT clear `session.claudeSessionId`** on success. Two mechanisms depend on it still being set at fresh-start time: runner pinning in `RunnerConfigBuilder` (a set `claudeSessionId` keeps the runner type pinned to `claude` even though we're building a "new" session), and the init-message rebind in `AgentSessionManager.updateSessionWithClaudeSessionId` (which overwrites `claudeSessionId` with the *new* Claude session's ID once the fresh session initializes). The trigger only sets the local `effectiveResumeSessionId = undefined` (so the SDK doesn't `--resume` the giant transcript) and `buildAsNewSession = true` (so the prompt gets the `<previous_session_summary>` block) — it never touches `session.claudeSessionId`.
+
+    The transcript is located by scanning `~/.claude/projects/*/<sessionId>.jsonl` (`findTranscriptPath`) rather than reconstructing the path from the cwd, because the `projects/<slug>` directory name is derived from an undocumented cwd-sanitization rule that has changed between Claude Code versions — a two-level scan is version-proof.
+
 ## Dependency Security Policy (MANDATE)
 
 Our team's mandated approach for addressing Dependabot advisories and other

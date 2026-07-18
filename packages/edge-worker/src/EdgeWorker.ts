@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { execSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { LinearClient } from "@linear/sdk";
 import type {
@@ -15,8 +15,10 @@ import {
 	buildBaseSessionEnv,
 	buildHomeDirectoryDisallowedTools,
 	ClaudeRunner,
+	findTranscriptPath,
 	HttpSessionStore,
 	normalizeMcpHttpTransport,
+	summarizeTranscript,
 } from "cyrus-claude-runner";
 import { getCyrusAppUrl } from "cyrus-cloudflare-tunnel-client";
 import { CodexRunner } from "cyrus-codex-runner";
@@ -6134,6 +6136,7 @@ ${taskSection}`;
 		attachmentManifest?: string,
 		commentAuthor?: string,
 		commentTimestamp?: string,
+		previousSessionSummary?: string,
 	): Promise<string> {
 		// Fetch labels for system prompt determination
 		const labels = await this.fetchIssueLabels(fullIssue);
@@ -6148,6 +6151,7 @@ ${taskSection}`;
 			commentAuthor,
 			commentTimestamp,
 			attachmentManifest,
+			previousSessionSummary,
 			isNewSession,
 			isStreaming: false, // This path is only for non-streaming prompts
 			labels,
@@ -6290,6 +6294,20 @@ ${taskSection}`;
 		parts.push(issueContext.prompt);
 		components.push("issue-context");
 
+		// 5b. Add previous-session summary (cold-resume-summarize restart).
+		// When a resume's transcript exceeded the configured threshold, the prior
+		// session was summarized by Haiku and a fresh session started; seed that
+		// summary here so the new session can continue the work.
+		if (input.previousSessionSummary?.trim()) {
+			parts.push(
+				this.buildPreviousSessionSummaryBlock(
+					input.session,
+					input.previousSessionSummary,
+				),
+			);
+			components.push("session-summary");
+		}
+
 		// 4. Add user comment (if present)
 		// Skip for mention-triggered prompts since the comment is already in the mention block
 		if (input.userComment.trim() && !input.isMentionTriggered) {
@@ -6326,6 +6344,39 @@ ${input.userComment}
 				isStreaming: false,
 			},
 		};
+	}
+
+	/**
+	 * Build a `<previous_session_summary>` block for the cold-resume-summarize
+	 * restart path. Includes the branches the prior session was working on, the
+	 * Haiku-generated summary, and a note reminding the fresh session that work
+	 * may already exist on the branch / a PR may be open.
+	 */
+	private buildPreviousSessionSummaryBlock(
+		session: CyrusAgentSession,
+		summary: string,
+	): string {
+		const branches = Array.from(
+			new Set(
+				(session.repositories ?? [])
+					.map((repo) => repo.branchName)
+					.filter((b): b is string => Boolean(b)),
+			),
+		);
+		const branchLines =
+			branches.length > 0
+				? branches.map((b) => `    <branch>${b}</branch>`).join("\n")
+				: "";
+		const branchesBlock = branchLines
+			? `  <branches>\n${branchLines}\n  </branches>\n`
+			: "";
+
+		return `<previous_session_summary>
+${branchesBlock}  <summary>
+${summary.trim()}
+  </summary>
+  <note>This summary replaces a prior session that grew too large to resume directly. Work may already exist on the branch above and a pull request may already be open — check the current state with git and gh before redoing anything.</note>
+</previous_session_summary>`;
 	}
 
 	/**
@@ -7266,6 +7317,145 @@ ${input.userComment}
 		);
 	}
 
+	/** Minimum sane cold-resume summarize threshold; below this we warn + disable. */
+	private static readonly MIN_COLD_RESUME_THRESHOLD_TOKENS = 20_000;
+
+	/**
+	 * Resolve the effective cold-resume summarize threshold from config.
+	 * Returns undefined when disabled (unset) or when the configured value is
+	 * below the minimum sane value (warn + ignore). Mirrors the resolve-helper
+	 * pattern used for other bounded numeric config knobs.
+	 */
+	private resolveColdResumeThreshold(): number | undefined {
+		const configured = this.config.claudeColdResumeSummarizeThresholdTokens;
+		if (configured === undefined) return undefined;
+		if (configured < EdgeWorker.MIN_COLD_RESUME_THRESHOLD_TOKENS) {
+			this.logger.warn(
+				`claudeColdResumeSummarizeThresholdTokens=${configured} is below the minimum of ${EdgeWorker.MIN_COLD_RESUME_THRESHOLD_TOKENS}; ignoring (cold-resume summarize disabled)`,
+			);
+			return undefined;
+		}
+		return configured;
+	}
+
+	/**
+	 * Estimate the token size of a resume's prior context.
+	 *
+	 * Prefers the last turn's usage signal (input + cache-read + cache-write)
+	 * when present on the session; otherwise falls back to transcript file size
+	 * divided by 4 (a rough bytes-per-token estimate). Returns undefined if
+	 * neither signal is available.
+	 */
+	private async estimateResumeContextTokens(
+		session: CyrusAgentSession,
+		transcriptPath: string,
+	): Promise<number | undefined> {
+		const usage = session.metadata?.usage as
+			| Record<string, unknown>
+			| undefined;
+		if (usage) {
+			const num = (...keys: string[]): number => {
+				for (const key of keys) {
+					const value = usage[key];
+					if (typeof value === "number" && Number.isFinite(value)) {
+						return value;
+					}
+				}
+				return 0;
+			};
+			const fromUsage =
+				num("input_tokens", "inputTokens") +
+				num("cache_read_input_tokens", "cacheReadInputTokens") +
+				num("cache_creation_input_tokens", "cacheCreationInputTokens");
+			if (fromUsage > 0) return fromUsage;
+		}
+
+		try {
+			const { size } = await stat(transcriptPath);
+			return Math.floor(size / 4);
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * Cold-resume summarize-and-restart trigger.
+	 *
+	 * When a Claude resume's transcript has grown past the configured threshold,
+	 * summarize it with a one-shot Haiku call and return the summary so the
+	 * caller can start a fresh session seeded with it. Returns undefined (fall
+	 * through to a normal resume) when the feature is disabled, no transcript is
+	 * found, the estimate is under threshold, or summarization fails — the
+	 * feature must never break a resume that would otherwise have succeeded.
+	 */
+	private async maybeSummarizeColdResume(
+		session: CyrusAgentSession,
+		sessionId: string,
+		claudeSessionId: string,
+		workspaceId: string,
+	): Promise<string | undefined> {
+		const threshold = this.resolveColdResumeThreshold();
+		if (threshold === undefined) return undefined;
+
+		let transcriptPath: string | null = null;
+		try {
+			transcriptPath = await findTranscriptPath(claudeSessionId);
+		} catch (error) {
+			this.logger.warn(`Cold-resume: transcript lookup failed`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return undefined;
+		}
+		if (!transcriptPath) {
+			this.logger.debug(
+				`Cold-resume: no transcript found for ${claudeSessionId}; skipping summarize`,
+			);
+			return undefined;
+		}
+
+		const estimatedTokens = await this.estimateResumeContextTokens(
+			session,
+			transcriptPath,
+		);
+		if (estimatedTokens === undefined || estimatedTokens <= threshold) {
+			return undefined;
+		}
+
+		this.logger.info(
+			`Cold-resume: estimated ${estimatedTokens} tokens > threshold ${threshold}; summarizing ${transcriptPath}`,
+		);
+
+		try {
+			await this.activityPoster.postThoughtActivity(
+				sessionId,
+				workspaceId,
+				"Prior conversation exceeds the resume threshold — summarizing and starting fresh.",
+			);
+		} catch (error) {
+			// Best-effort thought; never block summarization on it.
+			this.logger.warn(`Cold-resume: failed to post summarize thought`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+
+		try {
+			const summary = await summarizeTranscript({
+				transcriptPath,
+				logger: this.logger,
+			});
+			this.logger.info(
+				`Cold-resume: summarized transcript into ${summary.length} chars; starting fresh session`,
+			);
+			return summary;
+		} catch (error) {
+			this.logger.warn(
+				`Cold-resume: summarization failed; falling through to normal resume`,
+				{ error: error instanceof Error ? error.message : String(error) },
+			);
+			return undefined;
+		}
+	}
+
 	/**
 	 * Resume or create an Agent session with the given prompt
 	 * This is the core logic for handling prompted agent activities
@@ -7407,6 +7597,34 @@ ${input.userComment}
 			`[resumeAgentSession] needsNewSession=${needsNewSession}, resumeSessionId=${resumeSessionId ?? "none"}`,
 		);
 
+		// Cold-resume summarize-and-restart: when a Claude resume's transcript has
+		// grown past the configured threshold, resuming it rewrites the entire
+		// transcript to the prompt cache. Instead, summarize it with a one-shot
+		// Haiku call and start a fresh session seeded with the summary. On any
+		// failure we fall through to a normal resume — this feature must never
+		// break a resume that would otherwise have succeeded.
+		let effectiveResumeSessionId = resumeSessionId;
+		let previousSessionSummary: string | undefined;
+		let buildAsNewSession = isNewSession;
+		if (resumeSessionId && resumeSessionId === session.claudeSessionId) {
+			const summary = await this.maybeSummarizeColdResume(
+				session,
+				sessionId,
+				resumeSessionId,
+				resolvedWorkspaceId,
+			);
+			if (summary) {
+				// Success: build as a fresh session seeded with the summary.
+				// Crucially, do NOT clear session.claudeSessionId — runner pinning
+				// (RunnerConfigBuilder) and the init-message rebind
+				// (AgentSessionManager) both depend on it; the rebind overwrites it
+				// with the new Claude session ID once the fresh session initializes.
+				effectiveResumeSessionId = undefined;
+				previousSessionSummary = summary;
+				buildAsNewSession = true;
+			}
+		}
+
 		// Create runner configuration
 		// buildAgentRunnerConfig determines runner type from labels for new sessions
 		// For existing sessions, we still need labels for model override but ignore runner type
@@ -7419,7 +7637,7 @@ ${input.userComment}
 				allowedTools,
 				allowedDirectories,
 				disallowedTools,
-				resumeSessionId,
+				effectiveResumeSessionId,
 				labels, // Always pass labels to preserve model override
 				fullIssue.description || undefined, // Description tags can override label selectors
 				maxTurns, // Pass maxTurns if specified
@@ -7438,7 +7656,7 @@ ${input.userComment}
 
 		// Prepare the full prompt
 		const fullPrompt = await this.buildSessionPrompt(
-			isNewSession,
+			buildAsNewSession,
 			session,
 			fullIssue,
 			repository,
@@ -7446,6 +7664,7 @@ ${input.userComment}
 			attachmentManifest,
 			commentAuthor,
 			commentTimestamp,
+			previousSessionSummary,
 		);
 
 		// Start session - use streaming mode if supported for ability to add messages later

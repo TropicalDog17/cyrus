@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Very long-running issues no longer degrade when Cyrus picks them back up after a long idle gap. When resuming would otherwise replay an oversized conversation, Cyrus now writes a short summary of the work so far and starts a fresh session from it — keeping responses fast and focused instead of dragging the entire history along. This is opt-in via a new `claudeColdResumeSummarizeThresholdTokens` setting; when it isn't set, resumes behave exactly as before, and if summarizing ever fails Cyrus quietly falls back to a normal resume.
+
 ### Fixed
 - Cyrus no longer loses its memory of in-progress issues if it is restarted or killed at the wrong moment. Session state is now saved atomically and can never be left half-written; if the state file is ever damaged, Cyrus automatically recovers from a backup instead of silently starting fresh and abandoning every active issue.
 - When a working session crashes unexpectedly (its underlying process dies or the connection breaks mid-task), Cyrus now tells you on the issue that the session ended and how to retry, instead of silently leaving the issue stuck "In Progress" with no explanation.

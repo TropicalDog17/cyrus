@@ -136,6 +136,11 @@ export class PromptScenario {
 		return this;
 	}
 
+	withPreviousSessionSummary(summary: string) {
+		this.input.previousSessionSummary = summary;
+		return this;
+	}
+
 	withLabels(...labels: string[]) {
 		this.input.labels = labels;
 		return this;

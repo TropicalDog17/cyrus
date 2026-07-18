@@ -347,6 +347,19 @@ export const EdgeConfigSchema = z.object({
 	/** Default Claude fallback model if primary Claude model is unavailable */
 	claudeDefaultFallbackModel: z.string().optional(),
 
+	/**
+	 * Estimated transcript size (in tokens) above which a cold resume is
+	 * replaced by a Haiku-summarized fresh session instead of resuming the
+	 * whole transcript. Unset = disabled (opt-in rollout). Recommended value:
+	 * 60000. Values below 20000 are warned about and ignored via
+	 * `resolveColdResumeThreshold`.
+	 */
+	claudeColdResumeSummarizeThresholdTokens: z
+		.number()
+		.int()
+		.positive()
+		.optional(),
+
 	/** Default Gemini model to use across all repositories (e.g., "gemini-2.5-pro") */
 	geminiDefaultModel: z.string().optional(),
 
