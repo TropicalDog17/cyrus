@@ -26,10 +26,16 @@ import {
 	type RepositoryConfig,
 	type Webhook,
 } from "cyrus-core";
-import type {
-	GitHubCommentWebhookEvent,
-	GitHubPushPayload,
-	GitHubWebhookEvent,
+import {
+	extractCommentAuthor,
+	extractCommentBody,
+	extractPRNumber,
+	extractRepoFullName,
+	type GitHubCommentWebhookEvent,
+	type GitHubPushPayload,
+	type GitHubWebhookEvent,
+	isCommentOnPullRequest,
+	isPullRequestReviewPayload,
 } from "cyrus-github-event-transport";
 import type { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
 import type { RepositoryRouter } from "./RepositoryRouter.js";
@@ -636,6 +642,135 @@ export class WebhookRouter {
 			return;
 		}
 		await this.deps.handleGitHubComment(event as GitHubCommentWebhookEvent);
+	}
+
+	/**
+	 * Find a repository configuration that matches a GitHub repository URL.
+	 * Matches against the githubUrl field in repository config. Ported
+	 * verbatim from the historical EdgeWorker.findRepositoryByGitHubUrl, which
+	 * now delegates here (its private signature is kept so the two internal
+	 * callers and the pr-review-trigger test override stay untouched).
+	 */
+	findRepositoryByGitHubUrl(repoFullName: string): RepositoryConfig | null {
+		for (const repo of this.deps.allRepositories()) {
+			if (!repo.githubUrl) continue;
+			// Match against full name (owner/repo) or URL containing it
+			if (
+				repo.githubUrl.includes(repoFullName) ||
+				repo.githubUrl.endsWith(`/${repoFullName}`)
+			) {
+				return repo;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Gate a GitHub comment/review webhook before the acting body runs. Ports
+	 * the skip-guard ladder from the historical EdgeWorker.handleGitHubWebhook
+	 * prologue: non-PR comment, bot self-comment, non-`changes_requested`
+	 * review state, the prReviewTrigger toggle, and the missing-@mention check.
+	 *
+	 * Deliberately does NOT resolve the repository — repo lookup stays in the
+	 * EdgeWorker acting body (via the findRepositoryByGitHubUrl delegator) so
+	 * EdgeWorker.pr-review-trigger.test.ts's override of that delegator still
+	 * governs it.
+	 */
+	gateGitHubComment(
+		event: GitHubCommentWebhookEvent,
+		opts: { prReviewTrigger?: boolean },
+	): { proceed: boolean } {
+		// Only handle comments on pull requests
+		if (!isCommentOnPullRequest(event)) {
+			this.logger.debug("Ignoring GitHub comment on non-PR issue");
+			return { proceed: false };
+		}
+
+		const repoFullName = extractRepoFullName(event);
+		const prNumber = extractPRNumber(event);
+		const commentBody = extractCommentBody(event);
+		const commentAuthor = extractCommentAuthor(event);
+
+		const isPullRequestReview = isPullRequestReviewPayload(event.payload);
+
+		// Skip comments from the bot itself to prevent infinite loops
+		const botUsername = process.env.GITHUB_BOT_USERNAME;
+		if (botUsername && commentAuthor === botUsername) {
+			this.logger.debug(
+				`Ignoring comment from bot user @${botUsername} on ${repoFullName}#${prNumber}`,
+			);
+			return { proceed: false };
+		}
+
+		// For pull_request_review events, defensively check review state
+		// (must happen before the mention check — reviews don't contain @mentions)
+		if (isPullRequestReviewPayload(event.payload)) {
+			if (event.payload.review.state !== "changes_requested") {
+				this.logger.debug(
+					`Ignoring pull_request_review with state: ${event.payload.review.state}`,
+				);
+				return { proceed: false };
+			}
+		}
+
+		// Honor the PR-review trigger toggle: when disabled, ignore
+		// pull_request_review events entirely — no acknowledgement comment and
+		// no agent session. Defaults to enabled when the flag is unset.
+		if (isPullRequestReview && opts.prReviewTrigger === false) {
+			this.logger.debug(
+				`PR review trigger is disabled, ignoring pull_request_review on ${repoFullName}#${prNumber}`,
+			);
+			return { proceed: false };
+		}
+
+		// Only trigger on comments that mention the bot (when configured)
+		// Skip this check for pull_request_review events — reviews don't @mention the bot
+		if (
+			!isPullRequestReview &&
+			botUsername &&
+			!commentBody.includes(`@${botUsername}`)
+		) {
+			this.logger.debug(
+				`Ignoring comment without @${botUsername} mention on ${repoFullName}#${prNumber}`,
+			);
+			return { proceed: false };
+		}
+
+		return { proceed: true };
+	}
+
+	/**
+	 * Gate a GitHub push webhook and resolve its target repository/branch.
+	 * Ports the historical EdgeWorker.handleGitHubPushWebhook prologue: only
+	 * branch pushes (not tags), not deletions, and only pushes to a
+	 * configured repository. Returns null on any skip.
+	 */
+	resolveGitHubPushTarget(
+		payload: GitHubPushPayload,
+	): { repository: RepositoryConfig; branchName: string } | null {
+		// Only handle branch pushes (refs/heads/*), not tags
+		if (!payload.ref.startsWith("refs/heads/")) {
+			return null;
+		}
+
+		// Ignore branch deletions
+		if (payload.deleted) {
+			return null;
+		}
+
+		const branchName = payload.ref.replace("refs/heads/", "");
+		const repoFullName = payload.repository.full_name;
+
+		// Find the matching repository config
+		const repository = this.findRepositoryByGitHubUrl(repoFullName);
+		if (!repository) {
+			this.logger.debug(
+				`No repository configured for GitHub push from ${repoFullName}`,
+			);
+			return null;
+		}
+
+		return { repository, branchName };
 	}
 
 	/**

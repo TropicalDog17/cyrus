@@ -62,7 +62,6 @@ import {
 	GitHubEventTransport,
 	type GitHubPushPayload,
 	type GitHubWebhookEvent,
-	isCommentOnPullRequest,
 	isIssueCommentPayload,
 	isPullRequestReviewCommentPayload,
 	isPullRequestReviewPayload,
@@ -1101,9 +1100,11 @@ export class EdgeWorker extends EventEmitter {
 		this.activeWebhookCount++;
 
 		try {
-			// Only handle comments on pull requests
-			if (!isCommentOnPullRequest(event)) {
-				this.logger.debug("Ignoring GitHub comment on non-PR issue");
+			if (
+				!this.webhookRouter.gateGitHubComment(event, {
+					prReviewTrigger: this.config.prReviewTrigger,
+				}).proceed
+			) {
 				return;
 			}
 
@@ -1113,51 +1114,8 @@ export class EdgeWorker extends EventEmitter {
 			const commentAuthor = extractCommentAuthor(event);
 			const prTitle = extractPRTitle(event);
 			const sessionKey = extractSessionKey(event);
-
 			const isPullRequestReview = isPullRequestReviewPayload(event.payload);
-
-			// Skip comments from the bot itself to prevent infinite loops
 			const botUsername = process.env.GITHUB_BOT_USERNAME;
-			if (botUsername && commentAuthor === botUsername) {
-				this.logger.debug(
-					`Ignoring comment from bot user @${botUsername} on ${repoFullName}#${prNumber}`,
-				);
-				return;
-			}
-
-			// For pull_request_review events, defensively check review state
-			// (must happen before the mention check — reviews don't contain @mentions)
-			if (isPullRequestReviewPayload(event.payload)) {
-				if (event.payload.review.state !== "changes_requested") {
-					this.logger.debug(
-						`Ignoring pull_request_review with state: ${event.payload.review.state}`,
-					);
-					return;
-				}
-			}
-
-			// Honor the PR-review trigger toggle: when disabled, ignore
-			// pull_request_review events entirely — no acknowledgement comment and
-			// no agent session. Defaults to enabled when the flag is unset.
-			if (isPullRequestReview && this.config.prReviewTrigger === false) {
-				this.logger.debug(
-					`PR review trigger is disabled, ignoring pull_request_review on ${repoFullName}#${prNumber}`,
-				);
-				return;
-			}
-
-			// Only trigger on comments that mention the bot (when configured)
-			// Skip this check for pull_request_review events — reviews don't @mention the bot
-			if (
-				!isPullRequestReview &&
-				botUsername &&
-				!commentBody.includes(`@${botUsername}`)
-			) {
-				this.logger.debug(
-					`Ignoring comment without @${botUsername} mention on ${repoFullName}#${prNumber}`,
-				);
-				return;
-			}
 
 			this.logger.info(
 				`Processing GitHub webhook: ${repoFullName}#${prNumber} by @${commentAuthor}${isPullRequestReview ? " (pull_request_review)" : ""}`,
@@ -1490,27 +1448,12 @@ export class EdgeWorker extends EventEmitter {
 	private async handleGitHubPushWebhook(
 		payload: GitHubPushPayload,
 	): Promise<void> {
-		// Only handle branch pushes (refs/heads/*), not tags
-		if (!payload.ref.startsWith("refs/heads/")) {
+		const target = this.webhookRouter.resolveGitHubPushTarget(payload);
+		if (!target) {
 			return;
 		}
-
-		// Ignore branch deletions
-		if (payload.deleted) {
-			return;
-		}
-
-		const branchName = payload.ref.replace("refs/heads/", "");
+		const { repository, branchName } = target;
 		const repoFullName = payload.repository.full_name;
-
-		// Find the matching repository config
-		const repository = this.findRepositoryByGitHubUrl(repoFullName);
-		if (!repository) {
-			this.logger.debug(
-				`No repository configured for GitHub push from ${repoFullName}`,
-			);
-			return;
-		}
 
 		// Find active sessions tracking this branch as their base branch
 		const sessions = this.agentSessionManager.getSessionsByBaseBranch(
@@ -1590,17 +1533,7 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 	private findRepositoryByGitHubUrl(
 		repoFullName: string,
 	): RepositoryConfig | null {
-		for (const repo of this.repositories.values()) {
-			if (!repo.githubUrl) continue;
-			// Match against full name (owner/repo) or URL containing it
-			if (
-				repo.githubUrl.includes(repoFullName) ||
-				repo.githubUrl.endsWith(`/${repoFullName}`)
-			) {
-				return repo;
-			}
-		}
-		return null;
+		return this.webhookRouter.findRepositoryByGitHubUrl(repoFullName);
 	}
 
 	/**
