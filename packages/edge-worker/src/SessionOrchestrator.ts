@@ -20,6 +20,7 @@ import type {
 	IIssueTrackerService,
 	ILogger,
 	Issue,
+	IssueMinimal,
 	RepositoryConfig,
 	RunnerType,
 } from "cyrus-core";
@@ -31,7 +32,16 @@ import {
 import { CursorRunner } from "cyrus-cursor-runner";
 import type {
 	GitHubAppTokenProvider,
+	GitHubCommentService,
+	GitHubCommentWebhookEvent,
 	GitHubWebhookEvent,
+} from "cyrus-github-event-transport";
+import {
+	extractCommentId,
+	extractPRNumber,
+	extractRepoFullName,
+	extractRepoName,
+	extractRepoOwner,
 } from "cyrus-github-event-transport";
 import type { AgentSessionManager } from "./AgentSessionManager.js";
 import type { GitService } from "./GitService.js";
@@ -45,6 +55,7 @@ import type {
 	SkillSessionContext,
 	SkillsPluginResolver,
 } from "./SkillsPluginResolver.js";
+import type { IActivitySink } from "./sinks/IActivitySink.js";
 import type { PromptType } from "./ToolPermissionResolver.js";
 import type { AgentSessionData } from "./types.js";
 import type { WarmSessionPool } from "./WarmSessionPool.js";
@@ -69,6 +80,20 @@ export interface StartSessionRequest {
 	commentBody?: string | null;
 	baseBranchOverrides?: Map<string, string>;
 	routingMethod?: string;
+}
+
+/** Bundle of everything the GitHub acting spine needs (was the tail of `EdgeWorker.handleGitHubWebhook`). */
+export interface StartGitHubSessionRequest {
+	event: GitHubCommentWebhookEvent;
+	repository: RepositoryConfig;
+	workspace: { path: string; isGitWorktree: boolean };
+	branchRef: string;
+	baseBranchRef: string | null;
+	prNumber: number;
+	sessionKey: string;
+	prTitle: string | null;
+	taskInstructions: string;
+	systemPrompt: string;
 }
 
 /**
@@ -205,6 +230,23 @@ export interface SessionOrchestratorDeps {
 	 */
 	getGitHubAppTokenProvider(): GitHubAppTokenProvider | null;
 	getAllRepositories(): RepositoryConfig[];
+	/** Assigned before the orchestrator is constructed; threaded as a direct field (not a getter). */
+	gitHubCommentService: GitHubCommentService;
+	setSessionRepository(sessionId: string, repositoryId: string): void;
+	getActivitySinkForRepo(repositoryId: string): IActivitySink | undefined;
+	buildGithubAllowedTools(repository: RepositoryConfig): string[];
+	/**
+	 * Raw-emit only — unlike {@link SessionOrchestratorDeps.emitSessionStarted},
+	 * this MUST NOT also invoke `config.handlers.onSessionStart`. The GitHub
+	 * acting spine has always emitted the event alone; reusing the Linear
+	 * `emitSessionStarted` dep here would silently add a handler invocation
+	 * for GitHub sessions.
+	 */
+	emitGitHubSessionStarted(
+		issueId: string,
+		issue: Issue,
+		repositoryId: string,
+	): void;
 }
 
 /**
@@ -1261,6 +1303,229 @@ export class SessionOrchestrator {
 				error instanceof Error ? error : new Error(String(error)),
 			);
 			return null;
+		}
+	}
+
+	/**
+	 * Post a reply back to the GitHub PR comment after the session completes.
+	 */
+	private async postGitHubReply(
+		event: GitHubCommentWebhookEvent,
+		runner: IAgentRunner,
+		_repository: RepositoryConfig,
+	): Promise<void> {
+		try {
+			// Get the last assistant message from the runner as the summary
+			const messages = runner.getMessages();
+			const lastAssistantMessage = [...messages]
+				.reverse()
+				.find((m) => m.type === "assistant");
+
+			let summary = "Task completed. Please review the changes on this branch.";
+			if (lastAssistantMessage && lastAssistantMessage.type === "assistant") {
+				const textBlock = lastAssistantMessage.content.find(
+					(block) => block.type === "text" && block.text,
+				);
+				if (textBlock?.type === "text" && textBlock.text) {
+					summary = textBlock.text;
+				}
+			}
+
+			const owner = extractRepoOwner(event);
+			const repo = extractRepoName(event);
+			const prNumber = extractPRNumber(event);
+			const commentId = extractCommentId(event);
+
+			if (!prNumber) {
+				this.deps.logger.warn("Cannot post GitHub reply: no PR number");
+				return;
+			}
+
+			// Resolve GitHub token (installation token > App token > PAT)
+			const token = await this.resolveGitHubToken(event);
+			if (!token) {
+				this.deps.logger.warn(
+					"Cannot post GitHub reply: no installation token or GITHUB_TOKEN configured",
+				);
+				this.deps.logger.debug(
+					`Would have posted reply to ${owner}/${repo}#${prNumber} (comment ${commentId}): ${summary}`,
+				);
+				return;
+			}
+
+			if (event.eventType === "pull_request_review_comment") {
+				// Reply to the specific review comment thread
+				await this.deps.gitHubCommentService.postReviewCommentReply({
+					token,
+					owner,
+					repo,
+					pullNumber: prNumber,
+					commentId,
+					body: summary,
+				});
+			} else {
+				// Post as a regular issue comment on the PR
+				await this.deps.gitHubCommentService.postIssueComment({
+					token,
+					owner,
+					repo,
+					issueNumber: prNumber,
+					body: summary,
+				});
+			}
+
+			this.deps.logger.info(
+				`Posted GitHub reply to ${owner}/${repo}#${prNumber}`,
+			);
+		} catch (error) {
+			this.deps.logger.error(
+				"Failed to post GitHub reply",
+				error instanceof Error ? error : new Error(String(error)),
+			);
+		}
+	}
+
+	/**
+	 * The GitHub acting spine (was the tail of `EdgeWorker.handleGitHubWebhook`):
+	 * create a synthetic internal agent session for the PR, register the
+	 * session->repo mapping and activity sink, derive GitHub allowed/disallowed
+	 * tools, build and start the runner, then post the reply back to GitHub
+	 * once the session completes.
+	 */
+	async startGitHubSession(req: StartGitHubSessionRequest): Promise<void> {
+		const {
+			event,
+			repository,
+			workspace,
+			branchRef,
+			baseBranchRef,
+			prNumber,
+			sessionKey,
+			prTitle,
+			taskInstructions,
+			systemPrompt,
+		} = req;
+		const agentSessionManager = this.deps.agentSessionManager;
+		const repoFullName = extractRepoFullName(event);
+
+		// Check if another active session is already using this branch/workspace
+		const existingSessions =
+			agentSessionManager.getActiveSessionsByBranchName(branchRef);
+		const firstExisting = existingSessions[0];
+		if (firstExisting) {
+			this.deps.logger.warn(
+				`Reusing workspace from active session ${firstExisting.id} — concurrent writes possible`,
+			);
+		}
+
+		// Create a synthetic session for this GitHub PR comment
+		const issueMinimal: IssueMinimal = {
+			id: sessionKey,
+			identifier: `${extractRepoName(event)}#${prNumber}`,
+			title: prTitle || `PR #${prNumber}`,
+			branchName: branchRef,
+		};
+
+		// Create an internal agent session (no Linear session for GitHub)
+		const githubSessionId = `github-${event.deliveryId}`;
+		agentSessionManager.createCyrusAgentSession(
+			githubSessionId,
+			sessionKey,
+			issueMinimal,
+			workspace,
+			"github", // Don't stream activities to Linear for GitHub sources
+			[
+				{
+					repositoryId: repository.id,
+					branchName: branchRef,
+					baseBranchName: baseBranchRef ?? repository.baseBranch,
+				},
+			],
+		);
+
+		// Register session-to-repo mapping and activity sink
+		this.deps.setSessionRepository(githubSessionId, repository.id);
+		const activitySink = this.deps.getActivitySinkForRepo(repository.id);
+		if (activitySink) {
+			agentSessionManager.setActivitySink(githubSessionId, activitySink);
+		}
+
+		const session = agentSessionManager.getSession(githubSessionId);
+		if (!session) {
+			this.deps.logger.error(
+				`Failed to create session for GitHub webhook ${event.deliveryId}`,
+			);
+			return;
+		}
+
+		// Initialize session metadata
+		if (!session.metadata) {
+			session.metadata = {};
+		}
+
+		// Store GitHub-specific metadata for reply posting
+		session.metadata.commentId = String(extractCommentId(event));
+
+		// Build allowed tools using the GitHub platform resolver, which honors
+		// `githubAllowedTools` on the workspace config and falls back to
+		// `GITHUB_DEFAULT_ALLOWED_TOOLS`.
+		const allowedTools = this.deps.buildGithubAllowedTools(repository);
+		const disallowedTools = this.deps.buildDisallowedTools(repository);
+		const allowedDirectories: string[] = [repository.repositoryPath];
+
+		// Create agent runner using the standard config builder
+		const { config: runnerConfig, runnerType } =
+			await this.buildAgentRunnerConfig(
+				session,
+				repository,
+				githubSessionId,
+				systemPrompt,
+				allowedTools,
+				allowedDirectories,
+				disallowedTools,
+				undefined, // resumeSessionId
+				undefined, // labels
+				undefined, // issueDescription
+				200, // maxTurns
+				undefined, // linearWorkspaceId
+				this.deps.buildSkillSessionContext(repository, undefined, session),
+				undefined, // labelPromptModel (no Linear labels for GitHub PRs)
+				undefined, // effort (GitHub PR sessions use SDK default)
+				"github", // sessionPlatform → uses githubMcpConfigs override
+			);
+
+		const runner = this.createRunnerForType(runnerType, runnerConfig);
+
+		// Store the runner in the session manager
+		agentSessionManager.addAgentRunner(githubSessionId, runner);
+
+		// Save persisted state
+		await this.deps.savePersistedState();
+
+		this.deps.emitGitHubSessionStarted(
+			sessionKey,
+			issueMinimal as unknown as Issue,
+			repository.id,
+		);
+
+		this.deps.logger.info(
+			`Starting ${runnerType} runner for GitHub PR ${repoFullName}#${prNumber}`,
+		);
+
+		// Start the session and handle completion
+		try {
+			const sessionInfo = await runner.start(taskInstructions);
+			this.deps.logger.info(`GitHub session started: ${sessionInfo.sessionId}`);
+
+			// When session completes, post the reply back to GitHub
+			await this.postGitHubReply(event, runner, repository);
+		} catch (error) {
+			this.deps.logger.error(
+				`GitHub session error for ${repoFullName}#${prNumber}`,
+				error instanceof Error ? error : new Error(String(error)),
+			);
+		} finally {
+			await this.deps.savePersistedState();
 		}
 	}
 }
