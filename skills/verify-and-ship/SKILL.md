@@ -54,10 +54,14 @@ Resolve the bot mention handle once: use `<github_bot_username>` / `<gitlab_bot_
 
 ### GitHub branch
 
-Create the draft if absent, otherwise reuse the existing one:
+Create the draft if absent, otherwise reuse the existing one.
+
+**Fork safety (load-bearing):** when `origin` is a fork, `gh pr create` defaults the PR to the *upstream parent* repo, silently opening it on someone else's repository. Always pin the target to `origin` with `--repo` and `--head` so the PR lands on the fork. (A 4-digit PR number is a red flag it hit a busy upstream instead of your fork.)
 
 ```bash
-gh pr view --json url,number 2>/dev/null || gh pr create --draft --base <base_branch> --title "[descriptive title]" --body "Work in progress"
+PR_REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"   # resolves to origin
+PR_HEAD="$(git branch --show-current)"                             # no owner: prefix; origin IS the fork
+gh pr view --json url,number 2>/dev/null || gh pr create --repo "$PR_REPO" --head "$PR_HEAD" --draft --base <base_branch> --title "[descriptive title]" --body "Work in progress"
 ```
 
 Write the rendered body template to a file and set it (use `--body-file` so the multi-line template, blockquote, and marker survive shell quoting):
