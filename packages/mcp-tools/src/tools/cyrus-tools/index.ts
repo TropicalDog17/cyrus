@@ -1,8 +1,6 @@
 import { tmpdir } from "node:os";
-import { basename, extname } from "node:path";
 import { IssueRelationType, type LinearClient } from "@linear/sdk";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import fs from "fs-extra";
 import OpenAI from "openai";
 import { z } from "zod";
 import { registerImageTools } from "../image-tools/index.js";
@@ -12,69 +10,7 @@ import {
 	type ResolveSessionFromCwd,
 	registerLogFailureModeTool,
 } from "./log-failure-mode.js";
-
-/**
- * Detect MIME type based on file extension
- */
-function getMimeType(filename: string): string {
-	const ext = extname(filename).toLowerCase();
-	const mimeTypes: Record<string, string> = {
-		// Images
-		".png": "image/png",
-		".jpg": "image/jpeg",
-		".jpeg": "image/jpeg",
-		".gif": "image/gif",
-		".svg": "image/svg+xml",
-		".webp": "image/webp",
-		".bmp": "image/bmp",
-		".ico": "image/x-icon",
-
-		// Documents
-		".pdf": "application/pdf",
-		".doc": "application/msword",
-		".docx":
-			"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-		".xls": "application/vnd.ms-excel",
-		".xlsx":
-			"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-		".ppt": "application/vnd.ms-powerpoint",
-		".pptx":
-			"application/vnd.openxmlformats-officedocument.presentationml.presentation",
-
-		// Text
-		".txt": "text/plain",
-		".md": "text/markdown",
-		".csv": "text/csv",
-		".json": "application/json",
-		".xml": "application/xml",
-		".html": "text/html",
-		".css": "text/css",
-		".js": "application/javascript",
-		".ts": "application/typescript",
-
-		// Archives
-		".zip": "application/zip",
-		".tar": "application/x-tar",
-		".gz": "application/gzip",
-		".rar": "application/vnd.rar",
-		".7z": "application/x-7z-compressed",
-
-		// Media
-		".mp3": "audio/mpeg",
-		".wav": "audio/wav",
-		".mp4": "video/mp4",
-		".mov": "video/quicktime",
-		".avi": "video/x-msvideo",
-		".webm": "video/webm",
-
-		// Other
-		".log": "text/plain",
-		".yml": "text/yaml",
-		".yaml": "text/yaml",
-	};
-
-	return mimeTypes[ext] || "application/octet-stream";
-}
+import { registerUploadTool } from "./upload-tool.js";
 
 /**
  * Options for creating Cyrus tools with session management capabilities
@@ -122,138 +58,7 @@ export function createCyrusToolsServer(
 		version: "1.0.0",
 	});
 
-	server.registerTool(
-		"linear_upload_file",
-		{
-			description:
-				"Upload a file to Linear. Returns an asset URL that can be used in issue descriptions or comments.",
-			inputSchema: {
-				filePath: z
-					.string()
-					.describe("The absolute path to the file to upload"),
-				filename: z
-					.string()
-					.optional()
-					.describe(
-						"The filename to use in Linear (optional, defaults to basename of filePath)",
-					),
-				contentType: z
-					.string()
-					.optional()
-					.describe(
-						"MIME type of the file (optional, auto-detected if not provided)",
-					),
-				makePublic: z
-					.boolean()
-					.optional()
-					.describe(
-						"Whether to make the file publicly accessible (default: false)",
-					),
-			},
-		},
-		async ({ filePath, filename, contentType, makePublic }) => {
-			try {
-				const stats = await fs.stat(filePath);
-				if (!stats.isFile()) {
-					return {
-						content: [
-							{
-								type: "text" as const,
-								text: JSON.stringify({
-									success: false,
-									error: `Path ${filePath} is not a file`,
-								}),
-							},
-						],
-					};
-				}
-
-				const fileBuffer = await fs.readFile(filePath);
-				const finalFilename = filename || basename(filePath);
-				const finalContentType = contentType || getMimeType(finalFilename);
-				const size = stats.size;
-
-				const uploadPayload = await linearClient.fileUpload(
-					finalContentType,
-					finalFilename,
-					size,
-					{ makePublic },
-				);
-
-				if (!uploadPayload.success || !uploadPayload.uploadFile) {
-					return {
-						content: [
-							{
-								type: "text" as const,
-								text: JSON.stringify({
-									success: false,
-									error: "Failed to get upload URL from Linear",
-								}),
-							},
-						],
-					};
-				}
-
-				const { uploadUrl, headers, assetUrl } = uploadPayload.uploadFile;
-				const uploadHeaders: Record<string, string> = {
-					"Content-Type": finalContentType,
-					"Cache-Control": "public, max-age=31536000",
-				};
-
-				for (const header of headers) {
-					uploadHeaders[header.key] = header.value;
-				}
-
-				const uploadResponse = await fetch(uploadUrl, {
-					method: "PUT",
-					headers: uploadHeaders,
-					body: fileBuffer,
-				});
-
-				if (!uploadResponse.ok) {
-					const errorText = await uploadResponse.text();
-					return {
-						content: [
-							{
-								type: "text" as const,
-								text: JSON.stringify({
-									success: false,
-									error: `Failed to upload file: ${uploadResponse.status} ${uploadResponse.statusText} - ${errorText}`,
-								}),
-							},
-						],
-					};
-				}
-
-				return {
-					content: [
-						{
-							type: "text" as const,
-							text: JSON.stringify({
-								success: true,
-								assetUrl,
-								filename: finalFilename,
-								size,
-								contentType: finalContentType,
-							}),
-						},
-					],
-				};
-			} catch (error) {
-				return {
-					content: [
-						{
-							type: "text" as const,
-							text: JSON.stringify({
-								success: false,
-								error: error instanceof Error ? error.message : String(error),
-							}),
-						},
-					],
-				};
-			}
-		},
-	);
+	registerUploadTool(server, linearClient);
 
 	server.registerTool(
 		"linear_agent_session_create",
