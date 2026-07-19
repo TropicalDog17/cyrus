@@ -1,10 +1,11 @@
 import type { LinearClient } from "@linear/sdk";
 import type { ILogger } from "cyrus-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { LinearIssueTrackerService } from "../src/LinearIssueTrackerService.js";
 import {
-	LinearIssueTrackerService,
 	type LinearOAuthConfig,
-} from "../src/LinearIssueTrackerService.js";
+	LinearTokenRefresher,
+} from "../src/LinearTokenRefresher.js";
 
 /**
  * Characterization tests for the OAuth token-refresh cluster inside
@@ -261,8 +262,8 @@ describe("LinearIssueTrackerService OAuth token-refresh (characterization)", () 
 		// Invoke the private doTokenRefresh directly on both instances
 		// (this is the seam the extraction targets) without awaiting between
 		// the two calls, so they race through the static coalescing map.
-		const refreshA = (serviceA as any).doTokenRefresh();
-		const refreshB = (serviceB as any).doTokenRefresh();
+		const refreshA = (serviceA as any).tokenRefresher.doTokenRefresh();
+		const refreshB = (serviceB as any).tokenRefresher.doTokenRefresh();
 
 		const [tokenA, tokenB] = await Promise.all([refreshA, refreshB]);
 
@@ -319,13 +320,13 @@ describe("LinearIssueTrackerService OAuth token-refresh (characterization)", () 
 		});
 		vi.stubGlobal("fetch", fetchMock);
 
-		await (serviceA as any).executeTokenRefresh();
+		await (serviceA as any).tokenRefresher.executeTokenRefresh();
 
 		expect(capturedBody).toContain("refresh_token=token-from-B");
 
 		// The write side: after A's refresh, the shared map reflects the new
 		// refresh token for both instances (cross-instance visibility).
-		const sharedMap = (LinearIssueTrackerService as any).workspaceRefreshTokens;
+		const sharedMap = (LinearTokenRefresher as any).workspaceRefreshTokens;
 		expect(sharedMap.get(workspaceId)).toBe("written-by-A-refresh");
 
 		void serviceB; // present only to establish "two instances" sharing state
@@ -346,7 +347,7 @@ describe("LinearIssueTrackerService OAuth token-refresh (characterization)", () 
 		});
 		vi.stubGlobal("fetch", fetchMock);
 
-		const token = await (service as any).executeTokenRefresh();
+		const token = await (service as any).tokenRefresher.executeTokenRefresh();
 
 		expect(token).toBe("success-token");
 		expect(fetchMock).toHaveBeenCalledWith(
@@ -375,9 +376,9 @@ describe("LinearIssueTrackerService OAuth token-refresh (characterization)", () 
 
 		vi.stubGlobal("fetch", mockFetchNotOk(400));
 
-		await expect((service as any).executeTokenRefresh()).rejects.toThrow(
-			"Token refresh failed: 400",
-		);
+		await expect(
+			(service as any).tokenRefresher.executeTokenRefresh(),
+		).rejects.toThrow("Token refresh failed: 400");
 	});
 
 	it("fires the onTokenRefresh callback and swallows its failure", async () => {
@@ -401,7 +402,7 @@ describe("LinearIssueTrackerService OAuth token-refresh (characterization)", () 
 			mockFetchOk({ access_token: "at-1", refresh_token: "rt-2" }),
 		);
 
-		const token = await (service as any).executeTokenRefresh();
+		const token = await (service as any).tokenRefresher.executeTokenRefresh();
 
 		expect(token).toBe("at-1");
 		expect(onTokenRefresh).toHaveBeenCalledWith({
@@ -436,7 +437,7 @@ describe("LinearIssueTrackerService OAuth token-refresh (characterization)", () 
 			unauthorizedError,
 		);
 
-		expect((service as any).refreshPromise).toBeNull();
+		expect((service as any).tokenRefresher.refreshPromise).toBeNull();
 		expect(failingFetch).toHaveBeenCalledTimes(1);
 
 		// Next attempt: refresh now succeeds via a fresh doTokenRefresh() call
@@ -449,7 +450,7 @@ describe("LinearIssueTrackerService OAuth token-refresh (characterization)", () 
 		});
 		vi.stubGlobal("fetch", succeedingFetch);
 
-		const freshToken = await (service as any).doTokenRefresh();
+		const freshToken = await (service as any).tokenRefresher.doTokenRefresh();
 		expect(freshToken).toBe("recovered-token");
 		expect(succeedingFetch).toHaveBeenCalledTimes(1);
 	});
@@ -465,11 +466,12 @@ describe("LinearIssueTrackerService OAuth token-refresh (characterization)", () 
 			createMockLogger(),
 		);
 
-		(service as any).refreshPromise = Promise.resolve("stale-token");
+		(service as any).tokenRefresher.refreshPromise =
+			Promise.resolve("stale-token");
 
 		service.setAccessToken("brand-new-token");
 
-		expect((service as any).refreshPromise).toBeNull();
+		expect((service as any).tokenRefresher.refreshPromise).toBeNull();
 		expect(setHeader).toHaveBeenCalledWith(
 			"Authorization",
 			"Bearer brand-new-token",
