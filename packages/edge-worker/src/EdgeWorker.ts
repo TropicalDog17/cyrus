@@ -1,4 +1,3 @@
-import { execSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -68,7 +67,6 @@ import {
 	GitHubEventTransport,
 	type GitHubPushPayload,
 	type GitHubWebhookEvent,
-	isCommentOnPullRequest,
 	isIssueCommentPayload,
 	isPullRequestReviewCommentPayload,
 	isPullRequestReviewPayload,
@@ -95,7 +93,6 @@ import {
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
 import { CyrusToolsHost } from "./CyrusToolsHost.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
-import { EgressProxy } from "./EgressProxy.js";
 import { GitHubUsernameResolver } from "./GitHubUsernameResolver.js";
 import { GitService } from "./GitService.js";
 import { GlobalSessionRegistry } from "./GlobalSessionRegistry.js";
@@ -110,6 +107,7 @@ import {
 } from "./RepositoryRouter.js";
 import { RunnerConfigBuilder } from "./RunnerConfigBuilder.js";
 import { RunnerSelectionService } from "./RunnerSelectionService.js";
+import { SandboxManager } from "./SandboxManager.js";
 import { SessionOrchestrator } from "./SessionOrchestrator.js";
 import { SharedApplicationServer } from "./SharedApplicationServer.js";
 import {
@@ -191,14 +189,8 @@ export class EdgeWorker extends EventEmitter {
 	private cyrusToolsHost!: CyrusToolsHost;
 	/** Validates webhook source IPs against known provider allowlists */
 	private webhookIpValidator!: WebhookIpValidator;
-	/** Egress proxy for sandbox network traffic filtering and header injection */
-	private egressProxy: EgressProxy | null = null;
-	/** Base SDK sandbox settings to pass to ClaudeRunner sessions (set when proxy starts) */
-	private sdkSandboxSettings:
-		| import("cyrus-claude-runner").SandboxSettings
-		| null = null;
-	/** CA cert path for MITM TLS termination (passed per-session env, not process.env) */
-	private egressCaCertPath: string | null = null;
+	/** Owns the sandbox egress proxy and TLS interception CA cert lifecycle */
+	private sandboxManager!: SandboxManager;
 	/**
 	 * Remote SessionStore that mirrors Claude SDK transcripts to the Cyrus
 	 * hosted control plane. Enabled when all three of `CYRUS_APP_URL`,
@@ -465,7 +457,7 @@ export class EdgeWorker extends EventEmitter {
 					);
 					return;
 				}
-				await this.handleResumeParentSession(
+				await this.sessionOrchestrator.handleResumeParentSession(
 					parentSessionId,
 					prompt,
 					childSessionId,
@@ -648,6 +640,10 @@ export class EdgeWorker extends EventEmitter {
 			buildDisallowedTools: (repository) =>
 				this.buildDisallowedTools(repository),
 		});
+		this.sandboxManager = new SandboxManager({
+			cyrusHome: this.cyrusHome,
+			logger: this.logger,
+		});
 		this.sessionOrchestrator = new SessionOrchestrator({
 			logger: this.logger,
 			cyrusHome: this.cyrusHome,
@@ -660,8 +656,8 @@ export class EdgeWorker extends EventEmitter {
 			getConfig: () => this.config,
 			getClaudeSessionStore: () => this.claudeSessionStore,
 			getWarmSessionRegistry: () => this.warmSessionRegistry,
-			getSandboxSettings: () => this.sdkSandboxSettings ?? undefined,
-			getEgressCaCertPath: () => this.egressCaCertPath ?? undefined,
+			getSandboxSettings: () => this.sandboxManager.getSdkSettings(),
+			getEgressCaCertPath: () => this.sandboxManager.getCaCertPath(),
 			createCyrusAgentSession: (
 				sessionId,
 				issue,
@@ -749,6 +745,27 @@ export class EdgeWorker extends EventEmitter {
 				this.config.handlers?.onSessionStart?.(issueId, issue, repositoryId);
 			},
 			resumeSessionDelegate: (...args) => this.resumeAgentSession(...args),
+			getRepositoryForSession: (sessionId) => {
+				const repoId = this.sessionRepositories.get(sessionId);
+				return repoId ? this.repositories.get(repoId) : undefined;
+			},
+			getIssueTracker: (workspaceId) => this.issueTrackers.get(workspaceId),
+			postParentResumeAcknowledgment: (sessionId, linearWorkspaceId) =>
+				this.postParentResumeAcknowledgment(sessionId, linearWorkspaceId),
+			postActivityDirect: (issueTracker, input, label) =>
+				this.postActivityDirect(issueTracker, input, label),
+			getGitHubAppTokenProvider: () => this.gitHubAppTokenProvider,
+			getAllRepositories: () => Array.from(this.repositories.values()),
+			gitHubCommentService: this.gitHubCommentService,
+			setSessionRepository: (sessionId, repositoryId) =>
+				this.sessionRepositories.set(sessionId, repositoryId),
+			getActivitySinkForRepo: (repositoryId) =>
+				this.getActivitySinkForRepo(repositoryId),
+			buildGithubAllowedTools: (repository) =>
+				this.toolPermissionResolver.buildGithubAllowedTools(repository),
+			emitGitHubSessionStarted: (issueId, issue, repositoryId) => {
+				this.emit("session:started", issueId, issue, repositoryId);
+			},
 		});
 
 		// Components will be initialized and registered in start() method before server starts
@@ -787,10 +804,10 @@ export class EdgeWorker extends EventEmitter {
 			async (changes: RepositoryChanges) => {
 				this.updateLinearWorkspaceTokens(changes.newConfig);
 				await this.removeDeletedRepositories(changes.removed);
-				await this.updateModifiedRepositories(changes.modified);
-				await this.addNewRepositories(changes.added);
+				this.configManager.applyModifiedRepositories(changes.modified);
+				this.configManager.applyAddedRepositories(changes.added);
 				// Live-update sandbox / egress proxy settings
-				await this.applySandboxConfigChanges(changes.newConfig);
+				await this.sandboxManager.applyConfigChanges(changes.newConfig.sandbox);
 				// `changes.newConfig` is reconcile's already-normalized `merged`.
 				this.config = changes.newConfig;
 				this.configManager.setConfig(changes.newConfig);
@@ -808,40 +825,7 @@ export class EdgeWorker extends EventEmitter {
 		// Start egress proxy if sandbox is enabled.
 		// The proxy intercepts Bash-spawned subprocess traffic only (git, gh, npm, etc.).
 		// Claude's inference API, MCP servers, and built-in file tools bypass the proxy.
-		if (this.config.sandbox?.enabled) {
-			this.logger.info("🛡️  Sandbox egress proxy: starting...");
-			this.egressProxy = new EgressProxy(
-				this.config.sandbox,
-				this.cyrusHome,
-				this.logger,
-			);
-			await this.egressProxy.start();
-
-			// Store base SDK sandbox settings — merged per-session with worktree path
-			this.sdkSandboxSettings = {
-				enabled: true,
-				network: {
-					httpProxyPort: this.egressProxy.getHttpProxyPort(),
-					socksProxyPort: this.egressProxy.getSocksProxyPort(),
-				},
-			};
-
-			const systemWideCert = this.config.sandbox?.systemWideCert === true;
-			this.logCertTrustInstructions(
-				this.egressProxy.getCACertPath(),
-				systemWideCert,
-			);
-
-			// When systemWideCert is true, the OS cert store handles trust
-			// for all tools — skip per-session cert env vars.
-			if (!systemWideCert) {
-				this.egressCaCertPath = this.egressProxy.buildCACertBundle();
-			}
-		} else {
-			this.logger.info(
-				"🛡️  Sandbox egress proxy: disabled (set sandbox.enabled=true in config.json to enable)",
-			);
-		}
+		await this.sandboxManager.start(this.config.sandbox);
 
 		// Initialize and register components BEFORE starting server (routes must be registered before listen())
 		await this.initializeComponents();
@@ -1136,18 +1120,7 @@ export class EdgeWorker extends EventEmitter {
 	private async resolveGitHubToken(
 		event: GitHubWebhookEvent,
 	): Promise<string | undefined> {
-		if (event.installationToken) return event.installationToken;
-		if (this.gitHubAppTokenProvider) {
-			try {
-				return await this.gitHubAppTokenProvider.getToken();
-			} catch (error) {
-				this.logger.warn(
-					"Failed to mint GitHub App installation token, falling back to GITHUB_TOKEN",
-					error instanceof Error ? error : new Error(String(error)),
-				);
-			}
-		}
-		return process.env.GITHUB_TOKEN;
+		return this.sessionOrchestrator.resolveGitHubToken(event);
 	}
 
 	private async handleGitHubWebhook(
@@ -1156,9 +1129,11 @@ export class EdgeWorker extends EventEmitter {
 		this.activeWebhookCount++;
 
 		try {
-			// Only handle comments on pull requests
-			if (!isCommentOnPullRequest(event)) {
-				this.logger.debug("Ignoring GitHub comment on non-PR issue");
+			if (
+				!this.webhookRouter.gateGitHubComment(event, {
+					prReviewTrigger: this.config.prReviewTrigger,
+				}).proceed
+			) {
 				return;
 			}
 
@@ -1168,51 +1143,8 @@ export class EdgeWorker extends EventEmitter {
 			const commentAuthor = extractCommentAuthor(event);
 			const prTitle = extractPRTitle(event);
 			const sessionKey = extractSessionKey(event);
-
 			const isPullRequestReview = isPullRequestReviewPayload(event.payload);
-
-			// Skip comments from the bot itself to prevent infinite loops
 			const botUsername = process.env.GITHUB_BOT_USERNAME;
-			if (botUsername && commentAuthor === botUsername) {
-				this.logger.debug(
-					`Ignoring comment from bot user @${botUsername} on ${repoFullName}#${prNumber}`,
-				);
-				return;
-			}
-
-			// For pull_request_review events, defensively check review state
-			// (must happen before the mention check — reviews don't contain @mentions)
-			if (isPullRequestReviewPayload(event.payload)) {
-				if (event.payload.review.state !== "changes_requested") {
-					this.logger.debug(
-						`Ignoring pull_request_review with state: ${event.payload.review.state}`,
-					);
-					return;
-				}
-			}
-
-			// Honor the PR-review trigger toggle: when disabled, ignore
-			// pull_request_review events entirely — no acknowledgement comment and
-			// no agent session. Defaults to enabled when the flag is unset.
-			if (isPullRequestReview && this.config.prReviewTrigger === false) {
-				this.logger.debug(
-					`PR review trigger is disabled, ignoring pull_request_review on ${repoFullName}#${prNumber}`,
-				);
-				return;
-			}
-
-			// Only trigger on comments that mention the bot (when configured)
-			// Skip this check for pull_request_review events — reviews don't @mention the bot
-			if (
-				!isPullRequestReview &&
-				botUsername &&
-				!commentBody.includes(`@${botUsername}`)
-			) {
-				this.logger.debug(
-					`Ignoring comment without @${botUsername} mention on ${repoFullName}#${prNumber}`,
-				);
-				return;
-			}
 
 			this.logger.info(
 				`Processing GitHub webhook: ${repoFullName}#${prNumber} by @${commentAuthor}${isPullRequestReview ? " (pull_request_review)" : ""}`,
@@ -1381,139 +1313,40 @@ export class EdgeWorker extends EventEmitter {
 
 			this.logger.info(`GitHub workspace created at: ${workspace.path}`);
 
-			// Check if another active session is already using this branch/workspace
-			const existingSessions =
-				agentSessionManager.getActiveSessionsByBranchName(branchRef);
-			const firstExisting = existingSessions[0];
-			if (firstExisting) {
-				this.logger.warn(
-					`Reusing workspace from active session ${firstExisting.id} — concurrent writes possible`,
-				);
-			}
-
-			// Create a synthetic session for this GitHub PR comment
-			const issueMinimal: IssueMinimal = {
-				id: sessionKey,
-				identifier: `${extractRepoName(event)}#${prNumber}`,
-				title: prTitle || `PR #${prNumber}`,
-				branchName: branchRef,
-			};
-
-			// Create an internal agent session (no Linear session for GitHub)
-			const githubSessionId = `github-${event.deliveryId}`;
-			agentSessionManager.createCyrusAgentSession(
-				githubSessionId,
-				sessionKey,
-				issueMinimal,
-				workspace,
-				"github", // Don't stream activities to Linear for GitHub sources
-				[
-					{
-						repositoryId: repository.id,
-						branchName: branchRef,
-						baseBranchName: baseBranchRef ?? repository.baseBranch,
-					},
-				],
-			);
-
-			// Register session-to-repo mapping and activity sink
-			this.sessionRepositories.set(githubSessionId, repository.id);
-			const activitySink = this.getActivitySinkForRepo(repository.id);
-			if (activitySink) {
-				agentSessionManager.setActivitySink(githubSessionId, activitySink);
-			}
-
-			const session = agentSessionManager.getSession(githubSessionId);
-			if (!session) {
-				this.logger.error(
-					`Failed to create session for GitHub webhook ${event.deliveryId}`,
-				);
-				return;
-			}
-
-			// Initialize session metadata
-			if (!session.metadata) {
-				session.metadata = {};
-			}
-
-			// Store GitHub-specific metadata for reply posting
-			session.metadata.commentId = String(extractCommentId(event));
-
 			// Build the system prompt for this GitHub PR session
+			const commentUrl = extractCommentUrl(event);
 			const systemPrompt = isPullRequestReview
-				? this.buildGitHubChangeRequestSystemPrompt(
-						event,
+				? this.promptAssembler.buildGitHubChangeRequestSystemPrompt({
+						repoFullName,
+						prNumber,
+						prTitle,
+						commentAuthor,
+						commentUrl,
+						branchRef,
+						reviewBody: taskInstructions,
+					})
+				: this.promptAssembler.buildGitHubSystemPrompt({
+						repoFullName,
+						prNumber,
+						prTitle,
+						commentAuthor,
+						commentUrl,
 						branchRef,
 						taskInstructions,
-					)
-				: this.buildGitHubSystemPrompt(event, branchRef, taskInstructions);
+					});
 
-			// Build allowed tools using the GitHub platform resolver, which honors
-			// `githubAllowedTools` on the workspace config and falls back to
-			// `GITHUB_DEFAULT_ALLOWED_TOOLS`.
-			const allowedTools =
-				this.toolPermissionResolver.buildGithubAllowedTools(repository);
-			const disallowedTools = this.buildDisallowedTools(repository);
-			const allowedDirectories: string[] = [repository.repositoryPath];
-
-			// Create agent runner using the standard config builder
-			const { config: runnerConfig, runnerType } =
-				await this.sessionOrchestrator.buildAgentRunnerConfig(
-					session,
-					repository,
-					githubSessionId,
-					systemPrompt,
-					allowedTools,
-					allowedDirectories,
-					disallowedTools,
-					undefined, // resumeSessionId
-					undefined, // labels
-					undefined, // issueDescription
-					200, // maxTurns
-					undefined, // linearWorkspaceId
-					this.buildSkillSessionContext(repository, undefined, session),
-					undefined, // labelPromptModel (no Linear labels for GitHub PRs)
-					undefined, // effort (GitHub PR sessions use SDK default)
-					"github", // sessionPlatform → uses githubMcpConfigs override
-				);
-
-			const runner = this.sessionOrchestrator.createRunnerForType(
-				runnerType,
-				runnerConfig,
-			);
-
-			// Store the runner in the session manager
-			agentSessionManager.addAgentRunner(githubSessionId, runner);
-
-			// Save persisted state
-			await this.savePersistedState();
-
-			this.emit(
-				"session:started",
+			await this.sessionOrchestrator.startGitHubSession({
+				event,
+				repository,
+				workspace,
+				branchRef,
+				baseBranchRef,
+				prNumber,
 				sessionKey,
-				issueMinimal as unknown as Issue,
-				repository.id,
-			);
-
-			this.logger.info(
-				`Starting ${runnerType} runner for GitHub PR ${repoFullName}#${prNumber}`,
-			);
-
-			// Start the session and handle completion
-			try {
-				const sessionInfo = await runner.start(taskInstructions);
-				this.logger.info(`GitHub session started: ${sessionInfo.sessionId}`);
-
-				// When session completes, post the reply back to GitHub
-				await this.postGitHubReply(event, runner, repository);
-			} catch (error) {
-				this.logger.error(
-					`GitHub session error for ${repoFullName}#${prNumber}`,
-					error instanceof Error ? error : new Error(String(error)),
-				);
-			} finally {
-				await this.savePersistedState();
-			}
+				prTitle,
+				taskInstructions,
+				systemPrompt,
+			});
 		} catch (error) {
 			this.logger.error(
 				"Failed to process GitHub webhook",
@@ -1532,27 +1365,12 @@ export class EdgeWorker extends EventEmitter {
 	private async handleGitHubPushWebhook(
 		payload: GitHubPushPayload,
 	): Promise<void> {
-		// Only handle branch pushes (refs/heads/*), not tags
-		if (!payload.ref.startsWith("refs/heads/")) {
+		const target = this.webhookRouter.resolveGitHubPushTarget(payload);
+		if (!target) {
 			return;
 		}
-
-		// Ignore branch deletions
-		if (payload.deleted) {
-			return;
-		}
-
-		const branchName = payload.ref.replace("refs/heads/", "");
+		const { repository, branchName } = target;
 		const repoFullName = payload.repository.full_name;
-
-		// Find the matching repository config
-		const repository = this.findRepositoryByGitHubUrl(repoFullName);
-		if (!repository) {
-			this.logger.debug(
-				`No repository configured for GitHub push from ${repoFullName}`,
-			);
-			return;
-		}
 
 		// Find active sessions tracking this branch as their base branch
 		const sessions = this.agentSessionManager.getSessionsByBaseBranch(
@@ -1632,17 +1450,7 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 	private findRepositoryByGitHubUrl(
 		repoFullName: string,
 	): RepositoryConfig | null {
-		for (const repo of this.repositories.values()) {
-			if (!repo.githubUrl) continue;
-			// Match against full name (owner/repo) or URL containing it
-			if (
-				repo.githubUrl.includes(repoFullName) ||
-				repo.githubUrl.endsWith(`/${repoFullName}`)
-			) {
-				return repo;
-			}
-		}
-		return null;
+		return this.webhookRouter.findRepositoryByGitHubUrl(repoFullName);
 	}
 
 	/**
@@ -1713,212 +1521,11 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 		branchRef: string,
 		prNumber: number,
 	): Promise<{ path: string; isGitWorktree: boolean } | null> {
-		try {
-			// Use the GitService to create the worktree
-			// Create a synthetic issue-like object for the git service
-			const syntheticIssue = {
-				id: `github-pr-${prNumber}`,
-				identifier: `PR-${prNumber}`,
-				title: `PR #${prNumber}`,
-				description: null,
-				url: "",
-				branchName: branchRef,
-				assigneeId: null,
-				stateId: null,
-				teamId: null,
-				labelIds: [],
-				priority: 0,
-				createdAt: new Date(),
-				updatedAt: new Date(),
-				archivedAt: null,
-				state: Promise.resolve(undefined),
-				assignee: Promise.resolve(undefined),
-				team: Promise.resolve(undefined),
-				parent: Promise.resolve(undefined),
-				project: Promise.resolve(undefined),
-				labels: () => Promise.resolve({ nodes: [] }),
-				comments: () => Promise.resolve({ nodes: [] }),
-				attachments: () => Promise.resolve({ nodes: [] }),
-				children: () => Promise.resolve({ nodes: [] }),
-				inverseRelations: () => Promise.resolve({ nodes: [] }),
-				update: () =>
-					Promise.resolve({
-						success: true,
-						issue: undefined,
-						lastSyncId: 0,
-					}),
-			} as unknown as Issue;
-
-			return await this.gitService.createGitWorktree(
-				syntheticIssue,
-				[repository],
-				{
-					crossRepoSiblingRepositories: Array.from(this.repositories.values()),
-				},
-			);
-		} catch (error) {
-			this.logger.error(
-				`Failed to create GitHub workspace for PR #${prNumber}`,
-				error instanceof Error ? error : new Error(String(error)),
-			);
-			return null;
-		}
-	}
-
-	/**
-	 * Build a system prompt for a GitHub PR comment session.
-	 */
-	private buildGitHubSystemPrompt(
-		event: GitHubCommentWebhookEvent,
-		branchRef: string,
-		taskInstructions: string,
-	): string {
-		const repoFullName = extractRepoFullName(event);
-		const prNumber = extractPRNumber(event);
-		const prTitle = extractPRTitle(event);
-		const commentAuthor = extractCommentAuthor(event);
-		const commentUrl = extractCommentUrl(event);
-
-		return `You are working on a GitHub Pull Request.
-
-## Context
-- **Repository**: ${repoFullName}
-- **PR**: #${prNumber} - ${prTitle || "Untitled"}
-- **Branch**: ${branchRef}
-- **Requested by**: @${commentAuthor}
-- **Comment URL**: ${commentUrl}
-
-## Task
-${taskInstructions}
-
-## Instructions
-- You are already checked out on the PR branch \`${branchRef}\`
-- Make changes directly to the code on this branch
-- After making changes, commit and push them to the branch
-- Be concise in your responses as they will be posted back to the GitHub PR`;
-	}
-
-	/**
-	 * Build a system prompt for a GitHub PR change request review session.
-	 */
-	private buildGitHubChangeRequestSystemPrompt(
-		event: GitHubCommentWebhookEvent,
-		branchRef: string,
-		reviewBody: string,
-	): string {
-		const repoFullName = extractRepoFullName(event);
-		const prNumber = extractPRNumber(event);
-		const prTitle = extractPRTitle(event);
-		const commentAuthor = extractCommentAuthor(event);
-		const commentUrl = extractCommentUrl(event);
-
-		const hasReviewBody = reviewBody.trim().length > 0;
-
-		const taskSection = hasReviewBody
-			? `## Reviewer Feedback
-${reviewBody}
-
-## Instructions
-- Read the PR diff and the reviewer's feedback above to understand all requested changes
-- You are already checked out on the PR branch \`${branchRef}\`
-- Address all the reviewer's feedback and make the necessary changes
-- After making changes, commit and push them to the branch
-- Respond with a concise summary of the changes you made`
-			: `## Instructions
-- The reviewer has requested changes but did not leave a summary comment
-- Use \`gh api repos/${repoFullName}/pulls/${prNumber}/reviews\` to read the review comments and understand what changes are needed
-- You are already checked out on the PR branch \`${branchRef}\`
-- Address all the reviewer's feedback and make the necessary changes
-- After making changes, commit and push them to the branch
-- Respond with a concise summary of the changes you made`;
-
-		return `You are working on a GitHub Pull Request that has received a change request review.
-
-## Context
-- **Repository**: ${repoFullName}
-- **PR**: #${prNumber} - ${prTitle || "Untitled"}
-- **Branch**: ${branchRef}
-- **Reviewer**: @${commentAuthor}
-- **Review URL**: ${commentUrl}
-
-${taskSection}`;
-	}
-
-	/**
-	 * Post a reply back to the GitHub PR comment after the session completes.
-	 */
-	private async postGitHubReply(
-		event: GitHubCommentWebhookEvent,
-		runner: IAgentRunner,
-		_repository: RepositoryConfig,
-	): Promise<void> {
-		try {
-			// Get the last assistant message from the runner as the summary
-			const messages = runner.getMessages();
-			const lastAssistantMessage = [...messages]
-				.reverse()
-				.find((m) => m.type === "assistant");
-
-			let summary = "Task completed. Please review the changes on this branch.";
-			if (lastAssistantMessage && lastAssistantMessage.type === "assistant") {
-				const textBlock = lastAssistantMessage.content.find(
-					(block) => block.type === "text" && block.text,
-				);
-				if (textBlock?.type === "text" && textBlock.text) {
-					summary = textBlock.text;
-				}
-			}
-
-			const owner = extractRepoOwner(event);
-			const repo = extractRepoName(event);
-			const prNumber = extractPRNumber(event);
-			const commentId = extractCommentId(event);
-
-			if (!prNumber) {
-				this.logger.warn("Cannot post GitHub reply: no PR number");
-				return;
-			}
-
-			// Resolve GitHub token (installation token > App token > PAT)
-			const token = await this.resolveGitHubToken(event);
-			if (!token) {
-				this.logger.warn(
-					"Cannot post GitHub reply: no installation token or GITHUB_TOKEN configured",
-				);
-				this.logger.debug(
-					`Would have posted reply to ${owner}/${repo}#${prNumber} (comment ${commentId}): ${summary}`,
-				);
-				return;
-			}
-
-			if (event.eventType === "pull_request_review_comment") {
-				// Reply to the specific review comment thread
-				await this.gitHubCommentService.postReviewCommentReply({
-					token,
-					owner,
-					repo,
-					pullNumber: prNumber,
-					commentId,
-					body: summary,
-				});
-			} else {
-				// Post as a regular issue comment on the PR
-				await this.gitHubCommentService.postIssueComment({
-					token,
-					owner,
-					repo,
-					issueNumber: prNumber,
-					body: summary,
-				});
-			}
-
-			this.logger.info(`Posted GitHub reply to ${owner}/${repo}#${prNumber}`);
-		} catch (error) {
-			this.logger.error(
-				"Failed to post GitHub reply",
-				error instanceof Error ? error : new Error(String(error)),
-			);
-		}
+		return this.sessionOrchestrator.createGitHubWorkspace(
+			repository,
+			branchRef,
+			prNumber,
+		);
 	}
 
 	/**
@@ -1990,159 +1597,10 @@ ${taskSection}`;
 		this.cyrusToolsHost.stop();
 
 		// Stop egress proxy
-		if (this.egressProxy) {
-			await this.egressProxy.stop();
-			this.egressProxy = null;
-			this.sdkSandboxSettings = null;
-			this.egressCaCertPath = null;
-		}
+		await this.sandboxManager.stop();
 
 		// Stop shared application server (this also stops Cloudflare tunnel if running)
 		await this.sharedApplicationServer.stop();
-	}
-
-	/**
-	 * Apply sandbox config changes from a config reload.
-	 * Handles three transitions:
-	 * - enabled → enabled: update network policy on the running proxy
-	 * - disabled → enabled: start a new proxy
-	 * - enabled → disabled: stop the running proxy
-	 */
-	private async applySandboxConfigChanges(
-		newConfig: EdgeWorkerConfig,
-	): Promise<void> {
-		const wasEnabled = this.egressProxy !== null;
-		const isEnabled = newConfig.sandbox?.enabled === true;
-
-		if (wasEnabled && isEnabled) {
-			// Policy update — proxy stays running, rules change
-			// Pass current policy (or empty object to reset to allow-all)
-			this.egressProxy!.updateNetworkPolicy(
-				newConfig.sandbox?.networkPolicy ?? {},
-			);
-			// Handle systemWideCert toggling while proxy is running
-			if (newConfig.sandbox?.systemWideCert) {
-				this.egressCaCertPath = null;
-			} else if (!this.egressCaCertPath) {
-				this.egressCaCertPath = this.egressProxy!.buildCACertBundle();
-			}
-		} else if (!wasEnabled && isEnabled) {
-			// Start proxy for the first time
-			this.logger.info("🛡️  Sandbox egress proxy: starting (config change)...");
-			this.egressProxy = new EgressProxy(
-				newConfig.sandbox!,
-				this.cyrusHome,
-				this.logger,
-			);
-			await this.egressProxy.start();
-
-			this.sdkSandboxSettings = {
-				enabled: true,
-				network: {
-					httpProxyPort: this.egressProxy.getHttpProxyPort(),
-					socksProxyPort: this.egressProxy.getSocksProxyPort(),
-				},
-			};
-			const systemWideCert = newConfig.sandbox?.systemWideCert === true;
-			this.logCertTrustInstructions(
-				this.egressProxy.getCACertPath(),
-				systemWideCert,
-			);
-
-			if (!systemWideCert) {
-				this.egressCaCertPath = this.egressProxy.buildCACertBundle();
-			}
-		} else if (wasEnabled && !isEnabled) {
-			// Stop proxy
-			this.logger.info(
-				"🛡️  Sandbox egress proxy: stopping (disabled in config)",
-			);
-			await this.egressProxy!.stop();
-			this.egressProxy = null;
-			this.sdkSandboxSettings = null;
-			this.egressCaCertPath = null;
-		}
-	}
-
-	/**
-	 * Log instructions for trusting the egress proxy CA certificate.
-	 * When systemWideCert is true, logs that env vars are skipped and trust
-	 * is expected from the OS cert store. Otherwise logs env var list and
-	 * checks macOS keychain trust status.
-	 */
-	private logCertTrustInstructions(
-		certPath: string,
-		systemWideCert = false,
-	): void {
-		this.logger.info(`🛡️  Sandbox TLS interception CA certificate: ${certPath}`);
-
-		if (systemWideCert) {
-			this.logger.info(
-				"🛡️  systemWideCert: true — per-session CA cert env vars are skipped (OS cert store handles trust)",
-			);
-		} else {
-			this.logger.info(
-				"🛡️  Per-session env vars are set automatically: NODE_EXTRA_CA_CERTS, GIT_SSL_CAINFO, SSL_CERT_FILE, REQUESTS_CA_BUNDLE, PIP_CERT, CURL_CA_BUNDLE, CARGO_HTTP_CAINFO, AWS_CA_BUNDLE, DENO_CERT",
-			);
-		}
-
-		const trusted = this.isCertTrustedSystemWide();
-		if (trusted) {
-			this.logger.info("🛡️  CA certificate is trusted system-wide ✓");
-			if (!systemWideCert) {
-				this.logger.info(
-					"🛡️  Tip: set sandbox.systemWideCert: true in config.json to skip per-session cert env vars",
-				);
-			}
-		} else {
-			if (process.platform === "darwin") {
-				this.logger.warn(
-					"🛡️  CA certificate is NOT trusted in the macOS System keychain. To trust (requires sudo):",
-				);
-				this.logger.warn(
-					`🛡️  sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ${certPath}`,
-				);
-			} else if (process.platform === "linux") {
-				this.logger.warn(
-					"🛡️  CA certificate is NOT trusted system-wide. To trust (requires sudo):",
-				);
-				this.logger.warn(
-					`🛡️  sudo cp ${certPath} /usr/local/share/ca-certificates/cyrus-egress-ca.crt && sudo update-ca-certificates`,
-				);
-			}
-			if (systemWideCert) {
-				this.logger.warn(
-					"🛡️  systemWideCert is true but cert is not trusted — tools using the OS cert store will fail TLS verification",
-				);
-			}
-		}
-	}
-
-	/**
-	 * Check whether the Cyrus egress proxy CA is trusted at the OS level.
-	 * macOS: searches the System keychain. Linux: checks update-ca-certificates output.
-	 */
-	private isCertTrustedSystemWide(): boolean {
-		try {
-			if (process.platform === "darwin") {
-				execSync(
-					'security find-certificate -c "Cyrus Egress Proxy CA" /Library/Keychains/System.keychain',
-					{ stdio: "ignore" },
-				);
-				return true;
-			}
-			if (process.platform === "linux") {
-				// Check if our cert exists in the system CA certificates directory
-				execSync(
-					"test -f /usr/local/share/ca-certificates/cyrus-egress-ca.crt",
-					{ stdio: "ignore" },
-				);
-				return true;
-			}
-			return false;
-		} catch {
-			return false;
-		}
 	}
 
 	/**
@@ -2151,107 +1609,6 @@ ${taskSection}`;
 	setConfigPath(configPath: string): void {
 		this.configPath = configPath;
 		this.configManager.setConfigPath(configPath);
-	}
-
-	/**
-	 * Handle resuming a parent session when a child session completes
-	 * This is the core logic used by the resume parent session callback
-	 * Extracted to reduce duplication between constructor and addNewRepositories
-	 */
-	private async handleResumeParentSession(
-		parentSessionId: string,
-		prompt: string,
-		childSessionId: string,
-	): Promise<void> {
-		const log = this.logger.withContext({ sessionId: parentSessionId });
-		log.info(
-			`Child session completed, resuming parent session ${parentSessionId}`,
-		);
-
-		// Find parent session from the single session manager
-		log.debug(`Looking up parent session ${parentSessionId}`);
-		const parentSession = this.agentSessionManager.getSession(parentSessionId);
-		const parentRepoId = this.sessionRepositories.get(parentSessionId);
-		const parentRepo = parentRepoId
-			? this.repositories.get(parentRepoId)
-			: undefined;
-		const parentAgentSessionManager = this.agentSessionManager;
-
-		if (!parentSession || !parentRepo) {
-			log.error(
-				`Parent session ${parentSessionId} not found in any repository's agent session manager`,
-			);
-			return;
-		}
-
-		// Extract workspace ID once for all operations in this method
-		const parentWorkspaceId = requireLinearWorkspaceId(parentRepo);
-
-		log.debug(
-			`Found parent session - Issue: ${parentSession.issueId}, Workspace: ${parentSession.workspace.path}`,
-		);
-
-		// Get the child session to access its workspace path
-		const childSession = this.agentSessionManager.getSession(childSessionId);
-		const childWorkspaceDirs: string[] = [];
-		if (childSession) {
-			childWorkspaceDirs.push(childSession.workspace.path);
-			log.debug(
-				`Adding child workspace to parent allowed directories: ${childSession.workspace.path}`,
-			);
-		} else {
-			log.warn(
-				`Could not find child session ${childSessionId} to add workspace to parent allowed directories`,
-			);
-		}
-
-		await this.postParentResumeAcknowledgment(
-			parentSessionId,
-			parentWorkspaceId,
-		);
-
-		// Post thought showing child result receipt
-		// Use parent's issue tracker since we're posting to the parent's session
-		const issueTracker = this.issueTrackers.get(parentWorkspaceId);
-		if (issueTracker && childSession) {
-			const childIssueIdentifier =
-				childSession.issue?.identifier || childSession.issueId;
-			const resultThought = `Received result from sub-issue ${childIssueIdentifier}:\n\n---\n\n${prompt}\n\n---`;
-
-			await this.postActivityDirect(
-				issueTracker,
-				{
-					agentSessionId: parentSessionId,
-					content: { type: "thought", body: resultThought },
-				},
-				"child result receipt",
-			);
-		}
-
-		// Use centralized streaming check and routing logic
-		log.info(`Handling child result for parent session ${parentSessionId}`);
-		try {
-			await this.handlePromptWithStreamingCheck(
-				parentSession,
-				parentRepo,
-				parentSessionId,
-				parentAgentSessionManager,
-				prompt,
-				"", // No attachment manifest for child results
-				false, // Not a new session
-				childWorkspaceDirs, // Add child workspace directories to parent's allowed directories
-				"parent resume from child",
-				parentWorkspaceId,
-			);
-			log.info(
-				`Successfully handled child result for parent session ${parentSessionId}`,
-			);
-		} catch (error) {
-			log.error(`Failed to resume parent session ${parentSessionId}:`, error);
-			log.error(
-				`Error context - Parent issue: ${parentSession.issueId}, Repository: ${parentRepo.name}`,
-			);
-		}
 	}
 
 	/**
@@ -2264,19 +1621,11 @@ ${taskSection}`;
 	 * and pushes the updated workspace configs to `AttachmentService`.
 	 */
 	private updateLinearWorkspaceTokens(newConfig: EdgeWorkerConfig): void {
-		const oldWorkspaces = this.config.linearWorkspaces ?? {};
+		const tokenChanges =
+			this.configManager.computeWorkspaceTokenChanges(newConfig);
 		const newWorkspaces = newConfig.linearWorkspaces ?? {};
 
-		let anyTokenChanged = false;
-
-		for (const [workspaceId, newWsConfig] of Object.entries(newWorkspaces)) {
-			const oldToken = oldWorkspaces[workspaceId]?.linearToken;
-			const newToken = newWsConfig.linearToken;
-
-			if (oldToken === newToken) continue;
-
-			anyTokenChanged = true;
-
+		for (const { workspaceId, newToken } of tokenChanges) {
 			// Update existing issue tracker in-place
 			const issueTracker = this.issueTrackers.get(workspaceId);
 			if (issueTracker) {
@@ -2301,74 +1650,9 @@ ${taskSection}`;
 			}
 		}
 
-		if (anyTokenChanged) {
+		if (tokenChanges.length > 0) {
 			// Push refreshed workspace configs to AttachmentService
 			this.attachmentService.setLinearWorkspaces(newWorkspaces);
-		}
-	}
-
-	/**
-	 * Add new repositories to the running EdgeWorker
-	 */
-	private async addNewRepositories(repos: RepositoryConfig[]): Promise<void> {
-		for (const repo of repos) {
-			if (repo.isActive === false) {
-				this.logger.info(`⏭️  Skipping inactive repository: ${repo.name}`);
-				continue;
-			}
-
-			try {
-				this.logger.info(`➕ Adding repository: ${repo.name} (${repo.id})`);
-
-				// Paths already normalized by reconcile's normalizeConfigPaths.
-				this.repositories.set(repo.id, repo);
-
-				this.logger.info(`✅ Repository added successfully: ${repo.name}`);
-			} catch (error) {
-				this.logger.error(`❌ Failed to add repository ${repo.name}:`, error);
-			}
-		}
-	}
-
-	/**
-	 * Update existing repositories
-	 */
-	private async updateModifiedRepositories(
-		repos: RepositoryConfig[],
-	): Promise<void> {
-		for (const repo of repos) {
-			try {
-				const oldRepo = this.repositories.get(repo.id);
-				if (!oldRepo) {
-					this.logger.warn(
-						`⚠️  Repository ${repo.id} not found for update, skipping`,
-					);
-					continue;
-				}
-
-				this.logger.info(`🔄 Updating repository: ${repo.name} (${repo.id})`);
-
-				// Paths already normalized by reconcile's normalizeConfigPaths.
-				this.repositories.set(repo.id, repo);
-
-				// If active status changed
-				if (oldRepo.isActive !== repo.isActive) {
-					if (repo.isActive === false) {
-						this.logger.info(
-							`  ⏸️  Repository set to inactive - existing sessions will continue`,
-						);
-					} else {
-						this.logger.info(`  ▶️  Repository reactivated`);
-					}
-				}
-
-				this.logger.info(`✅ Repository updated successfully: ${repo.name}`);
-			} catch (error) {
-				this.logger.error(
-					`❌ Failed to update repository ${repo.name}:`,
-					error,
-				);
-			}
 		}
 	}
 
@@ -2380,8 +1664,6 @@ ${taskSection}`;
 	): Promise<void> {
 		for (const repo of repos) {
 			try {
-				this.logger.info(`🗑️  Removing repository: ${repo.name} (${repo.id})`);
-
 				// Check for active sessions for this repository
 				const allActiveSessions = this.agentSessionManager.getActiveSessions();
 				const activeSessions = allActiveSessions.filter(
@@ -2444,9 +1726,7 @@ ${taskSection}`;
 				// needed by other repositories in the same workspace, or by new
 				// repositories about to be added in the same configChanged cycle.
 				// They will be naturally replaced when workspace tokens are updated.
-				this.repositories.delete(repo.id);
-
-				this.logger.info(`✅ Repository removed successfully: ${repo.name}`);
+				this.configManager.applyRemovedRepositories([repo]);
 			} catch (error) {
 				this.logger.error(
 					`❌ Failed to remove repository ${repo.name}:`,

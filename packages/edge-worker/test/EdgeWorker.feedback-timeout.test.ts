@@ -102,7 +102,6 @@ describe("EdgeWorker - Feedback Delivery Timeout Issue", () => {
 				claudeRunner: mockClaudeRunner,
 			}),
 			getAgentRunner: vi.fn().mockReturnValue(mockClaudeRunner),
-			postAnalyzingThought: vi.fn().mockResolvedValue(undefined),
 			createThoughtActivity: vi.fn().mockResolvedValue(undefined),
 			on: vi.fn(), // EventEmitter method
 		};

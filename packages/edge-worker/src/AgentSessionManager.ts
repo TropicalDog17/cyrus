@@ -1194,16 +1194,6 @@ export class AgentSessionManager extends EventEmitter {
 	}
 
 	/**
-	 * Get all agent runners for a specific issue
-	 */
-	getAgentRunnersForIssue(issueId: string): IAgentRunner[] {
-		return Array.from(this.sessions.values())
-			.filter((session) => this.getSessionIssueId(session) === issueId)
-			.map((session) => session.agentRunner)
-			.filter((runner): runner is IAgentRunner => runner !== undefined);
-	}
-
-	/**
 	 * Get sessions by issue ID
 	 */
 	getSessionsByIssueId(issueId: string): CyrusAgentSession[] {
@@ -1335,22 +1325,6 @@ export class AgentSessionManager extends EventEmitter {
 	}
 
 	/**
-	 * Create an action activity
-	 */
-	async createActionActivity(
-		sessionId: string,
-		action: string,
-		parameter: string,
-		result?: string,
-	): Promise<void> {
-		const content: any = { type: "action", action, parameter };
-		if (result !== undefined) {
-			content.result = result;
-		}
-		await this.postActivity(sessionId, { content }, "action");
-	}
-
-	/**
 	 * Create a response activity
 	 */
 	async createResponseActivity(sessionId: string, body: string): Promise<void> {
@@ -1369,39 +1343,6 @@ export class AgentSessionManager extends EventEmitter {
 			sessionId,
 			{ content: { type: "error", body } },
 			"error",
-		);
-	}
-
-	/**
-	 * Create an elicitation activity
-	 */
-	async createElicitationActivity(
-		sessionId: string,
-		body: string,
-	): Promise<void> {
-		await this.postActivity(
-			sessionId,
-			{ content: { type: "elicitation", body } },
-			"elicitation",
-		);
-	}
-
-	/**
-	 * Create an approval elicitation activity with auth signal
-	 */
-	async createApprovalElicitation(
-		sessionId: string,
-		body: string,
-		approvalUrl: string,
-	): Promise<void> {
-		await this.postActivity(
-			sessionId,
-			{
-				content: { type: "elicitation", body },
-				signal: "auth",
-				signalMetadata: { url: approvalUrl },
-			},
-			"approval elicitation",
 		);
 	}
 
@@ -1460,25 +1401,6 @@ export class AgentSessionManager extends EventEmitter {
 		this.bufferedAssistantEntryBySession.delete(sessionId);
 		this.messageProcessingQueues.delete(sessionId);
 		log.debug("Removed session");
-	}
-
-	/**
-	 * Clear completed sessions older than specified time
-	 */
-	cleanup(olderThanMs: number = 24 * 60 * 60 * 1000): void {
-		const cutoff = Date.now() - olderThanMs;
-
-		for (const [sessionId, session] of this.sessions.entries()) {
-			if (
-				(session.status === "complete" || session.status === "error") &&
-				session.updatedAt < cutoff
-			) {
-				const log = this.sessionLog(sessionId);
-				this.sessions.delete(sessionId);
-				this.entries.delete(sessionId);
-				log.debug(`Cleaned up session`);
-			}
-		}
 	}
 
 	/**
@@ -1592,20 +1514,6 @@ export class AgentSessionManager extends EventEmitter {
 			sessionId,
 			{ content: { type: "thought", body: `Using model: ${model}` } },
 			"model notification",
-		);
-	}
-
-	/**
-	 * Post an ephemeral "Analyzing your request..." thought and return the activity ID
-	 */
-	async postAnalyzingThought(sessionId: string): Promise<string | null> {
-		return this.postActivity(
-			sessionId,
-			{
-				content: { type: "thought", body: "Analyzing your request…" },
-				ephemeral: true,
-			},
-			"analyzing thought",
 		);
 	}
 

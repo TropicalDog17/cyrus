@@ -266,3 +266,209 @@ describe("ConfigManager.reconcile", () => {
 		expect(result.repositoryChanges.removed).toHaveLength(0);
 	});
 });
+
+/**
+ * Phase A A7 decomposition: ConfigManager also *applies* repository-config
+ * diffs (add/modify/remove) to the shared repositories map and computes
+ * workspace-token diffs. EdgeWorker retains only the live-object wiring
+ * (issue trackers, activity sinks, sessions).
+ */
+describe("ConfigManager apply* methods", () => {
+	let logger: ILogger;
+
+	const repo = (overrides: Partial<RepositoryConfig> = {}): RepositoryConfig =>
+		({
+			id: "repo-1",
+			name: "Repo 1",
+			repositoryPath: "/test/repo",
+			baseBranch: "main",
+			workspaceBaseDir: "/test/workspaces",
+			...overrides,
+		}) as RepositoryConfig;
+
+	beforeEach(() => {
+		logger = {
+			info: vi.fn(),
+			warn: vi.fn(),
+			error: vi.fn(),
+			debug: vi.fn(),
+		} as unknown as ILogger;
+	});
+
+	function makeManager(
+		repositories: Map<string, RepositoryConfig>,
+		config: EdgeWorkerConfig = {
+			repositories: [],
+		} as unknown as EdgeWorkerConfig,
+	): ConfigManager {
+		return new ConfigManager(config, logger, undefined, repositories);
+	}
+
+	describe("applyAddedRepositories", () => {
+		it("adds active repositories to the map", () => {
+			const repositories = new Map<string, RepositoryConfig>();
+			const manager = makeManager(repositories);
+
+			manager.applyAddedRepositories([repo({ id: "new-1" })]);
+
+			expect(repositories.get("new-1")).toBeDefined();
+			expect(logger.info).toHaveBeenCalledWith(
+				expect.stringContaining("Adding repository"),
+			);
+			expect(logger.info).toHaveBeenCalledWith(
+				expect.stringContaining("added successfully"),
+			);
+		});
+
+		it("skips inactive repositories with a log, leaving the map untouched", () => {
+			const repositories = new Map<string, RepositoryConfig>();
+			const manager = makeManager(repositories);
+
+			manager.applyAddedRepositories([
+				repo({ id: "inactive-1", isActive: false }),
+			]);
+
+			expect(repositories.has("inactive-1")).toBe(false);
+			expect(logger.info).toHaveBeenCalledWith(
+				expect.stringContaining("Skipping inactive repository"),
+			);
+		});
+	});
+
+	describe("applyModifiedRepositories", () => {
+		it("replaces an existing entry in the map", () => {
+			const existing = repo({ id: "repo-1", baseBranch: "main" });
+			const repositories = new Map<string, RepositoryConfig>([
+				["repo-1", existing],
+			]);
+			const manager = makeManager(repositories);
+			const updated = repo({ id: "repo-1", baseBranch: "develop" });
+
+			manager.applyModifiedRepositories([updated]);
+
+			expect(repositories.get("repo-1")).toEqual(updated);
+			expect(logger.info).toHaveBeenCalledWith(
+				expect.stringContaining("updated successfully"),
+			);
+		});
+
+		it("warns and skips when the repo id is not already in the map", () => {
+			const repositories = new Map<string, RepositoryConfig>();
+			const manager = makeManager(repositories);
+
+			manager.applyModifiedRepositories([repo({ id: "missing" })]);
+
+			expect(repositories.has("missing")).toBe(false);
+			expect(logger.warn).toHaveBeenCalledWith(
+				expect.stringContaining("not found for update"),
+			);
+		});
+
+		it("logs the active-status transition when isActive changes", () => {
+			const existing = repo({ id: "repo-1", isActive: true });
+			const repositories = new Map<string, RepositoryConfig>([
+				["repo-1", existing],
+			]);
+			const manager = makeManager(repositories);
+
+			manager.applyModifiedRepositories([
+				repo({ id: "repo-1", isActive: false }),
+			]);
+
+			expect(logger.info).toHaveBeenCalledWith(
+				expect.stringContaining("Repository set to inactive"),
+			);
+		});
+	});
+
+	describe("applyRemovedRepositories", () => {
+		it("deletes the repository from the map", () => {
+			const existing = repo({ id: "repo-1" });
+			const repositories = new Map<string, RepositoryConfig>([
+				["repo-1", existing],
+			]);
+			const manager = makeManager(repositories);
+
+			manager.applyRemovedRepositories([existing]);
+
+			expect(repositories.has("repo-1")).toBe(false);
+			expect(logger.info).toHaveBeenCalledWith(
+				expect.stringContaining("Removing repository"),
+			);
+			expect(logger.info).toHaveBeenCalledWith(
+				expect.stringContaining("removed successfully"),
+			);
+		});
+	});
+
+	describe("computeWorkspaceTokenChanges", () => {
+		it("returns an entry for each workspace whose token changed", () => {
+			const config = {
+				repositories: [],
+				linearWorkspaces: {
+					"workspace-1": { linearToken: "old-token" },
+					"workspace-2": { linearToken: "unchanged-token" },
+				},
+			} as unknown as EdgeWorkerConfig;
+			const manager = makeManager(new Map(), config);
+
+			const newConfig = {
+				repositories: [],
+				linearWorkspaces: {
+					"workspace-1": { linearToken: "new-token" },
+					"workspace-2": { linearToken: "unchanged-token" },
+				},
+			} as unknown as EdgeWorkerConfig;
+
+			const changes = manager.computeWorkspaceTokenChanges(newConfig);
+
+			expect(changes).toEqual([
+				{ workspaceId: "workspace-1", newToken: "new-token" },
+			]);
+		});
+
+		it("returns an empty array when no tokens changed", () => {
+			const config = {
+				repositories: [],
+				linearWorkspaces: {
+					"workspace-1": { linearToken: "same-token" },
+				},
+			} as unknown as EdgeWorkerConfig;
+			const manager = makeManager(new Map(), config);
+
+			const changes = manager.computeWorkspaceTokenChanges({
+				...config,
+			});
+
+			expect(changes).toEqual([]);
+		});
+
+		it("reads the OLD config held by ConfigManager, not the new config passed in", () => {
+			const config = {
+				repositories: [],
+				linearWorkspaces: {
+					"workspace-1": { linearToken: "old-token" },
+				},
+			} as unknown as EdgeWorkerConfig;
+			const manager = makeManager(new Map(), config);
+
+			// Simulate the pre-reconcile invariant: computeWorkspaceTokenChanges
+			// must be called BEFORE setConfig(newConfig) to see a real diff.
+			const newConfig = {
+				repositories: [],
+				linearWorkspaces: {
+					"workspace-1": { linearToken: "new-token" },
+				},
+			} as unknown as EdgeWorkerConfig;
+
+			const beforeSetConfig = manager.computeWorkspaceTokenChanges(newConfig);
+			manager.setConfig(newConfig);
+			const afterSetConfig = manager.computeWorkspaceTokenChanges(newConfig);
+
+			expect(beforeSetConfig).toEqual([
+				{ workspaceId: "workspace-1", newToken: "new-token" },
+			]);
+			expect(afterSetConfig).toEqual([]);
+		});
+	});
+});

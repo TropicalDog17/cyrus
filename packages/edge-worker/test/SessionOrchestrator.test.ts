@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	SessionOrchestrator,
 	type SessionOrchestratorDeps,
+	type StartGitHubSessionRequest,
 	type StartSessionRequest,
 } from "../src/SessionOrchestrator.js";
 
@@ -94,6 +95,10 @@ function makeDeps(overrides: Partial<SessionOrchestratorDeps> = {}): {
 			handleClaudeMessage: vi.fn(async () => {}),
 			failSession: vi.fn(async () => {}),
 			markSessionActive: vi.fn(async () => {}),
+			getSession: vi.fn(() => undefined),
+			getActiveSessionsByBranchName: vi.fn(() => []),
+			createCyrusAgentSession: vi.fn(),
+			setActivitySink: vi.fn(),
 		} as any,
 		warmPool: warmPool as any,
 		runnerConfigBuilder: { buildIssueConfig } as any,
@@ -145,6 +150,21 @@ function makeDeps(overrides: Partial<SessionOrchestratorDeps> = {}): {
 		postSystemPromptSelectionThought: vi.fn(async () => {}),
 		emitSessionStarted: vi.fn(),
 		resumeSessionDelegate: vi.fn(async () => {}),
+		getRepositoryForSession: vi.fn(() => REPO),
+		getIssueTracker: vi.fn(() => undefined),
+		postParentResumeAcknowledgment: vi.fn(async () => {}),
+		postActivityDirect: vi.fn(async () => null),
+		getGitHubAppTokenProvider: vi.fn(() => null),
+		getAllRepositories: vi.fn(() => [REPO]),
+		gitHubCommentService: {
+			postIssueComment: vi.fn(async () => ({}) as any),
+			postReviewCommentReply: vi.fn(async () => ({}) as any),
+			addReaction: vi.fn(async () => ({}) as any),
+		} as any,
+		setSessionRepository: vi.fn(),
+		getActivitySinkForRepo: vi.fn(() => undefined),
+		buildGithubAllowedTools: vi.fn(() => ["Read"]),
+		emitGitHubSessionStarted: vi.fn(),
 		...overrides,
 	};
 	return { deps, buildIssueConfig, warmPool, runnerType };
@@ -158,6 +178,50 @@ const START_REQ = (_session: any): StartSessionRequest => ({
 	repositories: [REPO],
 	linearWorkspaceId: "ws-1",
 });
+
+function makeGitHubEvent(overrides: any = {}): any {
+	return {
+		eventType: "issue_comment",
+		deliveryId: "delivery-1",
+		payload: {
+			action: "created",
+			issue: {
+				number: 42,
+				pull_request: {
+					url: "https://api.github.com/repos/org/repo/pulls/42",
+				},
+			},
+			comment: {
+				id: 555,
+				body: "@cyrusagent do the thing",
+				user: { login: "commenter" },
+				html_url: "https://github.com/org/repo/pull/42#issuecomment-555",
+			},
+			repository: {
+				full_name: "org/repo",
+				name: "repo",
+				owner: { login: "org" },
+			},
+		},
+		...overrides,
+	};
+}
+
+function makeGithubReq(overrides: any = {}): StartGitHubSessionRequest {
+	return {
+		event: makeGitHubEvent(),
+		repository: REPO,
+		workspace: { path: "/repo/wt/pr-42", isGitWorktree: true },
+		branchRef: "feature-branch",
+		baseBranchRef: "main",
+		prNumber: 42,
+		sessionKey: "github:org/repo#42",
+		prTitle: "Fix the bug",
+		taskInstructions: "do the thing",
+		systemPrompt: "SYS_PROMPT",
+		...overrides,
+	};
+}
 
 describe("SessionOrchestrator", () => {
 	beforeEach(() => {
@@ -684,6 +748,257 @@ describe("SessionOrchestrator", () => {
 			);
 
 			expect((config as any).warmSession).toBeUndefined();
+		});
+	});
+
+	describe("resolveGitHubToken", () => {
+		it("prefers the forwarded installationToken over the App provider and env var", async () => {
+			const { deps } = makeDeps();
+			const orch = new SessionOrchestrator(deps);
+			const event = makeGitHubEvent({ installationToken: "forwarded-token" });
+
+			await expect(orch.resolveGitHubToken(event)).resolves.toBe(
+				"forwarded-token",
+			);
+		});
+
+		it("falls back to the App token provider when no installationToken is forwarded", async () => {
+			const getToken = vi.fn(async () => "app-minted-token");
+			const { deps } = makeDeps({
+				getGitHubAppTokenProvider: vi.fn(() => ({ getToken }) as any),
+			});
+			const orch = new SessionOrchestrator(deps);
+
+			await expect(orch.resolveGitHubToken(makeGitHubEvent())).resolves.toBe(
+				"app-minted-token",
+			);
+		});
+
+		it("falls back to GITHUB_TOKEN when there is no installationToken or App provider", async () => {
+			const prev = process.env.GITHUB_TOKEN;
+			process.env.GITHUB_TOKEN = "pat-token";
+			try {
+				const { deps } = makeDeps();
+				const orch = new SessionOrchestrator(deps);
+
+				await expect(orch.resolveGitHubToken(makeGitHubEvent())).resolves.toBe(
+					"pat-token",
+				);
+			} finally {
+				process.env.GITHUB_TOKEN = prev;
+			}
+		});
+
+		it("falls back to GITHUB_TOKEN when the App provider throws", async () => {
+			const prev = process.env.GITHUB_TOKEN;
+			process.env.GITHUB_TOKEN = "pat-token";
+			try {
+				const { deps } = makeDeps({
+					getGitHubAppTokenProvider: vi.fn(
+						() =>
+							({
+								getToken: vi.fn(async () => {
+									throw new Error("mint failed");
+								}),
+							}) as any,
+					),
+				});
+				const orch = new SessionOrchestrator(deps);
+
+				await expect(orch.resolveGitHubToken(makeGitHubEvent())).resolves.toBe(
+					"pat-token",
+				);
+			} finally {
+				process.env.GITHUB_TOKEN = prev;
+			}
+		});
+	});
+
+	describe("createGitHubWorkspace", () => {
+		it("creates a worktree via gitService with all configured repos as cross-repo siblings", async () => {
+			const createGitWorktree = vi.fn(async () => ({
+				path: "/repo/wt/pr-42",
+				isGitWorktree: true,
+			}));
+			const REPO_2 = { ...REPO, id: "repo-2" };
+			const { deps } = makeDeps({
+				gitService: {
+					getGitMetadataDirectoriesForWorkspace: vi.fn(() => []),
+					createGitWorktree,
+				} as any,
+				getAllRepositories: vi.fn(() => [REPO, REPO_2]),
+			});
+			const orch = new SessionOrchestrator(deps);
+
+			const result = await orch.createGitHubWorkspace(
+				REPO,
+				"feature-branch",
+				42,
+			);
+
+			expect(result).toEqual({ path: "/repo/wt/pr-42", isGitWorktree: true });
+			expect(createGitWorktree).toHaveBeenCalledTimes(1);
+			const [syntheticIssue, repos, options] = createGitWorktree.mock
+				.calls[0] as [any, any, any];
+			expect(syntheticIssue.identifier).toBe("PR-42");
+			expect(syntheticIssue.branchName).toBe("feature-branch");
+			expect(repos).toEqual([REPO]);
+			expect(options.crossRepoSiblingRepositories).toEqual([REPO, REPO_2]);
+		});
+
+		it("returns null and logs when worktree creation throws", async () => {
+			const { deps } = makeDeps({
+				gitService: {
+					getGitMetadataDirectoriesForWorkspace: vi.fn(() => []),
+					createGitWorktree: vi.fn(async () => {
+						throw new Error("worktree boom");
+					}),
+				} as any,
+			});
+			const orch = new SessionOrchestrator(deps);
+
+			const result = await orch.createGitHubWorkspace(
+				REPO,
+				"feature-branch",
+				42,
+			);
+
+			expect(result).toBeNull();
+			expect(deps.logger.error).toHaveBeenCalled();
+		});
+	});
+
+	describe("startGitHubSession", () => {
+		function makeAgentSessionManagerForGithub(session: any) {
+			return {
+				addAgentRunner: vi.fn(),
+				getActiveSessionsByBranchName: vi.fn(() => []),
+				createCyrusAgentSession: vi.fn(),
+				setActivitySink: vi.fn(),
+				getSession: vi.fn(() => session),
+			};
+		}
+
+		it("creates the session, starts the runner non-streaming, and posts the reply on completion", async () => {
+			const session: any = { id: "github-delivery-1", metadata: undefined };
+			const agentSessionManager = makeAgentSessionManagerForGithub(session);
+			const activitySink = { post: vi.fn() };
+			const postIssueComment = vi.fn(async () => ({}) as any);
+			const { deps } = makeDeps({
+				agentSessionManager: agentSessionManager as any,
+				getActivitySinkForRepo: vi.fn(() => activitySink as any),
+				buildGithubAllowedTools: vi.fn(() => ["Read", "Edit"]),
+				gitHubCommentService: {
+					postIssueComment,
+					postReviewCommentReply: vi.fn(async () => ({}) as any),
+					addReaction: vi.fn(async () => ({}) as any),
+				} as any,
+			});
+			h.behavior.current.start = vi.fn(async () => ({
+				sessionId: "runner-sess",
+			}));
+			h.behavior.current.getMessages = vi.fn(() => [
+				{ type: "assistant", content: [{ type: "text", text: "All done" }] },
+			]);
+			const orch = new SessionOrchestrator(deps);
+
+			await orch.startGitHubSession(
+				makeGithubReq({
+					event: makeGitHubEvent({ installationToken: "gh-token" }),
+				}),
+			);
+
+			expect(agentSessionManager.createCyrusAgentSession).toHaveBeenCalledWith(
+				"github-delivery-1",
+				"github:org/repo#42",
+				expect.objectContaining({
+					id: "github:org/repo#42",
+					identifier: "repo#42",
+					title: "Fix the bug",
+					branchName: "feature-branch",
+				}),
+				{ path: "/repo/wt/pr-42", isGitWorktree: true },
+				"github",
+				[
+					{
+						repositoryId: "repo-1",
+						branchName: "feature-branch",
+						baseBranchName: "main",
+					},
+				],
+			);
+			expect(deps.setSessionRepository).toHaveBeenCalledWith(
+				"github-delivery-1",
+				"repo-1",
+			);
+			expect(agentSessionManager.setActivitySink).toHaveBeenCalledWith(
+				"github-delivery-1",
+				activitySink,
+			);
+			expect(session.metadata.commentId).toBe("555");
+			expect(h.created).toHaveLength(1);
+			expect(h.created[0].start).toHaveBeenCalledWith("do the thing");
+			expect(agentSessionManager.addAgentRunner).toHaveBeenCalledWith(
+				"github-delivery-1",
+				h.created[0],
+			);
+			expect(deps.emitGitHubSessionStarted).toHaveBeenCalledWith(
+				"github:org/repo#42",
+				expect.objectContaining({ id: "github:org/repo#42" }),
+				"repo-1",
+			);
+			expect(postIssueComment).toHaveBeenCalledWith(
+				expect.objectContaining({
+					token: "gh-token",
+					owner: "org",
+					repo: "repo",
+					issueNumber: 42,
+					body: "All done",
+				}),
+			);
+			expect(deps.savePersistedState).toHaveBeenCalled();
+		});
+
+		it("does not build a runner when the session cannot be looked up after creation", async () => {
+			const agentSessionManager = makeAgentSessionManagerForGithub(undefined);
+			const { deps } = makeDeps({
+				agentSessionManager: agentSessionManager as any,
+			});
+			const orch = new SessionOrchestrator(deps);
+
+			await orch.startGitHubSession(makeGithubReq());
+
+			expect(agentSessionManager.addAgentRunner).not.toHaveBeenCalled();
+			expect(deps.emitGitHubSessionStarted).not.toHaveBeenCalled();
+			expect(deps.logger.error).toHaveBeenCalled();
+		});
+
+		it("still saves persisted state and skips the reply when the runner fails to start", async () => {
+			const session: any = { id: "github-delivery-1", metadata: undefined };
+			const agentSessionManager = makeAgentSessionManagerForGithub(session);
+			const postIssueComment = vi.fn(async () => ({}) as any);
+			const { deps } = makeDeps({
+				agentSessionManager: agentSessionManager as any,
+				gitHubCommentService: {
+					postIssueComment,
+					postReviewCommentReply: vi.fn(async () => ({}) as any),
+					addReaction: vi.fn(async () => ({}) as any),
+				} as any,
+			});
+			h.behavior.current.start = vi.fn(async () => {
+				throw new Error("runner boom");
+			});
+			const orch = new SessionOrchestrator(deps);
+
+			await orch.startGitHubSession(
+				makeGithubReq({
+					event: makeGitHubEvent({ installationToken: "gh-token" }),
+				}),
+			);
+
+			expect(deps.logger.error).toHaveBeenCalled();
+			expect(postIssueComment).not.toHaveBeenCalled();
+			expect(deps.savePersistedState).toHaveBeenCalled();
 		});
 	});
 });

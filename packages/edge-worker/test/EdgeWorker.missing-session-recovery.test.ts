@@ -101,7 +101,6 @@ describe("EdgeWorker - Missing Session/Repository Recovery (CYPACK-852)", () => 
 				workspace: { path: "/test/workspaces/TEST-123", isGitWorktree: false },
 			}),
 			createResponseActivity: vi.fn().mockResolvedValue(undefined),
-			postAnalyzingThought: vi.fn().mockResolvedValue(undefined),
 			requestSessionStop: vi.fn(),
 			setActivitySink: vi.fn(),
 			on: vi.fn(),

@@ -38,18 +38,21 @@ export interface ConfigManagerEvents {
 
 /**
  * ConfigManager is responsible for watching, loading, validating, and
- * diffing the EdgeWorker configuration file.  It does **not** perform any
- * repository lifecycle operations (adding / updating / removing session
- * managers, issue trackers, etc.) -- instead it emits a `configChanged`
- * event that the EdgeWorker listens to and acts upon.
+ * diffing the EdgeWorker configuration file.  It also *applies*
+ * repository-config diffs (add / modify / remove) to the shared
+ * `repositories` map and computes workspace-token diffs -- but it does
+ * **not** perform any live-object lifecycle operations (starting/stopping
+ * session managers, issue trackers, activity sinks, etc.) -- instead it
+ * emits a `configChanged` event that the EdgeWorker listens to and acts
+ * upon for that live-object teardown/wiring.
  *
  * Usage:
  * ```ts
  * const configManager = new ConfigManager(config, logger, configPath, repositories);
  * configManager.on("configChanged", async (changes) => {
- *   await removeDeletedRepositories(changes.removed);
- *   await updateModifiedRepositories(changes.modified);
- *   await addNewRepositories(changes.added);
+ *   await removeDeletedRepositories(changes.removed); // live teardown, then applyRemovedRepositories
+ *   configManager.applyModifiedRepositories(changes.modified);
+ *   configManager.applyAddedRepositories(changes.added);
  *   this.config = changes.newConfig;
  * });
  * configManager.startConfigWatcher();
@@ -249,6 +252,117 @@ export class ConfigManager extends EventEmitter {
 		const repositoryChanges = this.detectRepositoryChanges(normalized);
 
 		return { merged: normalized, changedKeys, repositoryChanges };
+	}
+
+	/**
+	 * Apply reconcile's 'added' diff to the repositories map. Sole mutator
+	 * entry for added repos.
+	 */
+	applyAddedRepositories(added: RepositoryConfig[]): void {
+		for (const repo of added) {
+			if (repo.isActive === false) {
+				this.logger.info(`⏭️  Skipping inactive repository: ${repo.name}`);
+				continue;
+			}
+
+			try {
+				this.logger.info(`➕ Adding repository: ${repo.name} (${repo.id})`);
+
+				// Paths already normalized by reconcile's normalizeConfigPaths.
+				this.repositories.set(repo.id, repo);
+
+				this.logger.info(`✅ Repository added successfully: ${repo.name}`);
+			} catch (error) {
+				this.logger.error(`❌ Failed to add repository ${repo.name}:`, error);
+			}
+		}
+	}
+
+	/**
+	 * Apply reconcile's 'modified' diff to the repositories map.
+	 */
+	applyModifiedRepositories(modified: RepositoryConfig[]): void {
+		for (const repo of modified) {
+			try {
+				const oldRepo = this.repositories.get(repo.id);
+				if (!oldRepo) {
+					this.logger.warn(
+						`⚠️  Repository ${repo.id} not found for update, skipping`,
+					);
+					continue;
+				}
+
+				this.logger.info(`🔄 Updating repository: ${repo.name} (${repo.id})`);
+
+				// Paths already normalized by reconcile's normalizeConfigPaths.
+				this.repositories.set(repo.id, repo);
+
+				// If active status changed
+				if (oldRepo.isActive !== repo.isActive) {
+					if (repo.isActive === false) {
+						this.logger.info(
+							`  ⏸️  Repository set to inactive - existing sessions will continue`,
+						);
+					} else {
+						this.logger.info(`  ▶️  Repository reactivated`);
+					}
+				}
+
+				this.logger.info(`✅ Repository updated successfully: ${repo.name}`);
+			} catch (error) {
+				this.logger.error(
+					`❌ Failed to update repository ${repo.name}:`,
+					error,
+				);
+			}
+		}
+	}
+
+	/**
+	 * Apply reconcile's 'removed' diff to the repositories map ONLY. Does
+	 * NOT stop sessions or post activities -- that live teardown stays in
+	 * EdgeWorker.removeDeletedRepositories and runs before this call.
+	 */
+	applyRemovedRepositories(removed: RepositoryConfig[]): void {
+		for (const repo of removed) {
+			try {
+				this.logger.info(`🗑️  Removing repository: ${repo.name} (${repo.id})`);
+
+				this.repositories.delete(repo.id);
+
+				this.logger.info(`✅ Repository removed successfully: ${repo.name}`);
+			} catch (error) {
+				this.logger.error(
+					`❌ Failed to remove repository ${repo.name}:`,
+					error,
+				);
+			}
+		}
+	}
+
+	/**
+	 * Pure diff of `this.config.linearWorkspaces` (the OLD, pre-reconcile
+	 * config) vs `newConfig.linearWorkspaces`: returns one entry per
+	 * workspaceId whose `linearToken` changed, carrying the new token.
+	 *
+	 * NOTE: this reads `this.config` as the OLD config, so it MUST be
+	 * invoked before `setConfig(newConfig)` is called -- otherwise the
+	 * diff silently compares new against new and reports no changes.
+	 */
+	computeWorkspaceTokenChanges(
+		newConfig: EdgeWorkerConfig,
+	): Array<{ workspaceId: string; newToken: string }> {
+		const old = this.config.linearWorkspaces ?? {};
+		const next = newConfig.linearWorkspaces ?? {};
+
+		const changes: Array<{ workspaceId: string; newToken: string }> = [];
+		for (const [workspaceId, newWsConfig] of Object.entries(next)) {
+			const oldToken = old[workspaceId]?.linearToken;
+			const newToken = newWsConfig.linearToken;
+			if (oldToken === newToken) continue;
+			changes.push({ workspaceId, newToken });
+		}
+		return changes;
 	}
 
 	// ------------------------------------------------------------------
