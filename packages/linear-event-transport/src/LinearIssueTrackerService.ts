@@ -90,6 +90,14 @@ export class LinearIssueTrackerService implements IIssueTrackerService {
 	}
 
 	/**
+	 * Read-only view of the OAuth config, which now lives in the token refresher.
+	 * Preserves the historical `oauthConfig` property that callers and tests read.
+	 */
+	get oauthConfig(): LinearOAuthConfig | undefined {
+		return this.tokenRefresher.config;
+	}
+
+	/**
 	 * Update the access token using setHeader on the underlying GraphQL client.
 	 * This is more efficient than recreating the entire LinearClient.
 	 * @param token - New access token

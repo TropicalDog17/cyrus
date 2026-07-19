@@ -75,6 +75,11 @@ export class LinearTokenRefresher {
 		}
 	}
 
+	/** The OAuth config this refresher was constructed with (undefined if none). */
+	get config(): LinearOAuthConfig | undefined {
+		return this.oauthConfig;
+	}
+
 	/**
 	 * Patches `linearClient.client.request` to intercept 401 errors, refresh
 	 * the access token (coalescing concurrent refreshes), and retry the
