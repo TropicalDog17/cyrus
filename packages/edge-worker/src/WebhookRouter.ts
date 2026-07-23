@@ -381,6 +381,16 @@ export class WebhookRouter {
 	): Promise<void> {
 		const issueId = webhook.agentSession?.issue?.id;
 
+		// Re-home a stale cache entry when the issue's project has moved away from
+		// its cached repo (e.g. a sub-issue that inherited its parent's project);
+		// see RepositoryRouter.reconcileCacheOnProjectMismatch.
+		if (issueId) {
+			await this.deps.repositoryRouter.reconcileCacheOnProjectMismatch(
+				webhook,
+				repos,
+			);
+		}
+
 		// Check the cache first — an @mention on an issue that already has a
 		// session must reuse the existing repository (no repo switching).
 		let repositories: RepositoryConfig[] | null = null;
@@ -554,6 +564,14 @@ export class WebhookRouter {
 			);
 			return;
 		}
+
+		// Re-home a stale cache entry before the lookup when the issue's project
+		// has moved away from its cached repo (see
+		// RepositoryRouter.reconcileCacheOnProjectMismatch).
+		await this.deps.repositoryRouter.reconcileCacheOnProjectMismatch(
+			webhook,
+			this.deps.allRepositories(),
+		);
 
 		let repositories = this.deps.getCachedRepositories(issueId);
 		if (!repositories || repositories.length === 0) {
