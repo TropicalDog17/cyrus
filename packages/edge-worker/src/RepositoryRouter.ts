@@ -138,6 +138,91 @@ export class RepositoryRouter {
 	}
 
 	/**
+	 * Reconcile a cached issue→repository mapping against the issue's current
+	 * project, re-homing it when the two have drifted apart.
+	 *
+	 * A sub-issue inherits its parent's project, so the first routing decision can
+	 * pin an issue to the parent-project's repository. Because the mapping is read
+	 * back verbatim on every later webhook (see {@link getCachedRepositories}),
+	 * moving the issue to the correct project afterwards would otherwise never
+	 * take effect. This detects that drift — a cached repo that participates in
+	 * project routing whose projectKeys no longer contain the issue's current
+	 * project, while a *different* configured repo's projectKeys do — and repoints
+	 * the cache at the project-matched repository so the caller routes there.
+	 *
+	 * Forcing the mapping (rather than only deleting it) deliberately overrides the
+	 * "existing active session wins" (Priority 0) and "no repo switch within an
+	 * issue" rules: moving an issue's project is an explicit signal to re-home it.
+	 * Any worktree / session already provisioned on the previous repo is abandoned
+	 * in place — a fresh session/worktree is provisioned on the new repo.
+	 *
+	 * @returns the project-matched repositories when the cache was repointed, else null.
+	 */
+	async reconcileCacheOnProjectMismatch(
+		webhook: AgentSessionCreatedWebhook | AgentSessionPromptedWebhook,
+		repos: RepositoryConfig[],
+	): Promise<RepositoryConfig[] | null> {
+		const { issueId } = this.extractIssueInfo(webhook);
+		const workspaceId = webhook.organizationId;
+		if (!issueId || !workspaceId) return null;
+
+		const cachedRepositoryIds = this.issueRepositoryCache.get(issueId);
+		if (!cachedRepositoryIds || cachedRepositoryIds.length === 0) return null;
+
+		// Only meaningful when the cached mapping participates in project routing.
+		// A description-tag / label / team decision is authoritative for its own
+		// reasons and must not be second-guessed here.
+		const cachedProjectRepos = cachedRepositoryIds
+			.map((id) => repos.find((r) => r.id === id))
+			.filter(
+				(r): r is RepositoryConfig =>
+					!!r?.projectKeys && r.projectKeys.length > 0,
+			);
+		if (cachedProjectRepos.length === 0) return null;
+
+		// Fetch the issue's current project name.
+		let projectName: string | undefined;
+		try {
+			const issueTracker = this.deps.getIssueTracker(workspaceId);
+			if (!issueTracker) return null;
+			const fullIssue = await issueTracker.fetchIssue(issueId);
+			const project = await fullIssue?.project;
+			projectName = project?.name ?? undefined;
+		} catch (error) {
+			this.logger.debug(
+				`Failed to fetch project for cache reconciliation on issue ${issueId}:`,
+				error,
+			);
+			return null;
+		}
+
+		// No project → cannot determine a mismatch; leave the cache untouched.
+		if (!projectName) return null;
+		const currentProject: string = projectName;
+
+		// Cached mapping still valid for the current project → nothing to do.
+		if (
+			cachedProjectRepos.some((r) => r.projectKeys?.includes(currentProject))
+		) {
+			return null;
+		}
+
+		// The current project positively maps to a different configured repo.
+		const projectMatchedRepo = repos.find((r) =>
+			r.projectKeys?.includes(currentProject),
+		);
+		if (!projectMatchedRepo) return null;
+
+		this.logger.info(
+			`Issue ${issueId} project "${currentProject}" no longer matches cached repositories [${cachedProjectRepos
+				.map((r) => r.name)
+				.join(", ")}]; re-routing to ${projectMatchedRepo.name}`,
+		);
+		this.issueRepositoryCache.set(issueId, [projectMatchedRepo.id]);
+		return [projectMatchedRepo];
+	}
+
+	/**
 	 * Determine repositories for webhook using multi-priority routing:
 	 * Priority 0: Existing active sessions
 	 * Priority 1: Description tag (explicit [repo=...] in issue description)

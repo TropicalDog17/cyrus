@@ -230,6 +230,18 @@ describe("WebhookRouter.routePromptedActivity", () => {
 			]);
 		});
 
+		it("reconciles a stale project cache before the cache lookup", async () => {
+			const repo = makeRepo("repo-1");
+			const allRepos = [repo, makeRepo("repo-2")];
+			deps.getCachedRepositories.mockReturnValue([repo]);
+			deps.allRepositories.mockReturnValue(allRepos);
+			const webhook = prompted("keep going");
+			await router.routePromptedActivity(webhook);
+			expect(
+				deps.repositoryRouter.reconcileCacheOnProjectMismatch,
+			).toHaveBeenCalledWith(webhook, allRepos);
+		});
+
 		it("bails with an error log (no continuation) when issueId is missing", async () => {
 			await router.routePromptedActivity(prompted("hi", { issueId: null }));
 			expect(deps.getCachedRepositories).not.toHaveBeenCalled();

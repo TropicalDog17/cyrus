@@ -20,6 +20,7 @@ export type SpiedWebhookRouterDeps = {
 		determineRepositoryForWebhook: Mock;
 		elicitUserRepositorySelection: Mock;
 		hasPendingSelection: Mock;
+		reconcileCacheOnProjectMismatch: Mock;
 	};
 	askUserQuestionHandler: {
 		hasPendingQuestion: Mock;
@@ -38,6 +39,7 @@ export function makeWebhookRouterDeps(
 				.mockResolvedValue({ type: "none" }),
 			elicitUserRepositorySelection: vi.fn().mockResolvedValue(undefined),
 			hasPendingSelection: vi.fn().mockReturnValue(false),
+			reconcileCacheOnProjectMismatch: vi.fn().mockResolvedValue(null),
 		},
 		askUserQuestionHandler: {
 			hasPendingQuestion: vi.fn().mockReturnValue(false),

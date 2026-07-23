@@ -50,6 +50,16 @@ describe("WebhookRouter.routeCreatedWebhook", () => {
 		});
 	});
 
+	it("reconciles a stale project cache before consulting the cache", async () => {
+		const repo = makeRepo("cached-repo");
+		deps.getCachedRepositories.mockReturnValue([repo]);
+		const webhook = created();
+		await router.routeCreatedWebhook(webhook, repos);
+		expect(
+			deps.repositoryRouter.reconcileCacheOnProjectMismatch,
+		).toHaveBeenCalledWith(webhook, repos);
+	});
+
 	it("routingResult 'none' is a no-op (no elicit/park/start)", async () => {
 		deps.getCachedRepositories.mockReturnValue(null);
 		deps.repositoryRouter.determineRepositoryForWebhook.mockResolvedValue({

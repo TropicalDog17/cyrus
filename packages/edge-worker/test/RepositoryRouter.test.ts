@@ -394,6 +394,183 @@ describe("RepositoryRouter", () => {
 			});
 		});
 
+		describe("when reconciling cache on project mismatch", () => {
+			it("should re-home a cached repo when the issue's project moved to a different repo's project", async () => {
+				// Given: two project-routed repos, and an issue cached to the wrong one
+				// (the DEV-192 sub-issue-inherited-parent-project scenario).
+				const shopRepo = env
+					.repository("shop-repo", "life-unity-shop-backend")
+					.inWorkspace("default-workspace")
+					.withProjects("Life Shop")
+					.build();
+				const indexerRepo = env
+					.repository("indexer-repo", "Life Unity Indexer")
+					.inWorkspace("default-workspace")
+					.withProjects("Life Unity Indexer")
+					.build();
+
+				env.router.getIssueRepositoryCache().set("issue-1", ["shop-repo"]);
+				env.issueIsInProject("issue-1", "Life Unity Indexer");
+
+				const webhook = env
+					.webhook()
+					.inWorkspace("default-workspace")
+					.forIssue("issue-1", "DEV-192")
+					.build();
+
+				// When
+				const result = await env.router.reconcileCacheOnProjectMismatch(
+					webhook,
+					[shopRepo, indexerRepo],
+				);
+
+				// Then: cache is repointed to the project-matched repo
+				expect(result).toEqual([indexerRepo]);
+				expect(env.router.getIssueRepositoryCache().get("issue-1")).toEqual([
+					"indexer-repo",
+				]);
+			});
+
+			it("should not touch the cache when the cached repo still matches the current project", async () => {
+				const shopRepo = env
+					.repository("shop-repo", "Shop")
+					.inWorkspace("default-workspace")
+					.withProjects("Life Shop")
+					.build();
+
+				env.router.getIssueRepositoryCache().set("issue-1", ["shop-repo"]);
+				env.issueIsInProject("issue-1", "Life Shop");
+
+				const webhook = env
+					.webhook()
+					.inWorkspace("default-workspace")
+					.forIssue("issue-1", "DEV-1")
+					.build();
+
+				const result = await env.router.reconcileCacheOnProjectMismatch(
+					webhook,
+					[shopRepo],
+				);
+
+				expect(result).toBeNull();
+				expect(env.router.getIssueRepositoryCache().get("issue-1")).toEqual([
+					"shop-repo",
+				]);
+			});
+
+			it("should not touch the cache when the cached repo does not participate in project routing", async () => {
+				// Cached repo was chosen by some non-project method (no projectKeys),
+				// so a project move must not second-guess it.
+				const teamRepo = env
+					.repository("team-repo", "Team Repo")
+					.inWorkspace("default-workspace")
+					.withTeams("DEV")
+					.build();
+				const indexerRepo = env
+					.repository("indexer-repo", "Indexer")
+					.inWorkspace("default-workspace")
+					.withProjects("Life Unity Indexer")
+					.build();
+
+				env.router.getIssueRepositoryCache().set("issue-1", ["team-repo"]);
+				env.issueIsInProject("issue-1", "Life Unity Indexer");
+
+				const webhook = env
+					.webhook()
+					.inWorkspace("default-workspace")
+					.forIssue("issue-1", "DEV-1")
+					.build();
+
+				const result = await env.router.reconcileCacheOnProjectMismatch(
+					webhook,
+					[teamRepo, indexerRepo],
+				);
+
+				expect(result).toBeNull();
+				expect(env.router.getIssueRepositoryCache().get("issue-1")).toEqual([
+					"team-repo",
+				]);
+			});
+
+			it("should not touch the cache when the issue has no project", async () => {
+				const shopRepo = env
+					.repository("shop-repo", "Shop")
+					.inWorkspace("default-workspace")
+					.withProjects("Life Shop")
+					.build();
+
+				env.router.getIssueRepositoryCache().set("issue-1", ["shop-repo"]);
+				// Issue has no project (default in mock)
+
+				const webhook = env
+					.webhook()
+					.inWorkspace("default-workspace")
+					.forIssue("issue-1", "DEV-1")
+					.build();
+
+				const result = await env.router.reconcileCacheOnProjectMismatch(
+					webhook,
+					[shopRepo],
+				);
+
+				expect(result).toBeNull();
+				expect(env.router.getIssueRepositoryCache().get("issue-1")).toEqual([
+					"shop-repo",
+				]);
+			});
+
+			it("should not touch the cache when no configured repo matches the current project", async () => {
+				const shopRepo = env
+					.repository("shop-repo", "Shop")
+					.inWorkspace("default-workspace")
+					.withProjects("Life Shop")
+					.build();
+
+				env.router.getIssueRepositoryCache().set("issue-1", ["shop-repo"]);
+				env.issueIsInProject("issue-1", "Some Unconfigured Project");
+
+				const webhook = env
+					.webhook()
+					.inWorkspace("default-workspace")
+					.forIssue("issue-1", "DEV-1")
+					.build();
+
+				const result = await env.router.reconcileCacheOnProjectMismatch(
+					webhook,
+					[shopRepo],
+				);
+
+				expect(result).toBeNull();
+				expect(env.router.getIssueRepositoryCache().get("issue-1")).toEqual([
+					"shop-repo",
+				]);
+			});
+
+			it("should return null when the issue has no cache entry", async () => {
+				const shopRepo = env
+					.repository("shop-repo", "Shop")
+					.inWorkspace("default-workspace")
+					.withProjects("Life Shop")
+					.build();
+
+				env.issueIsInProject("issue-1", "Life Shop");
+
+				const webhook = env
+					.webhook()
+					.inWorkspace("default-workspace")
+					.forIssue("issue-1", "DEV-1")
+					.build();
+
+				const result = await env.router.reconcileCacheOnProjectMismatch(
+					webhook,
+					[shopRepo],
+				);
+
+				expect(result).toBeNull();
+				expect(env.router.getIssueRepositoryCache().has("issue-1")).toBe(false);
+			});
+		});
+
 		describe("when persisting cache", () => {
 			it("should restore cache from serialized data (new string[] format)", () => {
 				// Given: A serialized cache in new format
