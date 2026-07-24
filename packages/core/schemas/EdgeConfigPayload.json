@@ -614,9 +614,12 @@
 		"codexDefaultFallbackModel": {
 			"type": "string"
 		},
+		"piDefaultModel": {
+			"type": "string"
+		},
 		"defaultRunner": {
 			"type": "string",
-			"enum": ["claude", "cursor", "codex"]
+			"enum": ["claude", "cursor", "codex", "pi"]
 		},
 		"defaultModel": {
 			"type": "string"

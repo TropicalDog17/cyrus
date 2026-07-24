@@ -191,9 +191,29 @@ For a given session the model is chosen from the first source that is set:
 2. **Model label** — a Linear label whose name maps to a model (e.g. `opus`, `sonnet`).
 3. **Label-prompt `model`** — the `model` on the matched `labelPrompts` entry (advanced format).
 4. **Repository `model`** — the repository-level default below.
-5. **Runner default** — the built-in default for the selected runner (`claudeDefaultModel`, `cursorDefaultModel`, …).
+5. **Runner default** — the built-in default for the selected runner (`claudeDefaultModel`, `cursorDefaultModel`, `codexDefaultModel`, or `piDefaultModel`). When `piDefaultModel` is omitted, Pi uses its persisted/default model selection.
 
-A model implies a runner (a `composer-*` model selects Cursor, a `gpt-*`/`o3`/`codex` model selects Codex, an `opus`/`sonnet`/`haiku` model selects Claude). If a **`model`** or **`fallbackModel`** override names a family that conflicts with the runner already resolved for the session, that override is ignored rather than silently switching runners — Cyrus does not change repositories or runner families mid-issue.
+A model implies a runner (a `composer-*` model selects Cursor, a `gpt-*`/`o3`/`codex` model selects Codex, an `opus`/`sonnet`/`haiku` model selects Claude). Select the provider-neutral Pi harness explicitly with a `pi` label or `[agent=pi]`; Pi accepts any provider/model pair. If a **`model`** or **`fallbackModel`** override names a family that conflicts with another runner already resolved for the session, that override is ignored rather than silently switching runners — Cyrus does not change repositories or runner families mid-issue.
+
+### Pi runner
+
+Select Pi per issue with a `pi` label or `[agent=pi]`, or make it the default:
+
+```json
+{
+  "defaultRunner": "pi",
+  "piDefaultModel": "anthropic/claude-sonnet-4-5"
+}
+```
+
+`piDefaultModel` is optional; without it, Pi uses its persisted/default model.
+The equivalent environment override is `CYRUS_PI_DEFAULT_MODEL`. Cyrus launches
+the pinned Pi CLI by default; `CYRUS_PI_COMMAND` can replace that command for a
+custom installation. Pi `0.82.0` requires Node.js 22.19 or newer.
+
+Pi core does not load MCP server configuration directly. Project/global Pi
+extensions can expose custom tools, and Cyrus preserves `mcp__*` tool names for
+those extensions.
 
 ### `model` (string, repository-level)
 
@@ -213,7 +233,7 @@ Model Cyrus falls back to when the primary model is unavailable (e.g. capacity/o
 
 ### `effort` (string)
 
-Reasoning-effort level for **Claude** sessions: one of `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. Steers how much the model reasons before acting; there is no separate `thinking` knob. Cursor and Codex ignore it.
+Reasoning-effort level for **Claude** sessions: one of `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. Steers how much the model reasons before acting; there is no separate `thinking` knob. Cursor, Codex, and Pi ignore it.
 
 Effort is resolved with the same first-set-wins precedence, narrowest scope first:
 
@@ -532,7 +552,7 @@ When omitted, the SDK's default (model-context-sized) behavior is preserved and 
 
 ### `claudeDefaultEffort` (string)
 
-Default reasoning-effort level for all Claude sessions: one of `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. Applies to all repositories; Claude runner only (Cursor and Codex ignore it).
+Default reasoning-effort level for all Claude sessions: one of `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. Applies to all repositories; Claude runner only (Cursor, Codex, and Pi ignore it).
 
 ```json
 {

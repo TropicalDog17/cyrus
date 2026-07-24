@@ -27,6 +27,7 @@ import {
 	getDefaultReposDir,
 	getDefaultWorktreesDir,
 	type RepositoryConfig,
+	type RunnerType,
 } from "cyrus-core";
 import { composeEdgeWorker } from "cyrus-edge-worker";
 import { bold, cyan, dim, gray, green, success } from "./src/utils/colors.js";
@@ -164,12 +165,15 @@ function createEdgeWorkerConfig(): EdgeWorkerConfig {
 		claudeDefaultModel: "sonnet",
 		claudeDefaultFallbackModel: "haiku",
 		// Env-gated runner selection for harness validation (default unchanged).
-		// e.g. CYRUS_DEFAULT_RUNNER=cursor to exercise the Cursor (@cursor/sdk) path.
+		// e.g. CYRUS_DEFAULT_RUNNER=pi to exercise Pi's JSONL RPC path.
 		...(process.env.CYRUS_DEFAULT_RUNNER && {
-			defaultRunner: process.env.CYRUS_DEFAULT_RUNNER as "claude" | "cursor",
+			defaultRunner: process.env.CYRUS_DEFAULT_RUNNER as RunnerType,
 		}),
 		...(process.env.CURSOR_MODEL && {
 			cursorDefaultModel: process.env.CURSOR_MODEL,
+		}),
+		...(process.env.CYRUS_PI_DEFAULT_MODEL && {
+			piDefaultModel: process.env.CYRUS_PI_DEFAULT_MODEL,
 		}),
 		// Env-gated early auto-compaction, for verifying that the SDK honors the
 		// window (and whether it does so when resuming an already-oversized
