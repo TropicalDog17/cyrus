@@ -214,9 +214,15 @@ export class WorkerService {
 			cursorDefaultFallbackModel:
 				process.env.CYRUS_CURSOR_DEFAULT_FALLBACK_MODEL ||
 				edgeConfig.cursorDefaultFallbackModel,
+			piDefaultModel:
+				process.env.CYRUS_PI_DEFAULT_MODEL || edgeConfig.piDefaultModel,
 			defaultRunner:
-				(process.env.CYRUS_DEFAULT_RUNNER as "claude" | "cursor" | undefined) ||
-				edgeConfig.defaultRunner,
+				(process.env.CYRUS_DEFAULT_RUNNER as
+					| "claude"
+					| "cursor"
+					| "codex"
+					| "pi"
+					| undefined) || edgeConfig.defaultRunner,
 			issueUpdateTrigger: edgeConfig.issueUpdateTrigger,
 			prReviewTrigger: edgeConfig.prReviewTrigger,
 			promptDefaults: edgeConfig.promptDefaults,

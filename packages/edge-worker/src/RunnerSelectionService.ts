@@ -20,9 +20,9 @@ const CODEX_DEFAULT_MODEL = "gpt-5-codex";
 /**
  * Resolves the runner type and model for a session.
  *
- * This fork supports three runners: Claude (default), Cursor, and Codex. The
+ * This fork supports four runners: Claude (default), Cursor, Codex, and Pi. The
  * runner is chosen from an `[agent=...]` description tag, a
- * `cursor`/`claude`/`codex` label, or an explicit model whose family implies
+ * `cursor`/`claude`/`codex`/`pi` label, or an explicit model whose family implies
  * the runner; otherwise it falls back to the configured `defaultRunner` (or
  * Claude). The service also resolves the model + fallback model from labels and
  * the `[model=...]` description tag, with repository/global defaults as the
@@ -88,6 +88,11 @@ export class RunnerSelectionService {
 		if (runnerType === "codex") {
 			return this.config.codexDefaultModel || CODEX_DEFAULT_MODEL;
 		}
+		if (runnerType === "pi") {
+			// Pi is provider-neutral and persists its own selected model. An empty
+			// value deliberately means "do not pass --model".
+			return this.config.piDefaultModel || "";
+		}
 		return this.config.claudeDefaultModel || this.config.defaultModel || "opus";
 	}
 
@@ -104,6 +109,10 @@ export class RunnerSelectionService {
 		}
 		if (runnerType === "codex") {
 			return this.config.codexDefaultFallbackModel || CODEX_DEFAULT_MODEL;
+		}
+		if (runnerType === "pi") {
+			// Pi owns provider fallback behavior; Cyrus only selects its primary.
+			return this.config.piDefaultModel || "";
 		}
 		return (
 			this.config.claudeDefaultFallbackModel ||
@@ -135,7 +144,7 @@ export class RunnerSelectionService {
 	 * description tags.
 	 *
 	 * Supported description tags:
-	 * - [agent=claude|cursor|codex]
+	 * - [agent=claude|cursor|codex|pi]
 	 * - [model=<model-name>]
 	 *
 	 * This is the single source of truth for model precedence. Callers pass any
@@ -149,7 +158,7 @@ export class RunnerSelectionService {
 	 *
 	 * Runner precedence (highest first):
 	 * 1. Description tags override labels
-	 * 2. Agent (`cursor`/`claude`/`codex`) labels override model labels
+	 * 2. Agent (`cursor`/`claude`/`codex`/`pi`) labels override model labels
 	 * 3. Model labels / explicit models can infer the agent type (e.g.
 	 *    `composer-*` → cursor, `gpt-*`/`o3`/`*codex*` → codex)
 	 * 4. Falls back to the configured default runner
@@ -213,6 +222,9 @@ export class RunnerSelectionService {
 			model: string,
 			runnerType: RunnerType,
 		): string | undefined => {
+			if (runnerType === "pi") {
+				return this.getDefaultFallbackModelForRunner("pi");
+			}
 			const normalizedModel = model.toLowerCase();
 			if (runnerType === "cursor") {
 				return this.getDefaultFallbackModelForRunner("cursor");
@@ -233,6 +245,7 @@ export class RunnerSelectionService {
 		): RunnerType | undefined => {
 			if (lowercaseLabels.includes("cursor")) return "cursor";
 			if (lowercaseLabels.includes("codex")) return "codex";
+			if (lowercaseLabels.includes("pi")) return "pi";
 			if (lowercaseLabels.includes("claude")) return "claude";
 			return undefined;
 		};
@@ -266,9 +279,11 @@ export class RunnerSelectionService {
 				? "cursor"
 				: agentFromDescription === "codex"
 					? "codex"
-					: agentFromDescription === "claude"
-						? "claude"
-						: undefined;
+					: agentFromDescription === "pi"
+						? "pi"
+						: agentFromDescription === "claude"
+							? "claude"
+							: undefined;
 		const resolvedAgentFromLabels = resolveAgentFromLabel(normalizedLabels);
 
 		const modelFromDescription = descriptionModelTagRaw;
@@ -289,7 +304,12 @@ export class RunnerSelectionService {
 		// agent and drop the (mismatched) model so we fall back to the runner default.
 		const modelRunner = inferRunnerFromModel(explicitModel);
 		let modelOverride = explicitModel;
-		if (modelOverride && modelRunner && modelRunner !== runnerType) {
+		if (
+			runnerType !== "pi" &&
+			modelOverride &&
+			modelRunner &&
+			modelRunner !== runnerType
+		) {
 			modelOverride = undefined;
 		}
 
@@ -301,7 +321,11 @@ export class RunnerSelectionService {
 		let repositoryFallbackOverride = opts?.repositoryFallbackModel;
 		if (repositoryFallbackOverride) {
 			const fallbackRunner = inferRunnerFromModel(repositoryFallbackOverride);
-			if (fallbackRunner && fallbackRunner !== runnerType) {
+			if (
+				runnerType !== "pi" &&
+				fallbackRunner &&
+				fallbackRunner !== runnerType
+			) {
 				repositoryFallbackOverride = undefined;
 			}
 		}

@@ -210,7 +210,7 @@ export interface IAgentRunner {
 	 * `constructor.name` sniff and without reverse-deriving the runner from
 	 * which session-id field happens to be populated.
 	 */
-	readonly provider: "claude" | "cursor" | "codex";
+	readonly provider: "claude" | "cursor" | "codex" | "pi";
 
 	/**
 	 * Start a new agent session with a string prompt (legacy/simple mode)
@@ -512,8 +512,8 @@ export interface AgentSessionInfo {
 // ============================================================================
 // NEUTRAL AGENT MESSAGE UNION
 // ============================================================================
-// A genuinely provider-agnostic streaming message contract. Both runners
-// (Claude, Cursor) project their native SDK streams into this union before
+// A genuinely provider-agnostic streaming message contract. Every runner
+// projects its native SDK or process stream into this union before
 // emitting, so the edge-worker consumer never sees a provider-shaped message.
 // camelCase throughout; no Anthropic cache-bucket fields (so Cursor no longer
 // has to counterfeit them).

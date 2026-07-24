@@ -45,6 +45,7 @@ describe("JSON Schema export", () => {
 				"cursorDefaultFallbackModel",
 				"codexDefaultModel",
 				"codexDefaultFallbackModel",
+				"piDefaultModel",
 				"defaultRunner",
 				"defaultModel",
 				"defaultFallbackModel",
@@ -74,6 +75,7 @@ describe("JSON Schema export", () => {
 				"claude",
 				"cursor",
 				"codex",
+				"pi",
 			]);
 		});
 

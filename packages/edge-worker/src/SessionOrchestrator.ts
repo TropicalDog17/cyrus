@@ -43,6 +43,7 @@ import {
 	extractRepoName,
 	extractRepoOwner,
 } from "cyrus-github-event-transport";
+import { PiRunner } from "cyrus-pi-runner";
 import type { AgentSessionManager } from "./AgentSessionManager.js";
 import type { GitService } from "./GitService.js";
 import type { PromptAssembler } from "./prompt-assembly/PromptAssembler.js";
@@ -715,11 +716,12 @@ export class SessionOrchestrator {
 		const labels = await this.deps.fetchIssueLabels(fullIssue);
 
 		// Determine whether to resume based on the existing runner session ID
-		// (Claude, Cursor, or Codex — whichever originally created the session).
+		// (Claude, Cursor, Codex, or Pi — whichever originally created the session).
 		const existingRunnerSessionId =
 			session.claudeSessionId ??
 			session.cursorSessionId ??
-			session.codexSessionId;
+			session.codexSessionId ??
+			session.piSessionId;
 		const hasExistingSession =
 			!isNewSession && Boolean(existingRunnerSessionId);
 		const needsNewSession = isNewSession || !hasExistingSession;
@@ -1069,7 +1071,7 @@ export class SessionOrchestrator {
 		labelPromptModel?: string,
 		/**
 		 * Resolved reasoning effort (label-prompt → repository → `claudeDefaultEffort`).
-		 * Claude runner only; ignored for Cursor/Codex.
+		 * Claude runner only; ignored for Cursor/Codex/Pi.
 		 */
 		effort?: EffortLevel,
 		/**
@@ -1202,6 +1204,8 @@ export class SessionOrchestrator {
 				return new CursorRunner(config);
 			case "codex":
 				return new CodexRunner(config);
+			case "pi":
+				return new PiRunner(config);
 			default:
 				throw new Error(`Unknown runner type: ${runnerType satisfies never}`);
 		}

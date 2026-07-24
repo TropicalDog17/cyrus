@@ -5,7 +5,7 @@ only when **two or more concrete instances already exist** to force its shape;
 a single-instance seam is held nominal (kept reachable, not abstracted). This
 is the rule that arbitrates the standing tension between "make it easy to add
 new patterns" and this codebase's YAGNI discipline: the agent/runner seam has
-three instances (Claude, Cursor, Codex) and is *overdue* for a profile registry,
+four instances (Claude, Cursor, Codex, Pi) and is *overdue* for a profile registry,
 while the issue-tracker seam has one real instance (Linear) and must **not** grow
 a general "any tracker" framework until a second real tracker forces it.
 

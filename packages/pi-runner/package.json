@@ -1,0 +1,28 @@
+{
+	"name": "cyrus-pi-runner",
+	"version": "0.2.66",
+	"private": true,
+	"description": "Pi coding agent JSONL RPC runner for Cyrus",
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "tsc",
+		"dev": "tsc --watch",
+		"test": "vitest",
+		"test:run": "vitest run --passWithNoTests",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@earendil-works/pi-coding-agent": "0.82.0",
+		"cyrus-core": "workspace:*"
+	},
+	"devDependencies": {
+		"@types/node": "^20.0.0",
+		"typescript": "^5.3.3",
+		"vitest": "^4.1.9"
+	}
+}
