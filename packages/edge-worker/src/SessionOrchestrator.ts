@@ -27,6 +27,7 @@ import type {
 import {
 	DEFAULT_CLAUDE_SESSION_KEEP_ALIVE_MINUTES,
 	getReadParentDirectories,
+	READONLY_DEFAULT_ALLOWED_TOOLS,
 	requireLinearWorkspaceId,
 } from "cyrus-core";
 import { CursorRunner } from "cyrus-cursor-runner";
@@ -96,6 +97,15 @@ export interface StartGitHubSessionRequest {
 	systemPrompt: string;
 }
 
+/**
+ * Which half of the execution gate a Buzz run is on.
+ *
+ * `triage` reads and reasons but cannot modify the working tree; `execute` has
+ * the repository's full tool set. Promotion between them requires an explicit
+ * human reaction — see {@link BuzzSessionCoordinator}.
+ */
+export type BuzzSessionPhase = "triage" | "execute";
+
 export interface StartBuzzSessionRequest {
 	repository: RepositoryConfig;
 	workspace: { path: string; isGitWorktree: boolean };
@@ -113,6 +123,13 @@ export interface StartBuzzSessionRequest {
 	taskInstructions: string;
 	/** Sink bound to the originating Buzz channel. */
 	activitySink: IActivitySink;
+	/** Gate phase. Defaults to `triage` — nothing writes code unprompted. */
+	phase?: BuzzSessionPhase;
+	/**
+	 * Agent-side session id to resume, carrying the triage conversation into the
+	 * execute phase so the human does not have to restate the task.
+	 */
+	resumeSessionId?: string;
 }
 
 /**
@@ -1665,8 +1682,16 @@ export class SessionOrchestrator {
 	 *   streams back into the thread as the run proceeds. GitHub instead posts
 	 *   one summary at the end, because a PR thread is not a live chat.
 	 * - There is no terminal reply step here for the same reason.
+	 *
+	 * Called once per gate phase against the same `sessionId`: the `triage` run
+	 * answers with read-only tools, and an approved `execute` run replaces the
+	 * runner in place, resuming the same agent conversation with the repository's
+	 * full tool set.
+	 *
+	 * @returns the agent-side session id of the completed run, for resuming it in
+	 * a later phase, or null when the run could not be started.
 	 */
-	async startBuzzSession(req: StartBuzzSessionRequest): Promise<void> {
+	async startBuzzSession(req: StartBuzzSessionRequest): Promise<string | null> {
 		const {
 			repository,
 			workspace,
@@ -1677,55 +1702,70 @@ export class SessionOrchestrator {
 			title,
 			taskInstructions,
 			activitySink,
+			resumeSessionId,
 		} = req;
+		const phase: BuzzSessionPhase = req.phase ?? "triage";
 		const agentSessionManager = this.deps.agentSessionManager;
 
-		const existingSessions =
-			agentSessionManager.getActiveSessionsByBranchName(branchName);
-		const firstExisting = existingSessions[0];
-		if (firstExisting) {
-			this.deps.logger.warn(
-				`Reusing workspace from active session ${firstExisting.id} — concurrent writes possible`,
+		if (!agentSessionManager.getSession(sessionId)) {
+			const existingSessions =
+				agentSessionManager.getActiveSessionsByBranchName(branchName);
+			const firstExisting = existingSessions[0];
+			if (firstExisting) {
+				this.deps.logger.warn(
+					`Reusing workspace from active session ${firstExisting.id} — concurrent writes possible`,
+				);
+			}
+
+			const issueMinimal: IssueMinimal = {
+				id: sessionKey,
+				identifier: sessionKey,
+				title,
+				branchName,
+			};
+
+			agentSessionManager.createCyrusAgentSession(
+				sessionId,
+				sessionKey,
+				issueMinimal,
+				workspace,
+				"buzz",
+				[
+					{
+						repositoryId: repository.id,
+						branchName,
+						baseBranchName: repository.baseBranch,
+					},
+				],
+				threadRootId,
 			);
+
+			this.deps.setSessionRepository(sessionId, repository.id);
+			agentSessionManager.setActivitySink(sessionId, activitySink);
 		}
-
-		const issueMinimal: IssueMinimal = {
-			id: sessionKey,
-			identifier: sessionKey,
-			title,
-			branchName,
-		};
-
-		agentSessionManager.createCyrusAgentSession(
-			sessionId,
-			sessionKey,
-			issueMinimal,
-			workspace,
-			"buzz",
-			[
-				{
-					repositoryId: repository.id,
-					branchName,
-					baseBranchName: repository.baseBranch,
-				},
-			],
-			threadRootId,
-		);
-
-		this.deps.setSessionRepository(sessionId, repository.id);
-		agentSessionManager.setActivitySink(sessionId, activitySink);
 
 		const session = agentSessionManager.getSession(sessionId);
 		if (!session) {
 			this.deps.logger.error(
 				`Failed to create session for Buzz thread ${threadRootId}`,
 			);
-			return;
+			return null;
 		}
 
-		const allowedTools = this.deps.buildAllowedTools(repository);
+		// The gate is enforced here, in the tool set, not only in the prompt: a
+		// triage run that decided to "just fix it" still cannot reach Edit, Write
+		// or general Bash. `AskUserQuestion` is added because the read-only preset
+		// omits it, and a triage turn that cannot ask questions is not triage.
+		const allowedTools =
+			phase === "triage"
+				? [...READONLY_DEFAULT_ALLOWED_TOOLS, "AskUserQuestion"]
+				: this.deps.buildAllowedTools(repository);
 		const disallowedTools = this.deps.buildDisallowedTools(repository);
 		const allowedDirectories: string[] = [repository.repositoryPath];
+
+		// A previous phase's runner is still registered; stop it before the new
+		// one takes its place, as the resume path does.
+		agentSessionManager.getAgentRunner(sessionId)?.stop();
 
 		const { config: runnerConfig, runnerType } =
 			await this.buildAgentRunnerConfig(
@@ -1736,7 +1776,7 @@ export class SessionOrchestrator {
 				allowedTools,
 				allowedDirectories,
 				disallowedTools,
-				undefined, // resumeSessionId
+				resumeSessionId,
 				undefined, // labels
 				undefined, // issueDescription
 				undefined, // maxTurns
@@ -1754,17 +1794,21 @@ export class SessionOrchestrator {
 		await this.deps.savePersistedState();
 
 		this.deps.logger.info(
-			`Starting ${runnerType} runner for Buzz thread ${sessionKey}`,
+			`Starting ${runnerType} runner for Buzz thread ${sessionKey} (${phase})`,
 		);
 
 		try {
 			const sessionInfo = await runner.start(taskInstructions);
-			this.deps.logger.info(`Buzz session started: ${sessionInfo.sessionId}`);
+			this.deps.logger.info(
+				`Buzz ${phase} session finished: ${sessionInfo.sessionId}`,
+			);
+			return sessionInfo.sessionId;
 		} catch (error) {
 			this.deps.logger.error(
 				`Buzz session error for ${sessionKey}`,
 				error instanceof Error ? error : new Error(String(error)),
 			);
+			return null;
 		} finally {
 			await this.deps.savePersistedState();
 		}

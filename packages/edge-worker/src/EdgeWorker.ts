@@ -85,6 +85,7 @@ import { ActivityPoster } from "./ActivityPoster.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import {
 	AskUserQuestionHandler,
+	DEFAULT_QUESTION_TIMEOUT_MS,
 	questionTimeoutMsFromMinutes,
 } from "./AskUserQuestionHandler.js";
 import { AttachmentService } from "./AttachmentService.js";
@@ -94,7 +95,10 @@ import {
 	formatRepoSetupHookActivity,
 	formatRoutingThought,
 } from "./activity/index.js";
+import { BuzzApprovalRegistry } from "./buzz/BuzzApprovalRegistry.js";
 import { BuzzCliClient } from "./buzz/BuzzCliClient.js";
+import { BuzzPollingSource } from "./buzz/BuzzPollingSource.js";
+import { BuzzQuestionHandler } from "./buzz/BuzzQuestionHandler.js";
 import { BuzzSessionCoordinator } from "./buzz/BuzzSessionCoordinator.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
 import { CyrusToolsHost } from "./CyrusToolsHost.js";
@@ -166,6 +170,9 @@ export class EdgeWorker extends EventEmitter {
 	private buzzSessionCoordinator: BuzzSessionCoordinator | null = null; // Buzz trigger -> session
 	private buzzCliClient: BuzzCliClient | null = null; // Shell-out wrapper over the `buzz` binary
 	private buzzActivitySinks: Map<string, IActivitySink> = new Map(); // Maps Buzz channel ID to its thread-posting sink
+	private buzzPollingSource: BuzzPollingSource | null = null; // Relay poller, for deployments with no public ingress
+	private buzzApprovals: BuzzApprovalRegistry | null = null; // Gate + question prompts awaiting a human
+	private buzzQuestionHandler: BuzzQuestionHandler | null = null; // AskUserQuestion, asked in a Buzz thread
 	private gitHubCommentService!: GitHubCommentService; // Service for posting comments back to GitHub PRs
 	private cliRPCServer: CLIRPCServer | null = null; // CLI RPC server for CLI platform mode
 	private configUpdater: ConfigUpdater | null = null; // Single config updater for configuration updates
@@ -1135,10 +1142,19 @@ export class EdgeWorker extends EventEmitter {
 		if (!buzz) return;
 
 		const privateKey = process.env.BUZZ_PRIVATE_KEY;
-		const webhookSecret = process.env.CYRUS_BUZZ_WEBHOOK_SECRET;
-		if (!privateKey || !webhookSecret) {
+		if (!privateKey) {
 			this.logger.warn(
-				"Buzz is configured but BUZZ_PRIVATE_KEY and/or CYRUS_BUZZ_WEBHOOK_SECRET are unset — Buzz ingress is disabled",
+				"Buzz is configured but BUZZ_PRIVATE_KEY is unset — Buzz is disabled",
+			);
+			return;
+		}
+
+		// Only the webhook ingress has a shared secret to check; polling reaches
+		// the relay outbound and has nothing to authenticate inbound.
+		const webhookSecret = process.env.CYRUS_BUZZ_WEBHOOK_SECRET;
+		if ((buzz.ingress ?? "poll") === "webhook" && !webhookSecret) {
+			this.logger.warn(
+				"Buzz ingress is 'webhook' but CYRUS_BUZZ_WEBHOOK_SECRET is unset — Buzz ingress is disabled",
 			);
 			return;
 		}
@@ -1161,33 +1177,72 @@ export class EdgeWorker extends EventEmitter {
 			);
 		});
 
+		this.buzzApprovals = new BuzzApprovalRegistry(this.logger);
+
 		this.buzzSessionCoordinator = new BuzzSessionCoordinator({
 			logger: this.logger,
 			client: this.buzzCliClient,
 			agentSessionManager: this.agentSessionManager,
 			sessionOrchestrator: this.sessionOrchestrator,
+			approvals: this.buzzApprovals,
 			getChannelRoutes: () => this.config.buzz?.channels ?? [],
 			getRepositoryById: (repositoryId) => this.repositories.get(repositoryId),
 			getActivitySinkForChannel: (channelId) =>
 				this.getBuzzActivitySinkForChannel(channelId),
 		});
 
-		this.buzzEventTransport = new BuzzEventTransport({
-			fastifyServer: this.sharedApplicationServer.getFastifyInstance(),
-			secret: webhookSecret,
-			allowedPubkeys: buzz.allowedPubkeys ?? [],
+		this.buzzQuestionHandler = new BuzzQuestionHandler({
+			logger: this.logger,
+			client: this.buzzCliClient,
+			approvals: this.buzzApprovals,
+			getThread: (sessionId) =>
+				this.buzzSessionCoordinator?.getThread(sessionId) ?? null,
+			// Shares the Linear knob: the wait policy is about how long a human
+			// gets to answer, which does not depend on where the question is asked.
+			getTimeoutMs: () =>
+				questionTimeoutMsFromMinutes(
+					this.config.askUserQuestionTimeoutMinutes,
+				) ?? DEFAULT_QUESTION_TIMEOUT_MS,
 		});
 
-		// Fire-and-forget, like the GitHub dispatch: a slow session start must
-		// not hold the workflow's HTTP request open (it times out at 10s).
-		this.buzzEventTransport.on("event", (event: BuzzWebhookEvent) => {
+		const dispatch = (event: BuzzWebhookEvent) => {
 			this.buzzSessionCoordinator?.handleEvent(event).catch((error) => {
 				this.logger.error(
 					"Failed to handle Buzz event",
 					error instanceof Error ? error : new Error(String(error)),
 				);
 			});
+		};
+
+		if ((buzz.ingress ?? "poll") === "poll") {
+			this.buzzPollingSource = new BuzzPollingSource({
+				logger: this.logger,
+				client: this.buzzCliClient,
+				approvals: this.buzzApprovals,
+				getChannelIds: () =>
+					(this.config.buzz?.channels ?? []).map((route) => route.channelId),
+				getAllowedPubkeys: () => this.config.buzz?.allowedPubkeys ?? [],
+				getSelfPubkey: () => this.config.buzz?.selfPubkey,
+				onEvent: dispatch,
+				intervalMs: (buzz.pollIntervalSeconds ?? 5) * 1000,
+			});
+			this.buzzPollingSource.start();
+
+			this.logger.info(
+				`Buzz polling ingress active (${buzz.channels?.length ?? 0} channel route(s))`,
+			);
+			return;
+		}
+
+		this.buzzEventTransport = new BuzzEventTransport({
+			fastifyServer: this.sharedApplicationServer.getFastifyInstance(),
+			secret: webhookSecret ?? "",
+			allowedPubkeys: buzz.allowedPubkeys ?? [],
 		});
+
+		// Fire-and-forget, like the GitHub dispatch: a slow session start must
+		// not hold the workflow's HTTP request open (it times out at 10s).
+		this.buzzEventTransport.on("event", dispatch);
 
 		this.buzzEventTransport.on("error", (error: Error) => {
 			this.handleError(error);
@@ -1681,6 +1736,8 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 	async stop(): Promise<void> {
 		// Stop config file watcher
 		await this.configManager.stop();
+
+		this.buzzPollingSource?.stop();
 
 		try {
 			await this.savePersistedState();
@@ -4140,6 +4197,19 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 		return async (input, _sessionId, signal) => {
 			// Note: We use linearAgentSessionId (from closure) instead of the passed sessionId
 			// because the passed sessionId is the Claude session ID, not the Linear agent session ID
+
+			// A Buzz session has no Linear agent session to post an elicitation
+			// to, and its answers arrive as chat rather than as a webhook, so it
+			// gets its own handler. Dispatching on session identity keeps the
+			// Linear path untouched.
+			if (this.buzzQuestionHandler?.handles(linearAgentSessionId)) {
+				return this.buzzQuestionHandler.ask(
+					input,
+					linearAgentSessionId,
+					signal,
+				);
+			}
+
 			return this.askUserQuestionHandler.handleAskUserQuestion(
 				input,
 				linearAgentSessionId,

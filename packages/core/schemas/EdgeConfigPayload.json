@@ -1057,6 +1057,18 @@
 						"required": ["channelId", "repositoryId"],
 						"additionalProperties": false
 					}
+				},
+				"ingress": {
+					"type": "string",
+					"enum": ["poll", "webhook"]
+				},
+				"pollIntervalSeconds": {
+					"type": "integer",
+					"minimum": 2,
+					"maximum": 9007199254740991
+				},
+				"selfPubkey": {
+					"type": "string"
 				}
 			},
 			"required": ["cliPath", "relayUrl"],

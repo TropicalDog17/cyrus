@@ -423,6 +423,27 @@ export const BuzzConfigSchema = z.object({
 	allowedPubkeys: z.array(z.string()).optional(),
 	/** Channel-to-repository routes. A channel with no route is ignored. */
 	channels: z.array(BuzzChannelRouteSchema).optional(),
+	/**
+	 * How Buzz activity reaches Cyrus.
+	 *
+	 * `webhook` installs a buzz-workflow that POSTs to `/buzz-webhook`. It is the
+	 * lower-latency path but requires Cyrus to be reachable at a **public**
+	 * address: buzz-workflow's `call_webhook` resolves the target and refuses
+	 * private or reserved ranges, including the CGNAT `100.64.0.0/10` block that
+	 * every Tailscale address falls in.
+	 *
+	 * `poll` reads the relay through the CLI on a timer and needs no inbound
+	 * exposure at all — the only option that works for a tailnet-only relay, and
+	 * therefore the default.
+	 */
+	ingress: z.enum(["poll", "webhook"]).optional(),
+	/** Seconds between polls when `ingress` is `poll`. Minimum 2. */
+	pollIntervalSeconds: z.number().int().min(2).optional(),
+	/**
+	 * Cyrus's own Nostr pubkey (64 hex). Used to ignore its own messages and
+	 * reactions when polling, which would otherwise loop.
+	 */
+	selfPubkey: z.string().optional(),
 });
 
 /**

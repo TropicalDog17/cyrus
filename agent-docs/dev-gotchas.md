@@ -282,6 +282,25 @@ z.string().register(pathRegistry, { path: true })
 A path field that is **not** registered will keep the literal `~/...` and crash
 self-host with `ENOENT`.
 
+## buzz-workflow cannot call a webhook on a Tailscale address
+
+`call_webhook` runs `check_ssrf` (`crates/buzz-workflow/src/executor.rs`), which
+resolves the target host and rejects it when `buzz_core::network::is_private_ip`
+matches. That list includes **CGNAT `100.64.0.0/10`** — the range every
+Tailscale address falls in. Redirects are disabled, so nothing about the request
+can route around it.
+
+Consequence: a relay that reaches Cyrus only over a tailnet can never drive
+`BuzzEventTransport`, no matter how `CYRUS_BASE_URL` is set. The failure is
+silent from Cyrus's side — the webhook simply never arrives, which looks exactly
+like a misconfigured workflow.
+
+**Rule:** `buzz.ingress` defaults to `poll` for this reason. Only set it to
+`webhook` when Cyrus is reachable at a genuinely public address, and verify by
+resolving the host **inside the relay container** (`docker exec <relay> getent
+hosts <host>`) — Docker inherits the host's resolver, so MagicDNS names resolve
+to `100.x` there even when public DNS returns a routable address.
+
 ## buzz-workflow templates do not escape JSON
 
 `resolve_template` in `crates/buzz-workflow/src/executor.rs` substitutes
