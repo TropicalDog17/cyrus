@@ -181,6 +181,17 @@ describe("BuzzCliClient against a stub binary", () => {
 		]);
 	});
 
+	it("lists channels for catch-all discovery", async () => {
+		process.env.BUZZ_STUB_STDOUT = JSON.stringify([
+			{ channel_id: "chan-1", name: "general", description: "", created_at: 1 },
+		]);
+
+		const channels = await client().listChannels();
+
+		expect(channels[0]?.channel_id).toBe("chan-1");
+		expect(recorded().args).toEqual(["channels", "list"]);
+	});
+
 	it("returns null when the relay does not have the event", async () => {
 		process.env.BUZZ_STUB_STDOUT = "[]";
 
@@ -261,7 +272,9 @@ const realCliPath = process.env.BUZZ_CLI_PATH;
 const realCliAvailable = (() => {
 	if (!realCliPath) return false;
 	try {
-		execFileSync(realCliPath, ["--version"], { stdio: "ignore" });
+		// Probe with `--help`, not `--version`: buzz-cli has no version flag and
+		// rejects it with exit 1, which silently disabled this whole block.
+		execFileSync(realCliPath, ["--help"], { stdio: "ignore" });
 		return true;
 	} catch {
 		return false;
@@ -287,6 +300,12 @@ describe.skipIf(!realCliAvailable)("buzz-cli surface (real binary)", () => {
 		for (const flag of ["--channel", "--event"]) {
 			expect(out).toContain(flag);
 		}
+	});
+
+	// Catch-all routing polls whatever this returns, so a rename here would
+	// silently narrow Cyrus to its explicitly configured channels.
+	it("still offers channels-list as a bare subcommand", () => {
+		expect(help("channels")).toContain("list");
 	});
 
 	it("still documents the reactions-add flags we build", () => {

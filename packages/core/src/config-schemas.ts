@@ -397,6 +397,14 @@ export const BuzzChannelRouteSchema = z.object({
 	 * Buzz channel UUID (from `buzz channels list`), or `"*"` for a catch-all
 	 * route. A catch-all applies to any channel with no exact route of its own —
 	 * including DMs, which have channel ids that cannot be known in advance.
+	 *
+	 * The two forms differ in how Cyrus is addressed. An exact route makes the
+	 * channel Cyrus's own: any allowlisted human's message opens a thread. A
+	 * channel reached only through the catch-all is a shared room, so a new
+	 * thread there needs an explicit @mention of `selfPubkey` (replies inside a
+	 * thread Cyrus already owns do not). A catch-all also switches the polling
+	 * ingress to discovering channels from the relay rather than reading only
+	 * the ids listed here.
 	 */
 	channelId: z.string(),
 	/** `id` of the repository in `repositories`. Shorthand for one repository. */
@@ -451,7 +459,9 @@ export const BuzzConfigSchema = z.object({
 	pollIntervalSeconds: z.number().int().min(2).optional(),
 	/**
 	 * Cyrus's own Nostr pubkey (64 hex). Used to ignore its own messages and
-	 * reactions when polling, which would otherwise loop.
+	 * reactions when polling, which would otherwise loop, and to recognize an
+	 * @mention. Without it a `"*"` catch-all route opens nothing: there is no
+	 * way to tell a message addressed to Cyrus from ordinary chatter.
 	 */
 	selfPubkey: z.string().optional(),
 });
