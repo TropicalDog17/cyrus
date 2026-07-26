@@ -113,3 +113,14 @@ between subroutines. Pre-enable MCP servers via `agent mcp list` +
 server names. Treat `.cursor/mcp.json` as the project MCP source. Use
 workspace-scoped wildcards (`Read(./**)`, `Write(./**)`) rather than unscoped
 `Read(**)` / `Write(**)`.
+
+## Pi integration
+
+Pi is driven through its official JSONL RPC mode. Treat `agent_settled` as the
+terminal event: `agent_end` is only a low-level run boundary and may be followed
+by automatic retry, compaction, or queued continuations. Project context,
+extensions, skills, and custom tools are loaded with `--approve`; Cyrus tool
+allow/deny lists are translated to Pi's lowercase built-ins. Pi intentionally
+has no built-in MCP client, so MCP tools require a project/global Pi extension;
+their `mcp__*` names are preserved by the translation layer when such an
+extension is installed.

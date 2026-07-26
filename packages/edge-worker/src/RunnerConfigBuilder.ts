@@ -23,9 +23,10 @@ import type {
 } from "cyrus-core";
 import { compute, nodeDirLister, toSandboxFilesystem } from "cyrus-core";
 import type { CursorRunnerConfig } from "cyrus-cursor-runner";
+import type { PiRunnerConfig } from "cyrus-pi-runner";
 
 /**
- * The concrete runner config the builder produces — a Claude, Cursor, or Codex
+ * The concrete runner config the builder produces — a Claude, Cursor, Codex, or Pi
  * config. All extend the neutral `AgentRunnerConfig` base; this union preserves
  * the provider-specific extras without an untyped `& Record<string, unknown>`
  * escape hatch.
@@ -33,7 +34,8 @@ import type { CursorRunnerConfig } from "cyrus-cursor-runner";
 export type RunnerConfig =
 	| ClaudeRunnerConfig
 	| CursorRunnerConfig
-	| CodexRunnerConfig;
+	| CodexRunnerConfig
+	| PiRunnerConfig;
 
 import { buildIntentToAddHook } from "./hooks/IntentToAddHook.js";
 import { buildPrMarkerHook } from "./hooks/PrMarkerHook.js";
@@ -100,7 +102,7 @@ export interface IssueRunnerConfigInput {
 	labelPromptModel?: string;
 	/**
 	 * Resolved reasoning effort (label-prompt → repository → `claudeDefaultEffort`).
-	 * Claude runner only; ignored for Cursor/Codex. Undefined preserves the SDK
+	 * Claude runner only; ignored for Cursor/Codex/Pi. Undefined preserves the SDK
 	 * default (`high`).
 	 */
 	effort?: EffortLevel;
@@ -285,6 +287,11 @@ export class RunnerConfigBuilder {
 			modelOverride = this.runnerSelector.getDefaultModelForRunner("codex");
 			fallbackModelOverride =
 				this.runnerSelector.getDefaultFallbackModelForRunner("codex");
+		} else if (input.session.piSessionId && runnerType !== "pi") {
+			runnerType = "pi";
+			modelOverride = this.runnerSelector.getDefaultModelForRunner("pi");
+			fallbackModelOverride =
+				this.runnerSelector.getDefaultFallbackModelForRunner("pi");
 		}
 
 		// Log model override if found
@@ -340,7 +347,8 @@ export class RunnerConfigBuilder {
 		// against the Partial<…> halves; no untyped escape hatch needed.
 		const config: ClaudeRunnerConfig &
 			Partial<CursorRunnerConfig> &
-			Partial<CodexRunnerConfig> = {
+			Partial<CodexRunnerConfig> &
+			Partial<PiRunnerConfig> = {
 			workingDirectory: cwd,
 			allowedTools: input.allowedTools,
 			disallowedTools: input.disallowedTools,
@@ -415,6 +423,14 @@ export class RunnerConfigBuilder {
 			if (process.env.CODEX_PATH) {
 				config.codexPath = process.env.CODEX_PATH;
 			}
+		}
+
+		if (runnerType === "pi") {
+			if (process.env.CYRUS_PI_COMMAND) {
+				config.piCommand = process.env.CYRUS_PI_COMMAND;
+			}
+			const piEnv = this.buildSandboxConfig(input).additionalEnv;
+			if (piEnv) config.additionalEnv = piEnv;
 		}
 
 		if (input.resumeSessionId) {

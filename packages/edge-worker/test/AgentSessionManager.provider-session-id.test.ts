@@ -13,7 +13,7 @@ describe("AgentSessionManager - provider-based session id routing", () => {
 	const sessionId = "session-provider";
 	const issueId = "issue-provider";
 
-	function setup(provider: "claude" | "cursor") {
+	function setup(provider: "claude" | "cursor" | "codex" | "pi") {
 		const mockActivitySink: IActivitySink = {
 			id: "test-workspace",
 			post: vi.fn().mockResolvedValue({ activityId: "activity-1" }),
@@ -64,5 +64,23 @@ describe("AgentSessionManager - provider-based session id routing", () => {
 		const session = manager.getSession(sessionId);
 		expect(session?.cursorSessionId).toBe("runner-xyz");
 		expect(session?.claudeSessionId).toBeUndefined();
+	});
+
+	it("records the session id on codexSessionId for a codex runner", async () => {
+		setup("codex");
+		await manager.handleClaudeMessage(
+			sessionId,
+			systemInitMessage({ sessionId: "runner-codex" }),
+		);
+		expect(manager.getSession(sessionId)?.codexSessionId).toBe("runner-codex");
+	});
+
+	it("records the session id on piSessionId for a Pi runner", async () => {
+		setup("pi");
+		await manager.handleClaudeMessage(
+			sessionId,
+			systemInitMessage({ sessionId: "runner-pi" }),
+		);
+		expect(manager.getSession(sessionId)?.piSessionId).toBe("runner-pi");
 	});
 });

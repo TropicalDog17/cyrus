@@ -296,6 +296,8 @@ export class AgentSessionManager extends EventEmitter {
 			linearSession.cursorSessionId = initMessage.sessionId;
 		} else if (linearSession.agentRunner?.provider === "codex") {
 			linearSession.codexSessionId = initMessage.sessionId;
+		} else if (linearSession.agentRunner?.provider === "pi") {
+			linearSession.piSessionId = initMessage.sessionId;
 		} else {
 			linearSession.claudeSessionId = initMessage.sessionId;
 		}
@@ -342,7 +344,9 @@ export class AgentSessionManager extends EventEmitter {
 				? { cursorSessionId: message.sessionId }
 				: runner?.provider === "codex"
 					? { codexSessionId: message.sessionId }
-					: { claudeSessionId: message.sessionId }),
+					: runner?.provider === "pi"
+						? { piSessionId: message.sessionId }
+						: { claudeSessionId: message.sessionId }),
 			type: message.type,
 			content: this.extractContent(message),
 			metadata: {
@@ -801,7 +805,9 @@ export class AgentSessionManager extends EventEmitter {
 				? { cursorSessionId: resultMessage.sessionId }
 				: runner?.provider === "codex"
 					? { codexSessionId: resultMessage.sessionId }
-					: { claudeSessionId: resultMessage.sessionId }),
+					: runner?.provider === "pi"
+						? { piSessionId: resultMessage.sessionId }
+						: { claudeSessionId: resultMessage.sessionId }),
 			type: "result",
 			content,
 			metadata: {

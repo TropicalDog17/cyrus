@@ -10,10 +10,10 @@ export interface MapContext {
 	 * Selects tool-name normalization: cursor-native (shell/read/grep…) ->
 	 * canonical (Bash/Read/Grep…). Comes from the Phase-B
 	 * `IAgentRunner.provider` tag (no more `constructor.name` sniff). Codex
-	 * already emits canonical tool names (its runner normalizes them), so it
-	 * takes the same passthrough path as Claude.
+	 * and Pi already emit canonical tool names (their runners normalize them), so
+	 * they take the same passthrough path as Claude.
 	 */
-	provider: "claude" | "cursor" | "codex";
+	provider: "claude" | "cursor" | "codex" | "pi";
 	/**
 	 * The originating tool_use for a tool_result's `tool_use_id`.
 	 * Old: `this.toolCallsByToolUseId.get(id)`.

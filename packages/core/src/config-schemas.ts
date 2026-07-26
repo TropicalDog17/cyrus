@@ -29,10 +29,9 @@ export const pathRegistry = z.registry<PathFieldMeta>();
 /**
  * Supported runner/harness types for agent execution.
  *
- * This fork runs Claude, Cursor, and Codex. The Codex runner drives the OpenAI
- * Codex CLI over the Agent Client Protocol (ACP).
+ * This fork runs Claude, Cursor, Codex, and Pi.
  */
-export const RunnerTypeSchema = z.enum(["claude", "cursor", "codex"]);
+export const RunnerTypeSchema = z.enum(["claude", "cursor", "codex", "pi"]);
 export type RunnerType = z.infer<typeof RunnerTypeSchema>;
 
 /**
@@ -459,7 +458,7 @@ export const EdgeConfigSchema = z.object({
 	/**
 	 * Default reasoning effort for the Claude runner across all repositories.
 	 * Forwarded to the Claude SDK as `Options.effort`. Claude runner only;
-	 * Cursor and Codex ignore it.
+	 * Cursor, Codex, and Pi ignore it.
 	 *
 	 * Lowest-precedence effort source: a matching label's `effort` and a
 	 * repository's `effort` both override it. When unset (and no label/repo
@@ -562,8 +561,14 @@ export const EdgeConfigSchema = z.object({
 	codexDefaultFallbackModel: z.string().optional(),
 
 	/**
+	 * Default model for Pi (for example "anthropic/claude-sonnet-4-5").
+	 * When omitted, Pi uses its persisted/default model selection.
+	 */
+	piDefaultModel: z.string().optional(),
+
+	/**
 	 * Default runner/harness to use when no runner is specified via labels or
-	 * description tags. This fork supports "claude", "cursor", and "codex". If
+	 * description tags. Supports "claude", "cursor", "codex", and "pi". If
 	 * omitted, falls back to "claude".
 	 */
 	defaultRunner: RunnerTypeSchema.optional(),
