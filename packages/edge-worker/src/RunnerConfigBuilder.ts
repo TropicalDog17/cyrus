@@ -41,6 +41,7 @@ import { appendAskUserQuestionAddendum } from "./prompts/askUserQuestionPromptAd
 import { appendBrowserUseAddendum } from "./prompts/browserUsePromptAddendum.js";
 import { appendCloudRuntimeAddendum } from "./prompts/cloudRuntimePromptAddendum.js";
 import { appendContextDisciplineAddendum } from "./prompts/contextDisciplinePromptAddendum.js";
+import { appendIssueCommentPolicyAddendum } from "./prompts/issueCommentPolicyPromptAddendum.js";
 
 /**
  * Subset of McpConfigService consumed by RunnerConfigBuilder.
@@ -352,8 +353,10 @@ export class RunnerConfigBuilder {
 			mcpConfig,
 			appendSystemPrompt: appendCloudRuntimeAddendum(
 				appendBrowserUseAddendum(
-					appendContextDisciplineAddendum(
-						appendAskUserQuestionAddendum(input.systemPrompt),
+					appendIssueCommentPolicyAddendum(
+						appendContextDisciplineAddendum(
+							appendAskUserQuestionAddendum(input.systemPrompt),
+						),
 					),
 				),
 			),
