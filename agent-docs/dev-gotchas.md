@@ -264,6 +264,30 @@ When adding/removing a tool from the inline `cyrus-tools` MCP server
 
 **Symptom:** Tool works at runtime but never appears in hosted settings.
 
+## Deferring an MCP tool is a cost tradeoff, not just a context-size one (DEV-210)
+
+The MCP tools block sits at the **head** of the cached prompt prefix. When a
+deferred tool is pulled in mid-session via `ToolSearch`, the SDK injects its
+schema at the head of the request's tools array — which invalidates the **entire
+cached prefix** and forces a full rewrite at the 1h cache-creation rate (2x base
+input). So:
+
+- **Adding a tool schema mid-session invalidates the whole prompt cache.** A
+  single deferred-then-needed tool can cost more than eager-loading it up front —
+  in the DEV-210 trace, ~11x more.
+- Therefore the defer-vs-eager decision is a **cost** tradeoff, not just a
+  turn-1-context-size one. Defer a tool only if it is genuinely rarely needed;
+  eager-load (`alwaysLoad`, see `McpConfigService.buildMcpConfig`) anything used
+  on ordinary sessions. `linear` and `cyrus-tools` are both eager-loaded for this
+  reason.
+- `alwaysLoad` exempts a server from the SDK's auto tool-search mode **without**
+  re-deferring the others, so eager-loading one more server does not re-trigger
+  that mode. Trim an eager server's surface with `disallowedTools` (see
+  `LINEAR_MCP_PRUNED_TOOLS`), never by deferring individual tools.
+- Tell the model which surfaces are preloaded so it does not waste a turn running
+  `ToolSearch` for already-loaded tools — see `MCP_PRELOAD_PROMPT_ADDENDUM` in
+  `packages/edge-worker/src/prompts/mcpPreloadPromptAddendum.ts`.
+
 ## Adding a path-bearing field to `EdgeWorkerConfig`
 
 cyrus-hosted emits self-host paths with literal `~/` prefixes. Node's

@@ -111,12 +111,20 @@ export class McpConfigService {
 		// agent burns ~a minute of round-trips to the remote `mcp.linear.app`
 		// discovering schemas on turn 1 before it can read or update the issue.
 		// Every Linear/GitHub session needs the core Linear issue/comment tools
-		// immediately, so load that server up front. `cyrus-tools`, `cyrus-docs`,
-		// and the optional slack/atlassian servers stay deferred: their tools are
-		// used rarely, so keeping them behind local/on-demand tool search keeps the
-		// turn-1 context lean. See CYPACK-716 / DEV-140.
+		// immediately, so load that server up front. `cyrus-tools` is eager-loaded
+		// for the same reason (DEV-210): its agent-session read tools
+		// (`linear_get_agent_session` / `linear_get_agent_sessions`) and
+		// `linear_upload_file` are needed on ordinary sessions, and deferring them
+		// was actively expensive. The SDK injects a newly-discovered tool schema at
+		// the HEAD of the request's tools array, so the first `ToolSearch` that
+		// pulls one in invalidates the ENTIRE cached prefix and forces a full
+		// rewrite at the 1h creation rate (2x base input). In the traced case one
+		// deferred-then-needed cyrus-tools call cost ~11x what eager-loading the
+		// schema up front would have. `cyrus-docs` and the optional slack/atlassian
+		// servers stay deferred: genuinely rare, and never needed on turn 1. See
+		// CYPACK-716 / DEV-140 / DEV-210.
 		//
-		// Eager-loading the Linear server pulls in ALL ~47 of its tools, so the
+		// Eager-loading the `linear` server pulls in ALL ~47 of its tools, so the
 		// verbose, rarely-used ones (releases, milestones, attachments, diffs,
 		// documents, agent skills, …) are pruned back out of context via
 		// `disallowedTools` — see `LINEAR_MCP_PRUNED_TOOLS` /
@@ -124,6 +132,15 @@ export class McpConfigService {
 		// `EdgeWorker.buildDisallowedTools`. What stays loaded is the essential
 		// Linear surface Cyrus uses every session (issues, comments, teams,
 		// users, statuses, labels, projects).
+		//
+		// `cyrus-tools` is NOT pruned in kind. `alwaysLoad` exempts a server from
+		// the auto tool-search mode without re-deferring the others, so eager-
+		// loading it does not re-trigger that mode (already on for the Linear
+		// surface) — the DEV-210 prune branch never fires. And its remaining tools
+		// (delegation / relations) are needed by orchestrator sessions, so there is
+		// no uniformly-safe subset to prune the way the Linear list is. Its verbose
+		// image/sora tools only register when `OPENAI_API_KEY` is set (opt-in), so
+		// they add no turn-1 weight to ordinary sessions.
 		const mcpConfig: Record<string, McpServerConfig> = {
 			linear: {
 				type: "http",
@@ -144,6 +161,7 @@ export class McpConfigService {
 							}
 						: {}),
 				},
+				alwaysLoad: true,
 			},
 			"cyrus-docs": {
 				type: "http",

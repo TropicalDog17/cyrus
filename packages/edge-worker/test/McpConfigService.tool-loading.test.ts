@@ -7,11 +7,13 @@ import {
 } from "../src/McpConfigService.js";
 
 /**
- * Verifies that McpConfigService.buildMcpConfig() marks only the Linear MCP
- * server with `alwaysLoad: true` so its turn-1 tools are never deferred behind the
- * SDK's MCP tool-search auto mode. Deferral would force the agent to spend
- * ~a minute running `ToolSearch` round-trips against the remote Linear MCP on
- * turn 1 before it can read or update the issue (DEV-140 / CYPACK-716).
+ * Verifies that McpConfigService.buildMcpConfig() eager-loads the MCP servers
+ * whose tools are needed on turn 1 — `linear` (DEV-140 / CYPACK-716) and
+ * `cyrus-tools` (DEV-210) — with `alwaysLoad: true`, while leaving the genuinely
+ * rare servers (`cyrus-docs`, slack/atlassian) deferred. Deferral is not just a
+ * context-size choice: pulling a needed tool in mid-session via `ToolSearch`
+ * injects its schema at the head of the tools array and invalidates the whole
+ * cached prompt prefix, forcing a full rewrite at 2x (DEV-210).
  */
 function makeService(): McpConfigService {
 	const deps: McpConfigServiceDeps = {
@@ -31,15 +33,14 @@ function makeService(): McpConfigService {
 }
 
 describe("McpConfigService — MCP tool loading", () => {
-	it("eager-loads Linear but defers rarely-used cyrus-tools", () => {
+	it("eager-loads both Linear and cyrus-tools", () => {
 		const config = makeService().buildMcpConfig("repo-1", "ws-1", "session-1");
 
-		// Core Linear tools are needed on every session; cyrus-tools are not.
+		// Both servers carry tools needed on turn 1 (Linear issue/comment tools;
+		// cyrus-tools agent-session reads + upload), so both are eager-loaded to
+		// avoid a mid-session ToolSearch invalidating the cached prefix (DEV-210).
 		expect(config.linear).toMatchObject({ alwaysLoad: true });
-		expect(config["cyrus-tools"]).toBeDefined();
-		expect(
-			(config["cyrus-tools"] as { alwaysLoad?: boolean }).alwaysLoad,
-		).toBeUndefined();
+		expect(config["cyrus-tools"]).toMatchObject({ alwaysLoad: true });
 	});
 
 	it("leaves rarely-used servers deferred (no alwaysLoad)", () => {
