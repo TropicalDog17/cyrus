@@ -100,7 +100,10 @@ import { BuzzCliClient } from "./buzz/BuzzCliClient.js";
 import { BuzzLinearProjection } from "./buzz/BuzzLinearProjection.js";
 import { BuzzPollingSource } from "./buzz/BuzzPollingSource.js";
 import { BuzzQuestionHandler } from "./buzz/BuzzQuestionHandler.js";
-import { BuzzSessionCoordinator } from "./buzz/BuzzSessionCoordinator.js";
+import {
+	BuzzSessionCoordinator,
+	CATCH_ALL_CHANNEL,
+} from "./buzz/BuzzSessionCoordinator.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
 import { CyrusToolsHost } from "./CyrusToolsHost.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
@@ -1196,6 +1199,7 @@ export class EdgeWorker extends EventEmitter {
 			sessionOrchestrator: this.sessionOrchestrator,
 			approvals: this.buzzApprovals,
 			getChannelRoutes: () => this.config.buzz?.channels ?? [],
+			getSelfPubkey: () => this.config.buzz?.selfPubkey,
 			getRepositoryById: (repositoryId) => this.repositories.get(repositoryId),
 			getActivitySinkForChannel: (channelId) =>
 				this.getBuzzActivitySinkForChannel(channelId),
@@ -1231,7 +1235,13 @@ export class EdgeWorker extends EventEmitter {
 				client: this.buzzCliClient,
 				approvals: this.buzzApprovals,
 				getChannelIds: () =>
-					(this.config.buzz?.channels ?? []).map((route) => route.channelId),
+					(this.config.buzz?.channels ?? [])
+						.map((route) => route.channelId)
+						.filter((channelId) => channelId !== CATCH_ALL_CHANNEL),
+				isCatchAllRouted: () =>
+					(this.config.buzz?.channels ?? []).some(
+						(route) => route.channelId === CATCH_ALL_CHANNEL,
+					),
 				getAllowedPubkeys: () => this.config.buzz?.allowedPubkeys ?? [],
 				getSelfPubkey: () => this.config.buzz?.selfPubkey,
 				onEvent: dispatch,

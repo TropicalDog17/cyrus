@@ -16,6 +16,12 @@ export interface BuzzEventRecord {
 	tags: string[][];
 }
 
+/** One channel as returned by `channels list`. */
+export interface BuzzChannelRecord {
+	channel_id: string;
+	name: string;
+}
+
 /** One emoji's worth of `reactions get` output, grouped by buzz-cli. */
 export interface BuzzReactionGroup {
 	emoji: string;
@@ -149,6 +155,18 @@ export class BuzzCliClient {
 			"--emoji",
 			params.emoji,
 		]);
+	}
+
+	/**
+	 * List the channels this identity can see.
+	 *
+	 * The relay answers with the caller's visible set, so a private channel
+	 * Cyrus was never added to never appears here — discovery inherits Buzz
+	 * membership rather than restating it.
+	 */
+	async listChannels(): Promise<BuzzChannelRecord[]> {
+		const stdout = await this.run(["channels", "list"]);
+		return this.parseJson<BuzzChannelRecord[]>(stdout, "channels list") ?? [];
 	}
 
 	/**

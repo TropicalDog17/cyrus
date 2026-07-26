@@ -19,6 +19,11 @@ const ROOT_ID = `a1b2c3${"0".repeat(58)}`;
 const REPLY_ID = "f".repeat(64);
 const GATE_ID = "c".repeat(64);
 const AUTHOR = "9".repeat(64);
+const SELF = "5".repeat(64);
+const OTHER_CHANNEL = "11111111-0000-4000-8000-000000000009";
+
+/** What a Buzz client writes when a human picks Cyrus from @mention. */
+const MENTIONS_CYRUS = [["p", SELF]];
 
 const REPOSITORY = {
 	id: "repo-1",
@@ -141,6 +146,7 @@ describe("BuzzSessionCoordinator", () => {
 	let coordinator: BuzzSessionCoordinator;
 	let routes: { channelId: string; repositoryId: string }[];
 	let repositories: Record<string, RepositoryConfig | undefined>;
+	let selfPubkey: string | undefined;
 
 	beforeEach(() => {
 		getEvent = vi.fn().mockResolvedValue(record());
@@ -159,6 +165,7 @@ describe("BuzzSessionCoordinator", () => {
 		approvals = new BuzzApprovalRegistry(logger);
 		routes = [{ channelId: CHANNEL_ID, repositoryId: "repo-1" }];
 		repositories = { "repo-1": REPOSITORY, "repo-2": OTHER_REPOSITORY };
+		selfPubkey = SELF;
 
 		coordinator = new BuzzSessionCoordinator({
 			logger,
@@ -176,6 +183,7 @@ describe("BuzzSessionCoordinator", () => {
 			} as unknown as SessionOrchestrator,
 			approvals,
 			getChannelRoutes: () => routes,
+			getSelfPubkey: () => selfPubkey,
 			getRepositoryById: (id) => repositories[id],
 			getActivitySinkForChannel: () => ({}) as IActivitySink,
 			projection: { track, note, setState },
@@ -572,14 +580,90 @@ describe("BuzzSessionCoordinator", () => {
 	// DMs have channel ids that cannot be configured in advance.
 	it("falls back to a catch-all route", async () => {
 		routes = [{ channelId: "*", repositoryId: "repo-1" }];
+		getEvent.mockResolvedValue(record({ tags: MENTIONS_CYRUS }));
 
-		await coordinator.handleEvent(
-			event({ channelId: "11111111-0000-4000-8000-000000000009" }),
-		);
+		await coordinator.handleEvent(event({ channelId: OTHER_CHANNEL }));
 
 		expect(startBuzzSession).toHaveBeenCalledWith(
 			expect.objectContaining({ repository: REPOSITORY }),
 		);
+	});
+
+	describe("who Cyrus answers", () => {
+		// A shared room Cyrus merely belongs to. Without this, one catch-all route
+		// would turn every line of chatter in the workspace into a session.
+		it("ignores an unaddressed message in a catch-all channel", async () => {
+			routes = [{ channelId: "*", repositoryId: "repo-1" }];
+
+			await coordinator.handleEvent(event({ channelId: OTHER_CHANNEL }));
+
+			expect(startBuzzSession).not.toHaveBeenCalled();
+			expect(getEvent).toHaveBeenCalled();
+		});
+
+		it("answers a catch-all channel when the message mentions Cyrus", async () => {
+			routes = [{ channelId: "*", repositoryId: "repo-1" }];
+			getEvent.mockResolvedValue(record({ tags: MENTIONS_CYRUS }));
+
+			await coordinator.handleEvent(event({ channelId: OTHER_CHANNEL }));
+
+			expect(startBuzzSession).toHaveBeenCalled();
+		});
+
+		// A `p` tag naming somebody else is the common case in a busy channel.
+		it("does not treat a mention of someone else as its own", async () => {
+			routes = [{ channelId: "*", repositoryId: "repo-1" }];
+			getEvent.mockResolvedValue(record({ tags: [["p", AUTHOR]] }));
+
+			await coordinator.handleEvent(event({ channelId: OTHER_CHANNEL }));
+
+			expect(startBuzzSession).not.toHaveBeenCalled();
+		});
+
+		// The channel is Cyrus's own, so talking in it is addressing it — this is
+		// how every Buzz channel behaved before catch-all routing existed.
+		it("does not require a mention in an explicitly routed channel", async () => {
+			await coordinator.handleEvent(event());
+
+			expect(startBuzzSession).toHaveBeenCalled();
+		});
+
+		// Once a thread is Cyrus's, every reply in it belongs to that session —
+		// re-tagging it on every message would make steering unusable.
+		it("continues its own thread in a catch-all channel without a mention", async () => {
+			routes = [{ channelId: "*", repositoryId: "repo-1" }];
+			getEvent.mockResolvedValueOnce(record({ tags: MENTIONS_CYRUS }));
+			await coordinator.handleEvent(event({ channelId: OTHER_CHANNEL }));
+
+			getEvent.mockResolvedValue(
+				record({
+					id: REPLY_ID,
+					content: "also check the second one",
+					tags: [["e", ROOT_ID, "", "reply"]],
+				}),
+			);
+			await coordinator.handleEvent(
+				event({
+					channelId: OTHER_CHANNEL,
+					messageId: REPLY_ID,
+					deliveryId: `message_posted:${REPLY_ID}:`,
+				}),
+			);
+
+			expect(startBuzzSession).toHaveBeenCalledTimes(2);
+		});
+
+		// With no self pubkey there is no way to tell a mention from chatter, and
+		// guessing wrong spends tokens on every message in the workspace.
+		it("opens nothing in a catch-all channel when no self pubkey is set", async () => {
+			routes = [{ channelId: "*", repositoryId: "repo-1" }];
+			selfPubkey = undefined;
+			getEvent.mockResolvedValue(record({ tags: MENTIONS_CYRUS }));
+
+			await coordinator.handleEvent(event({ channelId: OTHER_CHANNEL }));
+
+			expect(startBuzzSession).not.toHaveBeenCalled();
+		});
 	});
 
 	// Otherwise adding a catch-all would silently widen every pinned channel.

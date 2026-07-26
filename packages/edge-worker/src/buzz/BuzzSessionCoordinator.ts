@@ -32,6 +32,11 @@ export interface BuzzSessionCoordinatorDeps {
 	approvals: BuzzApprovalRegistry;
 	/** Channel-to-repository routes from `config.buzz.channels`. */
 	getChannelRoutes(): BuzzChannelRoute[];
+	/**
+	 * Cyrus's own Nostr pubkey, used to recognize an @mention. Undefined
+	 * disables catch-all channels entirely — see {@link isAddressedToCyrus}.
+	 */
+	getSelfPubkey(): string | undefined;
 	getRepositoryById(repositoryId: string): RepositoryConfig | undefined;
 	/** Sink bound to a channel; one per channel, created lazily by EdgeWorker. */
 	getActivitySinkForChannel(channelId: string): IActivitySink;
@@ -70,7 +75,7 @@ const GATE_IMPLEMENT_EMOJI = "▶️";
 const GATE_TRACK_EMOJI = "📝";
 
 /** Channel id that matches any channel without a route of its own. */
-const CATCH_ALL_CHANNEL = "*";
+export const CATCH_ALL_CHANNEL = "*";
 
 /** Reactable option markers, shared with {@link BuzzQuestionHandler}. */
 const OPTION_EMOJI = ["1⃣", "2⃣", "3⃣", "4⃣"];
@@ -104,6 +109,13 @@ interface BuzzThreadContext {
  *
  * The thread root, not the triggering message, is the durable identity: every
  * follow-up message in the same thread resumes the same session.
+ *
+ * WHO CYRUS ANSWERS
+ * -----------------
+ * A channel with a route of its own is a Cyrus channel and any allowlisted
+ * human's message opens a thread. A channel reached only through the `"*"`
+ * catch-all route is a shared room, and it takes an @mention — see
+ * {@link mayOpenThread}.
  *
  * THE EXECUTION GATE
  * ------------------
@@ -184,6 +196,13 @@ export class BuzzSessionCoordinator {
 		}
 
 		const existingThread = this.threads.get(sessionId);
+		if (!existingThread && !this.mayOpenThread(event.channelId, message)) {
+			logger.debug(
+				`Buzz message ${event.messageId} in shared channel ${event.channelId} does not mention Cyrus; ignoring`,
+			);
+			return;
+		}
+
 		const repository = existingThread
 			? existingThread.repository
 			: await this.chooseRepository(event, sessionId, threadRootId);
@@ -505,6 +524,47 @@ export class BuzzSessionCoordinator {
 	 * catch-all. An exact route always wins, so adding a catch-all cannot
 	 * silently widen a channel that was already pinned to one repository.
 	 */
+	/**
+	 * Whether a message is allowed to open a new thread in this channel.
+	 *
+	 * A channel with a route of its own is Cyrus's room: anything an allowlisted
+	 * human says there is addressed to Cyrus, as it was before catch-all routing
+	 * existed. A channel reached only through the catch-all route is somebody
+	 * else's room that Cyrus is merely a member of, so it takes an explicit
+	 * @mention — otherwise ordinary chatter anywhere in the workspace would open
+	 * a session and spend tokens.
+	 *
+	 * Follow-ups inside a thread Cyrus already owns never reach this check: the
+	 * caller consults it only when no session exists for the thread.
+	 */
+	private mayOpenThread(channelId: string, message: BuzzEventRecord): boolean {
+		const hasOwnRoute = this.deps
+			.getChannelRoutes()
+			.some((route) => route.channelId === channelId);
+		return hasOwnRoute || this.isAddressedToCyrus(message);
+	}
+
+	/**
+	 * True when the message names Cyrus in a `p` tag — what a Buzz client writes
+	 * when a human picks Cyrus out of @mention autocomplete.
+	 *
+	 * Matching the tag rather than the message text means a renamed profile, or
+	 * the literal string "@cyrus" quoted in prose, never decides whether a
+	 * session starts.
+	 *
+	 * Fails closed when no self pubkey is configured: with no way to recognize a
+	 * mention, a catch-all deployment would otherwise treat every message in
+	 * every channel as addressed to it.
+	 */
+	private isAddressedToCyrus(message: BuzzEventRecord): boolean {
+		const self = this.deps.getSelfPubkey()?.trim().toLowerCase();
+		if (!self) return false;
+
+		return message.tags.some(
+			(tag) => tag[0] === "p" && tag[1]?.trim().toLowerCase() === self,
+		);
+	}
+
 	private routesForChannel(channelId: string): BuzzChannelRoute[] {
 		const all = this.deps.getChannelRoutes();
 		const exact = all.filter((route) => route.channelId === channelId);

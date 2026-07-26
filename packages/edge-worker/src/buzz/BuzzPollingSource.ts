@@ -6,8 +6,17 @@ import type { BuzzCliClient, BuzzEventRecord } from "./BuzzCliClient.js";
 export interface BuzzPollingSourceDeps {
 	logger: ILogger;
 	client: BuzzCliClient;
-	/** Channels to watch. Read at each tick so config reload takes effect. */
+	/**
+	 * Explicitly routed channels to watch. Read at each tick so config reload
+	 * takes effect. A `"*"` catch-all route is not a channel id and belongs in
+	 * {@link isCatchAllRouted}, not here.
+	 */
 	getChannelIds(): string[];
+	/**
+	 * True when a catch-all route exists, meaning Cyrus is reachable in every
+	 * channel it can see rather than only the ones named in config.
+	 */
+	isCatchAllRouted(): boolean;
 	/** Pubkeys whose activity Cyrus acts on. Empty denies everyone. */
 	getAllowedPubkeys(): readonly string[];
 	/** Open prompts, so reactions are only fetched for events that want them. */
@@ -27,6 +36,15 @@ const MIN_INTERVAL_MS = 2_000;
  * starting Cyrus does not replay a day of backlog as new sessions.
  */
 const INITIAL_LOOKBACK_SECONDS = 120;
+
+/**
+ * How often a catch-all deployment re-asks the relay which channels exist.
+ *
+ * Channels are created by hand, so this trades a minute of latency on a
+ * brand-new channel against one extra relay round trip per interval — far
+ * cheaper than re-listing on every tick.
+ */
+const DISCOVERY_INTERVAL_MS = 60_000;
 
 /**
  * Pulls Buzz activity by polling the relay instead of receiving webhooks.
@@ -55,6 +73,9 @@ export class BuzzPollingSource {
 	private readonly since = new Map<string, number>();
 	/** Reactions already dispatched, as `<eventId>:<emoji>:<pubkey>`. */
 	private readonly seenReactions = new Set<string>();
+	/** Channels found by discovery, for catch-all deployments. */
+	private discovered: string[] = [];
+	private lastDiscoveryAt = 0;
 	private timer: ReturnType<typeof setInterval> | null = null;
 	private ticking = false;
 
@@ -98,6 +119,7 @@ export class BuzzPollingSource {
 		if (this.ticking) return;
 		this.ticking = true;
 		try {
+			await this.discoverChannels();
 			await this.pollMessages();
 			await this.pollReactions();
 		} catch (error) {
@@ -110,11 +132,59 @@ export class BuzzPollingSource {
 		}
 	}
 
+	/**
+	 * Every channel this tick reads: the explicitly routed ones, plus — when a
+	 * catch-all route exists — everything the relay says Cyrus can see.
+	 */
+	private channelsToPoll(): string[] {
+		return [...new Set([...this.deps.getChannelIds(), ...this.discovered])];
+	}
+
+	/**
+	 * Refresh the catch-all channel set, at most once per
+	 * {@link DISCOVERY_INTERVAL_MS}.
+	 *
+	 * A failed listing keeps the previous set rather than emptying it: losing
+	 * the relay for one tick must not silently stop Cyrus answering in channels
+	 * it was already watching.
+	 */
+	private async discoverChannels(): Promise<void> {
+		if (!this.deps.isCatchAllRouted()) {
+			this.discovered = [];
+			return;
+		}
+
+		const now = Date.now();
+		if (
+			this.lastDiscoveryAt &&
+			now - this.lastDiscoveryAt < DISCOVERY_INTERVAL_MS
+		) {
+			return;
+		}
+		this.lastDiscoveryAt = now;
+
+		try {
+			const channels = await this.deps.client.listChannels();
+			const found = channels.map((channel) => channel.channel_id);
+			const added = found.filter((id) => !this.discovered.includes(id));
+			this.discovered = found;
+			if (added.length > 0) {
+				this.deps.logger.info(
+					`Buzz catch-all discovery now watching ${found.length} channel(s)`,
+				);
+			}
+		} catch (error) {
+			this.deps.logger.warn(
+				`Failed to list Buzz channels: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
 	private async pollMessages(): Promise<void> {
 		const fallbackSince =
 			Math.floor(Date.now() / 1000) - INITIAL_LOOKBACK_SECONDS;
 
-		for (const channelId of this.deps.getChannelIds()) {
+		for (const channelId of this.channelsToPoll()) {
 			const since = this.since.get(channelId) ?? fallbackSince;
 
 			let messages: BuzzEventRecord[];

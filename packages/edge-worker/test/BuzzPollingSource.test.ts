@@ -48,23 +48,32 @@ describe("BuzzPollingSource", () => {
 	let getReactions: ReturnType<typeof vi.fn>;
 	let onEvent: ReturnType<typeof vi.fn>;
 	let approvals: BuzzApprovalRegistry;
+	let listChannels: ReturnType<typeof vi.fn>;
 	let logger: ILogger;
 	let allowed: string[];
+	let catchAll: boolean;
 	let source: BuzzPollingSource;
 
 	beforeEach(() => {
 		getMessages = vi.fn().mockResolvedValue([]);
 		getReactions = vi.fn().mockResolvedValue([]);
+		listChannels = vi.fn().mockResolvedValue([]);
 		onEvent = vi.fn();
 		logger = createLogger();
 		approvals = new BuzzApprovalRegistry(logger);
 		allowed = [ALLOWED];
+		catchAll = false;
 
 		source = new BuzzPollingSource({
 			logger,
-			client: { getMessages, getReactions } as unknown as BuzzCliClient,
+			client: {
+				getMessages,
+				getReactions,
+				listChannels,
+			} as unknown as BuzzCliClient,
 			approvals,
 			getChannelIds: () => [CHANNEL_ID],
+			isCatchAllRouted: () => catchAll,
 			getAllowedPubkeys: () => allowed,
 			getSelfPubkey: () => SELF,
 			onEvent,
@@ -238,6 +247,109 @@ describe("BuzzPollingSource", () => {
 		expect(emitted()).toHaveLength(1);
 	});
 
+	describe("catch-all channel discovery", () => {
+		const DISCOVERED = "6f1a2b3c-0000-4000-8000-000000000002";
+
+		// Without a catch-all route the configured list is the whole story, and
+		// listing channels would be a relay round trip that changes nothing.
+		it("does not list channels when no catch-all route exists", async () => {
+			await source.tick();
+
+			expect(listChannels).not.toHaveBeenCalled();
+			expect(getMessages).toHaveBeenCalledTimes(1);
+			expect(getMessages).toHaveBeenCalledWith(
+				expect.objectContaining({ channelId: CHANNEL_ID }),
+			);
+		});
+
+		it("polls every discovered channel alongside the configured ones", async () => {
+			catchAll = true;
+			listChannels.mockResolvedValue([
+				{ channel_id: DISCOVERED, name: "general" },
+			]);
+
+			await source.tick();
+
+			expect(getMessages.mock.calls.map((call) => call[0].channelId)).toEqual([
+				CHANNEL_ID,
+				DISCOVERED,
+			]);
+		});
+
+		// A configured channel that discovery also returns is one channel, not two.
+		it("does not poll a channel twice when it is also configured", async () => {
+			catchAll = true;
+			listChannels.mockResolvedValue([
+				{ channel_id: CHANNEL_ID, name: "cyrus-dev" },
+			]);
+
+			await source.tick();
+
+			expect(getMessages).toHaveBeenCalledTimes(1);
+		});
+
+		// Discovery is a per-minute refresh, not a per-tick one: channels are
+		// created by hand, and the relay call is pure overhead in between.
+		it("reuses the discovered set until the refresh interval elapses", async () => {
+			catchAll = true;
+			listChannels.mockResolvedValue([
+				{ channel_id: DISCOVERED, name: "general" },
+			]);
+
+			await source.tick();
+			await source.tick();
+
+			expect(listChannels).toHaveBeenCalledTimes(1);
+			expect(getMessages).toHaveBeenCalledTimes(4);
+		});
+
+		// Losing the relay for one tick must not silently stop Cyrus answering in
+		// channels it was already watching.
+		it("keeps the previous set when a refresh fails", async () => {
+			catchAll = true;
+			listChannels.mockResolvedValue([
+				{ channel_id: DISCOVERED, name: "general" },
+			]);
+			await source.tick();
+
+			// Past the refresh interval, so the second tick really does re-list.
+			vi.useFakeTimers({ now: Date.now() + 61_000 });
+			try {
+				listChannels.mockRejectedValue(new Error("relay down"));
+				await source.tick();
+			} finally {
+				vi.useRealTimers();
+			}
+
+			expect(listChannels).toHaveBeenCalledTimes(2);
+			expect(logger.warn).toHaveBeenCalled();
+			expect(getMessages.mock.calls.map((call) => call[0].channelId)).toEqual([
+				CHANNEL_ID,
+				DISCOVERED,
+				CHANNEL_ID,
+				DISCOVERED,
+			]);
+		});
+
+		// Config is reloadable, so a catch-all route can be taken away at runtime.
+		it("drops discovered channels when the catch-all route is removed", async () => {
+			catchAll = true;
+			listChannels.mockResolvedValue([
+				{ channel_id: DISCOVERED, name: "general" },
+			]);
+			await source.tick();
+
+			catchAll = false;
+			await source.tick();
+
+			expect(getMessages.mock.calls.map((call) => call[0].channelId)).toEqual([
+				CHANNEL_ID,
+				DISCOVERED,
+				CHANNEL_ID,
+			]);
+		});
+	});
+
 	// A slow relay must not stack concurrent cycles that each re-read the same
 	// window and double-dispatch it.
 	it("does not run overlapping ticks", async () => {
@@ -251,6 +363,9 @@ describe("BuzzPollingSource", () => {
 
 		const first = source.tick();
 		const second = source.tick();
+		// The first tick reaches the relay a microtask later than it is started,
+		// so `release` is only bound once the poll is genuinely in flight.
+		await vi.waitFor(() => expect(getMessages).toHaveBeenCalled());
 		release();
 		await Promise.all([first, second]);
 
