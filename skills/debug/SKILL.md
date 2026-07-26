@@ -34,7 +34,7 @@ Goal: the smallest change that makes the failing reproduction pass without break
 
 1. Decide the fix that addresses the root cause from Phase 1. Scan for similar fixes already in the codebase and follow the existing pattern.
 2. Make the minimal, targeted change. Touch only the code on the root-cause path. Do not bundle in refactors, style changes, or unrelated improvements — note them for later instead.
-3. Run the reproduction and watch it pass, then run the full test suite and read the output to confirm no regressions. Fix any new failures before continuing. Report from fresh command output, never from expectation — no "should work", "probably", or "looks done"; only after seeing the reproduction pass and the suite stay green.
+3. Run the reproduction and watch it pass, then run the full test suite and read the output to confirm no regressions. Fix any new failures before continuing.
 
 ## Principles
 

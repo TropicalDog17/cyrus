@@ -20,6 +20,18 @@
  * older `Task` name — naming a tool that does not exist would be worse than
  * saying nothing.
  *
+ * Those lines are deliberately phrased to *bound* delegation, not to encourage
+ * it. Claude 5-generation models already delegate readily, and guidance that
+ * pushes them further produces subagents for work a couple of tool calls would
+ * finish — paying a whole extra context to save a small one. So the rule names
+ * the case that earns delegation (a broad sweep, post-compact re-orientation),
+ * caps it at one search, and carves out the files being edited.
+ *
+ * For the same reason there is no "after you edit a file, do not re-read it to
+ * confirm" bullet here: Claude Code's own system prompt already states it, and a
+ * second copy in the appended prompt is the duplication that makes a model spend
+ * attention reconciling layers instead of working.
+ *
  * Deliberately terse. Every token here is paid on every turn of every session,
  * so a long lecture would work against the very cost goal it serves. Claude Code
  * already has strong read-discipline instincts; this only reinforces them and
@@ -37,14 +49,14 @@ re-sent every turn, so needless growth is the main driver of cost and latency.
   still in this conversation unless you have reason to believe it changed.
 - Prefer targeted reads (a line range, or a grep/search) over reading an entire
   large file when you only need part of it.
-- After you edit a file, trust that the edit applied — do not re-read it just to
-  confirm, unless a later step actually depends on the new contents.
 - When answering a question needs a sweep across many files — reconnaissance,
-  tracing a call path, "where does X live" — delegate it with the Agent tool and
-  ask for a compact answer with file:line references, rather than reading each
-  file into this conversation. Read directly the files you are about to edit.
-- After an auto-compact, re-orient with one delegated search rather than serially
-  re-reading the files you had already read before the compact.
+  tracing a call path, "where does X live" — one delegated search with the
+  Agent tool returns a compact answer with file:line references instead of
+  pulling every file into this conversation.
+  Read directly the files you are about to edit, and
+  do not delegate what a few tool calls would finish.
+- After an auto-compact, re-orient with a single delegated search rather than
+  serially re-reading the files you had already read before the compact.
 - If a task is genuinely too large to complete well in one focused session, it is
   fine to say so and propose splitting it into smaller scoped issues rather than
   attempting everything in one ever-growing session.

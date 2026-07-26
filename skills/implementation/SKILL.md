@@ -34,7 +34,7 @@ Goal: working, focused code backed by fresh evidence.
 1. Write the change as production-ready code that follows the patterns from Phase 1, handling the edge cases and error paths the criteria imply.
 2. Stay in scope. Change only what the issue requests; skip unrelated refactors, reformatting, and drive-by improvements that widen the diff — note them for later instead.
 3. Add or update tests for the new behavior using the project's existing test conventions, covering the edge cases from the criteria.
-4. Run the tests that cover your change as a self-check and read the output. Report from fresh command output, never from expectation — no "should work", "probably", or "looks done". verify-and-ship runs the authoritative full suite, lint, and typecheck gate, so this step only needs to confirm the change works at the unit level.
+4. Run the tests that cover your change and read the output. verify-and-ship runs the authoritative full suite, lint, and typecheck gate, so this step only needs to confirm the change works at the unit level.
 5. Check each acceptance criterion from Phase 1 and note any that cannot be met and why.
 
 If the repository has no test suite, state that plainly and verify the change another concrete way: run the affected command, exercise the code path, or describe the manual check performed. Do not invent passing tests that do not exist.
