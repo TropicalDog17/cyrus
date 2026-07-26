@@ -4,6 +4,7 @@
  * @module sinks
  */
 
+export { BuzzActivitySink } from "./BuzzActivitySink.js";
 export type {
 	Activity,
 	ActivityPostResult,

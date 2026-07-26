@@ -194,17 +194,22 @@ export class AgentSessionManager extends EventEmitter {
 	 * @param issueId - Issue/PR identifier
 	 * @param issueMinimal - Minimal issue data
 	 * @param workspace - Workspace configuration
-	 * @param platform - Source platform ("linear", "github", "slack"). Defaults to "linear".
-	 *                   Only "linear" sessions will have activities streamed to Linear.
+	 * @param platform - Source platform ("linear", "github", "buzz", "slack"). Defaults to "linear".
 	 * @param repositories - Repository contexts for the session (defaults to empty array)
+	 * @param externalSessionId - The conversation this session posts activity back
+	 *   to. Linear sessions reuse their own id (the Linear agent session). Buzz
+	 *   sessions pass the thread root event id, because the thread pre-dates the
+	 *   session. Omitting it disables activity posting for the session — see
+	 *   {@link postToSink}, which skips every activity when it is unset.
 	 */
 	createCyrusAgentSession(
 		sessionId: string,
 		issueId: string,
 		issueMinimal: IssueMinimal,
 		workspace: Workspace,
-		platform: "linear" | "github" | "slack" = "linear",
+		platform: "linear" | "github" | "buzz" | "slack" = "linear",
 		repositories: RepositoryContext[] = [],
+		externalSessionId?: string,
 	): CyrusAgentSession {
 		const log = this.logger.withContext({
 			sessionId,
@@ -215,8 +220,11 @@ export class AgentSessionManager extends EventEmitter {
 
 		const agentSession: CyrusAgentSession = {
 			id: sessionId,
-			// Only Linear sessions have a valid external session ID for posting activities
-			externalSessionId: platform === "linear" ? sessionId : undefined,
+			// Linear's agent session is addressed by this session's own id; every
+			// other platform must supply the conversation to post into, and gets
+			// no activity streaming when it does not.
+			externalSessionId:
+				externalSessionId ?? (platform === "linear" ? sessionId : undefined),
 			type: AgentSessionType.CommentThread,
 			status: AgentSessionStatus.Active,
 			context: AgentSessionType.CommentThread,

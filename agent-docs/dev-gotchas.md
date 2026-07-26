@@ -282,6 +282,54 @@ z.string().register(pathRegistry, { path: true })
 A path field that is **not** registered will keep the literal `~/...` and crash
 self-host with `ENOENT`.
 
+## buzz-workflow templates do not escape JSON
+
+`resolve_template` in `crates/buzz-workflow/src/executor.rs` substitutes
+`{{trigger.*}}` by **raw string concatenation**. A `call_webhook` step whose
+`body:` is a JSON template therefore emits invalid JSON the moment an
+interpolated value contains a `"`, a `\` or a newline — which, for
+`{{trigger.text}}` (a chat message), is constantly.
+
+**Rule:** the Buzz webhook body carries only id-shaped scalars — 64-hex event
+ids and pubkeys, a channel UUID, a unix timestamp. Message text is never
+templated; `BuzzSessionCoordinator` reads it back from the relay by event id
+via `buzz messages thread`. The canonical workflow definition lives at
+`packages/buzz-event-transport/workflows/cyrus-trigger.yaml` and is the other
+half of `BuzzWorkflowWebhookBody` — change them together.
+
+Two related traps in the same executor:
+
+- Unknown `{{keys}}` are emitted **literally**, not as an error. A typo in the
+  workflow YAML arrives as the string `{{trigger.mesage_id}}`, so the transport
+  shape-checks every field rather than trusting presence.
+- `call_webhook` sets **no** `Content-Type` unless you list it under `headers:`,
+  and sends no body at all when `body:` is omitted.
+
+## Buzz: the binary is `buzz`, not `buzz-cli`
+
+The crate is `buzz-cli`; the binary it produces is `buzz`
+(`crates/buzz-cli/Cargo.toml` → `[[bin]] name = "buzz"`). Build with
+`cargo build --release -p buzz-cli` and point `buzz.cliPath` at
+`target/release/buzz`. Pointing it at `buzz-cli` fails with ENOENT at the first
+reply attempt, long after startup.
+
+Credentials are environment-only (`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`,
+`BUZZ_AUTH_TAG`) — the keypair *is* the identity, there is no token or config
+file. Message bodies go on **stdin** (`--content -`), never argv.
+
+## `postToSink` silently drops activities without `externalSessionId`
+
+`AgentSessionManager.postToSink` returns early when
+`session.externalSessionId` is unset, so a session can have a perfectly good
+`IActivitySink` registered and still post nothing. Linear sessions reuse their
+own session id; every other platform must pass `externalSessionId` explicitly
+to `createCyrusAgentSession` (Buzz passes the thread root event id).
+
+This is why the GitHub PR path's `setActivitySink` call has never actually
+posted anything — GitHub gets its output from the one-shot `postGitHubReply`
+instead. Do not "fix" that by widening the platform check without also deciding
+what a GitHub activity stream should address.
+
 ## Navigating GitHub source when auth blocks
 
 Use `uuithub.com` instead of `github.com` for unauthenticated source browsing:

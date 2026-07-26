@@ -1032,6 +1032,41 @@
 			},
 			"required": ["httpProxyPort", "socksProxyPort"],
 			"additionalProperties": false
+		},
+		"buzz": {
+			"type": "object",
+			"properties": {
+				"cliPath": {
+					"type": "string"
+				},
+				"relayUrl": {
+					"type": "string"
+				},
+				"allowedPubkeys": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"channels": {
+					"type": "array",
+					"items": {
+						"type": "object",
+						"properties": {
+							"channelId": {
+								"type": "string"
+							},
+							"repositoryId": {
+								"type": "string"
+							}
+						},
+						"required": ["channelId", "repositoryId"],
+						"additionalProperties": false
+					}
+				}
+			},
+			"required": ["cliPath", "relayUrl"],
+			"additionalProperties": false
 		}
 	},
 	"required": ["repositories"],

@@ -1,0 +1,28 @@
+{
+	"name": "cyrus-buzz-event-transport",
+	"version": "0.2.66",
+	"private": true,
+	"description": "Buzz event transport for receiving buzz-workflow trigger callbacks",
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "tsc",
+		"dev": "tsc --watch",
+		"typecheck": "tsc --noEmit",
+		"test": "vitest",
+		"test:run": "vitest run"
+	},
+	"dependencies": {
+		"cyrus-core": "workspace:*",
+		"fastify": "^5.8.5"
+	},
+	"devDependencies": {
+		"@types/node": "^20.0.0",
+		"typescript": "^5.3.3",
+		"vitest": "^4.1.0"
+	}
+}

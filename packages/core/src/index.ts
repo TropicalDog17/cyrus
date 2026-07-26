@@ -109,6 +109,8 @@ export type {
 } from "./CyrusAgentSession.js";
 // Configuration types
 export type {
+	BuzzChannelRoute,
+	BuzzConfig,
 	EdgeConfig,
 	EdgeConfigPayload,
 	EdgeWorkerConfig,
@@ -128,6 +130,8 @@ export type {
 	UserIdentifier,
 } from "./config-types.js";
 export {
+	BuzzChannelRouteSchema,
+	BuzzConfigSchema,
 	DEFAULT_CLAUDE_SESSION_KEEP_ALIVE_MINUTES,
 	EdgeConfigPayloadSchema,
 	// Zod schemas for runtime validation
