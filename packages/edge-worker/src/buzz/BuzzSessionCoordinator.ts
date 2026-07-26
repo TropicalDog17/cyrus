@@ -316,7 +316,7 @@ export class BuzzSessionCoordinator {
 				threadRootId: context.threadRootId,
 				branchName: context.branchName,
 				title: context.title,
-				taskInstructions: prompt,
+				taskInstructions: `${scopePreamble(context.repository)}\n\n${prompt}`,
 				activitySink: this.deps.getActivitySinkForChannel(context.channelId),
 				phase: context.phase,
 				...(context.agentSessionId
@@ -685,6 +685,56 @@ export function threadRootOf(event: BuzzEventRecord): string {
 	}
 
 	return root ?? reply ?? event.id;
+}
+
+/**
+ * States the repository a thread is bound to, and the Linear scope that comes
+ * with it, ahead of the human's message.
+ *
+ * A Buzz channel route picks exactly one repository, but the session still gets
+ * the full Linear MCP catalog — so without this, "look at the current issue"
+ * can land on an issue belonging to some *other* repository's project. The
+ * agent then either invents the files or, correctly but unhelpfully, reports
+ * that it cannot find them. Naming the scope up front is what makes the
+ * repository binding visible to the model instead of only to the router.
+ *
+ * Emitted on every turn rather than once per thread: it is a few lines, and a
+ * resumed or compacted transcript must not be the reason write access arrives
+ * without its scope.
+ */
+function scopePreamble(repository: RepositoryConfig): string {
+	const lines = [
+		"<session_scope>",
+		`This thread works on the \`${repository.name}\` repository, checked out in the worktree you are running in. Nothing outside it is in scope.`,
+	];
+
+	const linearScope: string[] = [];
+	if (repository.teamKeys?.length) {
+		linearScope.push(
+			`team${repository.teamKeys.length > 1 ? "s" : ""} ${repository.teamKeys.join(", ")}`,
+		);
+	}
+	if (repository.projectKeys?.length) {
+		linearScope.push(
+			`project${repository.projectKeys.length > 1 ? "s" : ""} ${repository.projectKeys.map((key) => `"${key}"`).join(", ")}`,
+		);
+	}
+
+	if (linearScope.length > 0) {
+		lines.push(
+			"",
+			`Linear scope for this repository: ${linearScope.join("; ")}. Constrain every Linear lookup to it — do not search the workspace at large.`,
+			"An issue outside that scope belongs to a different repository. Do not read it, plan it, or act on it here: say which scope it falls in and stop.",
+		);
+	} else {
+		lines.push(
+			"",
+			"This repository declares no Linear team or project, so no Linear issue is in scope for it. Work from what the thread tells you.",
+		);
+	}
+
+	lines.push("</session_scope>");
+	return lines.join("\n");
 }
 
 function firstLine(text: string): string {

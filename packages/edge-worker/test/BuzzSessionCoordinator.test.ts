@@ -26,6 +26,8 @@ const REPOSITORY = {
 	repositoryPath: "/repos/cyrus",
 	baseBranch: "main",
 	workspaceBaseDir: "/worktrees",
+	teamKeys: ["DEV"],
+	projectKeys: ["Cyrus Agent"],
 } as RepositoryConfig;
 
 const OTHER_REPOSITORY = {
@@ -34,7 +36,23 @@ const OTHER_REPOSITORY = {
 	repositoryPath: "/repos/honey",
 	baseBranch: "master",
 	workspaceBaseDir: "/worktrees",
+	projectKeys: ["Honey Automation"],
 } as RepositoryConfig;
+
+/**
+ * The scope block prepended to every turn, spelled out in full. A Buzz channel
+ * routes to one repository but the session still gets the whole Linear MCP
+ * catalog, so this text is the only thing standing between "check the current
+ * issue" and an issue belonging to a different repository's project.
+ */
+const CYRUS_SCOPE = [
+	"<session_scope>",
+	"This thread works on the `cyrus` repository, checked out in the worktree you are running in. Nothing outside it is in scope.",
+	"",
+	'Linear scope for this repository: team DEV; project "Cyrus Agent". Constrain every Linear lookup to it — do not search the workspace at large.',
+	"An issue outside that scope belongs to a different repository. Do not read it, plan it, or act on it here: say which scope it falls in and stop.",
+	"</session_scope>",
+].join("\n");
 
 function createLogger(): ILogger {
 	return {
@@ -122,6 +140,7 @@ describe("BuzzSessionCoordinator", () => {
 	let logger: ILogger;
 	let coordinator: BuzzSessionCoordinator;
 	let routes: { channelId: string; repositoryId: string }[];
+	let repositories: Record<string, RepositoryConfig | undefined>;
 
 	beforeEach(() => {
 		getEvent = vi.fn().mockResolvedValue(record());
@@ -139,6 +158,7 @@ describe("BuzzSessionCoordinator", () => {
 		logger = createLogger();
 		approvals = new BuzzApprovalRegistry(logger);
 		routes = [{ channelId: CHANNEL_ID, repositoryId: "repo-1" }];
+		repositories = { "repo-1": REPOSITORY, "repo-2": OTHER_REPOSITORY };
 
 		coordinator = new BuzzSessionCoordinator({
 			logger,
@@ -156,8 +176,7 @@ describe("BuzzSessionCoordinator", () => {
 			} as unknown as SessionOrchestrator,
 			approvals,
 			getChannelRoutes: () => routes,
-			getRepositoryById: (id) =>
-				({ "repo-1": REPOSITORY, "repo-2": OTHER_REPOSITORY })[id],
+			getRepositoryById: (id) => repositories[id],
 			getActivitySinkForChannel: () => ({}) as IActivitySink,
 			projection: { track, note, setState },
 		});
@@ -172,7 +191,72 @@ describe("BuzzSessionCoordinator", () => {
 				sessionId: `buzz-${ROOT_ID}`,
 				sessionKey: "BUZZ-a1b2c3",
 				threadRootId: ROOT_ID,
-				taskInstructions: "Please look at the flaky worktree test",
+				taskInstructions: `${CYRUS_SCOPE}\n\nPlease look at the flaky worktree test`,
+			}),
+		);
+	});
+
+	// A channel route binds a thread to one repository, but the session still
+	// holds the full Linear catalog. Without the scope stated in the prompt, a
+	// thread on `cyrus` will happily pick up an issue whose files live in
+	// `honey-automation` and then report that it cannot find them.
+	it("names the repository's Linear scope ahead of the message", async () => {
+		await coordinator.handleEvent(event());
+
+		const { taskInstructions } = startBuzzSession.mock.calls[0]?.[0] as {
+			taskInstructions: string;
+		};
+		expect(taskInstructions.startsWith(`${CYRUS_SCOPE}\n\n`)).toBe(true);
+	});
+
+	it("scopes to the repository the channel actually routed to", async () => {
+		routes = [{ channelId: CHANNEL_ID, repositoryId: "repo-2" }];
+
+		await coordinator.handleEvent(event());
+
+		expect(startBuzzSession).toHaveBeenCalledWith(
+			expect.objectContaining({
+				repository: OTHER_REPOSITORY,
+				taskInstructions: [
+					"<session_scope>",
+					"This thread works on the `honey-automation` repository, checked out in the worktree you are running in. Nothing outside it is in scope.",
+					"",
+					'Linear scope for this repository: project "Honey Automation". Constrain every Linear lookup to it — do not search the workspace at large.',
+					"An issue outside that scope belongs to a different repository. Do not read it, plan it, or act on it here: say which scope it falls in and stop.",
+					"</session_scope>",
+					"",
+					"Please look at the flaky worktree test",
+				].join("\n"),
+			}),
+		);
+	});
+
+	// Silence would read as "any issue is fair game", which is the failure this
+	// block exists to prevent.
+	it("says so when the repository declares no Linear scope", async () => {
+		const unscoped = {
+			id: "repo-3",
+			name: "nami",
+			repositoryPath: "/repos/nami",
+			baseBranch: "main",
+			workspaceBaseDir: "/worktrees",
+		} as RepositoryConfig;
+		repositories["repo-3"] = unscoped;
+		routes = [{ channelId: CHANNEL_ID, repositoryId: "repo-3" }];
+
+		await coordinator.handleEvent(event());
+
+		expect(startBuzzSession).toHaveBeenCalledWith(
+			expect.objectContaining({
+				taskInstructions: [
+					"<session_scope>",
+					"This thread works on the `nami` repository, checked out in the worktree you are running in. Nothing outside it is in scope.",
+					"",
+					"This repository declares no Linear team or project, so no Linear issue is in scope for it. Work from what the thread tells you.",
+					"</session_scope>",
+					"",
+					"Please look at the flaky worktree test",
+				].join("\n"),
 			}),
 		);
 	});
@@ -379,7 +463,9 @@ describe("BuzzSessionCoordinator", () => {
 		expect(startBuzzSession).toHaveBeenCalledWith(
 			expect.objectContaining({
 				sessionId: `buzz-${ROOT_ID}`,
-				taskInstructions: "also check the teardown path",
+				// Restated on every turn, not just the first: a compacted or resumed
+				// transcript must not be how the scope gets dropped.
+				taskInstructions: `${CYRUS_SCOPE}\n\nalso check the teardown path`,
 				resumeSessionId: "claude-session-1",
 			}),
 		);

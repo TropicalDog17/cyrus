@@ -96,6 +96,35 @@ before it starts anything, and remembers the answer for the rest of the thread.
 It does not guess: guessing means building a worktree and reading the wrong
 codebase.
 
+### What a thread can see
+
+A route binds a thread to one repository's worktree, but the session still gets
+the full Linear MCP catalog — it can reach every issue in the workspace. So each
+turn is prefixed with the repository's Linear scope, taken from its `teamKeys`
+and `projectKeys`:
+
+```
+<session_scope>
+This thread works on the `cyrus` repository, checked out in the worktree you are
+running in. Nothing outside it is in scope.
+
+Linear scope for this repository: team DEV; project "Cyrus Agent". Constrain
+every Linear lookup to it — do not search the workspace at large.
+An issue outside that scope belongs to a different repository. Do not read it,
+plan it, or act on it here: say which scope it falls in and stop.
+</session_scope>
+```
+
+Without it, "look at the current issue" reaches an issue whose files live in a
+different repository, and the session spends a run discovering that the paths do
+not exist in the worktree it was given. A repository that declares neither key
+gets told that no Linear issue is in scope for it, because silence reads as
+"anything goes".
+
+The block is restated on every turn, not just the first — a resumed or compacted
+transcript must not be how the scope gets dropped, least of all on the turn where
+the gate hands over write access.
+
 `allowedPubkeys` is the authorization boundary. Buzz channels can be open, so
 channel membership is not a permission — **an empty or missing allowlist denies
 everyone.**
