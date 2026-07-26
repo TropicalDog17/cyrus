@@ -2,6 +2,7 @@ import type { BuzzWebhookEvent } from "cyrus-buzz-event-transport";
 import type { ILogger, RepositoryConfig } from "cyrus-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionManager } from "../src/AgentSessionManager.js";
+import { BuzzApprovalRegistry } from "../src/buzz/BuzzApprovalRegistry.js";
 import type {
 	BuzzCliClient,
 	BuzzEventRecord,
@@ -16,6 +17,7 @@ import type { IActivitySink } from "../src/sinks/IActivitySink.js";
 const CHANNEL_ID = "6f1a2b3c-0000-4000-8000-000000000001";
 const ROOT_ID = `a1b2c3${"0".repeat(58)}`;
 const REPLY_ID = "f".repeat(64);
+const GATE_ID = "c".repeat(64);
 const AUTHOR = "9".repeat(64);
 
 const REPOSITORY = {
@@ -23,6 +25,14 @@ const REPOSITORY = {
 	name: "cyrus",
 	repositoryPath: "/repos/cyrus",
 	baseBranch: "main",
+	workspaceBaseDir: "/worktrees",
+} as RepositoryConfig;
+
+const OTHER_REPOSITORY = {
+	id: "repo-2",
+	name: "honey-automation",
+	repositoryPath: "/repos/honey",
+	baseBranch: "master",
 	workspaceBaseDir: "/worktrees",
 } as RepositoryConfig;
 
@@ -59,6 +69,9 @@ function record(overrides: Partial<BuzzEventRecord> = {}): BuzzEventRecord {
 		...overrides,
 	};
 }
+
+/** Let the un-awaited gate handling chain settle. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("threadRootOf", () => {
 	it("returns the event id when there are no thread tags", () => {
@@ -97,40 +110,56 @@ describe("threadRootOf", () => {
 
 describe("BuzzSessionCoordinator", () => {
 	let getEvent: ReturnType<typeof vi.fn>;
+	let sendMessage: ReturnType<typeof vi.fn>;
+	let addReaction: ReturnType<typeof vi.fn>;
 	let getSession: ReturnType<typeof vi.fn>;
 	let startBuzzSession: ReturnType<typeof vi.fn>;
 	let createBuzzWorkspace: ReturnType<typeof vi.fn>;
-	let resumeSession: ReturnType<typeof vi.fn>;
+	let track: ReturnType<typeof vi.fn>;
+	let note: ReturnType<typeof vi.fn>;
+	let setState: ReturnType<typeof vi.fn>;
+	let approvals: BuzzApprovalRegistry;
 	let logger: ILogger;
 	let coordinator: BuzzSessionCoordinator;
 	let routes: { channelId: string; repositoryId: string }[];
 
 	beforeEach(() => {
 		getEvent = vi.fn().mockResolvedValue(record());
+		sendMessage = vi.fn().mockResolvedValue(GATE_ID);
+		addReaction = vi.fn().mockResolvedValue(undefined);
 		getSession = vi.fn().mockReturnValue(undefined);
-		startBuzzSession = vi.fn().mockResolvedValue(undefined);
+		startBuzzSession = vi.fn().mockResolvedValue("claude-session-1");
 		createBuzzWorkspace = vi.fn().mockResolvedValue({
 			path: "/worktrees/BUZZ-a1b2c3",
 			isGitWorktree: true,
 		});
-		resumeSession = vi.fn().mockResolvedValue(undefined);
+		track = vi.fn().mockResolvedValue("DEV-42");
+		note = vi.fn().mockResolvedValue(undefined);
+		setState = vi.fn().mockResolvedValue(undefined);
 		logger = createLogger();
+		approvals = new BuzzApprovalRegistry(logger);
 		routes = [{ channelId: CHANNEL_ID, repositoryId: "repo-1" }];
 
 		coordinator = new BuzzSessionCoordinator({
 			logger,
-			client: { getEvent } as unknown as BuzzCliClient,
+			client: {
+				getEvent,
+				sendMessage,
+				addReaction,
+			} as unknown as BuzzCliClient,
 			agentSessionManager: {
 				getSession,
 			} as unknown as AgentSessionManager,
 			sessionOrchestrator: {
 				startBuzzSession,
 				createBuzzWorkspace,
-				resumeSession,
 			} as unknown as SessionOrchestrator,
+			approvals,
 			getChannelRoutes: () => routes,
-			getRepositoryById: (id) => (id === "repo-1" ? REPOSITORY : undefined),
+			getRepositoryById: (id) =>
+				({ "repo-1": REPOSITORY, "repo-2": OTHER_REPOSITORY })[id],
 			getActivitySinkForChannel: () => ({}) as IActivitySink,
+			projection: { track, note, setState },
 		});
 	});
 
@@ -148,6 +177,16 @@ describe("BuzzSessionCoordinator", () => {
 		);
 	});
 
+	// The whole point of the gate: a fresh thread cannot write code, no matter
+	// what it is asked to do.
+	it("starts a new thread in the read-only triage phase", async () => {
+		await coordinator.handleEvent(event());
+
+		expect(startBuzzSession).toHaveBeenCalledWith(
+			expect.objectContaining({ phase: "triage" }),
+		);
+	});
+
 	it("derives a branch name from the message", async () => {
 		await coordinator.handleEvent(event());
 
@@ -158,9 +197,172 @@ describe("BuzzSessionCoordinator", () => {
 		);
 	});
 
+	it("offers the execution gate after a triage turn", async () => {
+		await coordinator.handleEvent(event());
+
+		expect(sendMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				channelId: CHANNEL_ID,
+				replyTo: ROOT_ID,
+				content: expect.stringContaining("▶️"),
+			}),
+		);
+		// Seeded so answering is one tap rather than an emoji search.
+		expect(addReaction).toHaveBeenCalledWith({
+			eventId: GATE_ID,
+			emoji: "▶️",
+		});
+		expect(addReaction).toHaveBeenCalledWith({
+			eventId: GATE_ID,
+			emoji: "📝",
+		});
+	});
+
+	it("promotes the thread to the execute phase when a human reacts ▶️", async () => {
+		await coordinator.handleEvent(event());
+		startBuzzSession.mockClear();
+
+		await coordinator.handleEvent(
+			event({
+				eventType: "reaction_added",
+				messageId: GATE_ID,
+				emoji: "▶️",
+				deliveryId: `reaction_added:${GATE_ID}:▶️:${AUTHOR}`,
+			}),
+		);
+		await settle();
+
+		expect(startBuzzSession).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "execute",
+				// The triage conversation carries over so the human need not repeat it.
+				resumeSessionId: "claude-session-1",
+			}),
+		);
+	});
+
+	it("tracks without implementing when a human reacts 📝", async () => {
+		await coordinator.handleEvent(event());
+		startBuzzSession.mockClear();
+
+		await coordinator.handleEvent(
+			event({
+				eventType: "reaction_added",
+				messageId: GATE_ID,
+				emoji: "📝",
+				deliveryId: `reaction_added:${GATE_ID}:📝:${AUTHOR}`,
+			}),
+		);
+		await settle();
+
+		expect(startBuzzSession).not.toHaveBeenCalled();
+		expect(track).toHaveBeenCalledWith(
+			expect.objectContaining({
+				sessionKey: "BUZZ-a1b2c3",
+				threadRootId: ROOT_ID,
+				summary: "Please look at the flaky worktree test",
+			}),
+		);
+		// The human is told where it landed, or the record is invisible to them.
+		expect(sendMessage).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				content: expect.stringContaining("DEV-42"),
+			}),
+		);
+		expect(setState).not.toHaveBeenCalled();
+	});
+
+	// The gate is the moment a conversation becomes work worth recording — that
+	// is true whether or not anybody writes code for it.
+	it("projects an issue and drives its status when implementing", async () => {
+		await coordinator.handleEvent(event());
+
+		await coordinator.handleEvent(
+			event({
+				eventType: "reaction_added",
+				messageId: GATE_ID,
+				emoji: "▶️",
+				deliveryId: `reaction_added:${GATE_ID}:▶️:${AUTHOR}`,
+			}),
+		);
+		await settle();
+
+		expect(track).toHaveBeenCalledTimes(1);
+		expect(setState.mock.calls.map((call) => call[1])).toEqual([
+			"In Progress",
+			"In Review",
+		]);
+	});
+
+	it("carries the thread's final response into the projected issue", async () => {
+		await coordinator.handleEvent(event());
+		coordinator.recordResponse(
+			ROOT_ID,
+			"Rewrote the teardown to await cleanup.",
+		);
+
+		await coordinator.handleEvent(
+			event({
+				eventType: "reaction_added",
+				messageId: GATE_ID,
+				emoji: "▶️",
+				deliveryId: `reaction_added:${GATE_ID}:▶️:${AUTHOR}`,
+			}),
+		);
+		await settle();
+
+		expect(note).toHaveBeenCalledWith(
+			`buzz-${ROOT_ID}`,
+			expect.stringContaining("Rewrote the teardown to await cleanup."),
+		);
+	});
+
+	// An emoji on an unrelated message is ordinary chat. If this leaked through,
+	// a thumbs-up on a colleague's message would spend tokens.
+	it("ignores a reaction that matches no open prompt", async () => {
+		await coordinator.handleEvent(
+			event({
+				eventType: "reaction_added",
+				messageId: "e".repeat(64),
+				emoji: "▶️",
+				deliveryId: "reaction_added:other:▶️",
+			}),
+		);
+		await settle();
+
+		expect(getEvent).not.toHaveBeenCalled();
+		expect(startBuzzSession).not.toHaveBeenCalled();
+	});
+
+	// Prose must not open a gate: the decision to write code has to be deliberate.
+	it("does not open the gate from an unrelated reply", async () => {
+		await coordinator.handleEvent(event());
+		startBuzzSession.mockClear();
+
+		getEvent.mockResolvedValue(
+			record({
+				id: REPLY_ID,
+				content: "sounds good, maybe later",
+				tags: [["e", ROOT_ID, "", "root"]],
+			}),
+		);
+		await coordinator.handleEvent(
+			event({ messageId: REPLY_ID, deliveryId: "message_posted:reply:" }),
+		);
+		await settle();
+
+		expect(startBuzzSession).toHaveBeenCalledWith(
+			expect.objectContaining({ phase: "triage" }),
+		);
+	});
+
 	// A follow-up message in the same thread must continue the conversation,
 	// not fork a second worktree against the same branch.
-	it("resumes the existing session for a reply in the same thread", async () => {
+	it("continues the existing session for a reply in the same thread", async () => {
+		await coordinator.handleEvent(event());
+		createBuzzWorkspace.mockClear();
+		startBuzzSession.mockClear();
+
 		getEvent.mockResolvedValue(
 			record({
 				id: REPLY_ID,
@@ -168,30 +370,23 @@ describe("BuzzSessionCoordinator", () => {
 				tags: [["e", ROOT_ID, "", "root"]],
 			}),
 		);
-		getSession.mockReturnValue({ id: `buzz-${ROOT_ID}` });
 
 		await coordinator.handleEvent(
 			event({ messageId: REPLY_ID, deliveryId: "message_posted:reply:" }),
 		);
 
-		expect(startBuzzSession).not.toHaveBeenCalled();
-		expect(resumeSession).toHaveBeenCalledWith(
-			expect.objectContaining({ id: `buzz-${ROOT_ID}` }),
-			REPOSITORY,
-			`buzz-${ROOT_ID}`,
-			expect.anything(),
-			"also check the teardown path",
-			"",
-			false,
-			[],
-			undefined,
-			undefined,
-			AUTHOR,
-			"1753500000",
+		expect(createBuzzWorkspace).not.toHaveBeenCalled();
+		expect(startBuzzSession).toHaveBeenCalledWith(
+			expect.objectContaining({
+				sessionId: `buzz-${ROOT_ID}`,
+				taskInstructions: "also check the teardown path",
+				resumeSessionId: "claude-session-1",
+			}),
 		);
 	});
 
-	// buzz-workflow retries a call_webhook step that does not answer within 10s.
+	// buzz-workflow retries a call_webhook step that does not answer within 10s,
+	// and the polling ingress re-reads an inclusive `--since` window.
 	it("ignores a repeated delivery", async () => {
 		await coordinator.handleEvent(event());
 		await coordinator.handleEvent(event());
@@ -215,21 +410,6 @@ describe("BuzzSessionCoordinator", () => {
 
 		expect(startBuzzSession).not.toHaveBeenCalled();
 		expect(logger.warn).toHaveBeenCalled();
-	});
-
-	// The 📝/▶️ execution gate arrives with the approval protocol; until then a
-	// reaction must not be able to start a coding session.
-	it("does not act on reactions yet", async () => {
-		await coordinator.handleEvent(
-			event({
-				eventType: "reaction_added",
-				emoji: "▶️",
-				deliveryId: "reaction_added:x:▶️",
-			}),
-		);
-
-		expect(getEvent).not.toHaveBeenCalled();
-		expect(startBuzzSession).not.toHaveBeenCalled();
 	});
 
 	it("ignores an empty message", async () => {
@@ -256,5 +436,124 @@ describe("BuzzSessionCoordinator", () => {
 
 		expect(startBuzzSession).not.toHaveBeenCalled();
 		expect(logger.error).toHaveBeenCalled();
+	});
+
+	// A triage channel is deliberately allowed to reach several repositories.
+	// Guessing means reading the wrong codebase in a fresh worktree.
+	it("asks which repository to use when a channel is ambiguous", async () => {
+		routes = [
+			{
+				channelId: CHANNEL_ID,
+				repositoryIds: ["repo-1", "repo-2"],
+			} as (typeof routes)[number],
+		];
+
+		const handled = coordinator.handleEvent(event());
+		await vi.waitFor(() =>
+			expect(approvals.hasPendingPrompt(`buzz-${ROOT_ID}`)).toBe(true),
+		);
+
+		expect(sendMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				content: expect.stringContaining("Which repository should I work in?"),
+			}),
+		);
+		expect(startBuzzSession).not.toHaveBeenCalled();
+
+		approvals.resolveByReaction(GATE_ID, "2⃣", AUTHOR);
+		await handled;
+
+		expect(startBuzzSession).toHaveBeenCalledWith(
+			expect.objectContaining({ repository: OTHER_REPOSITORY }),
+		);
+	});
+
+	it("does not ask when a channel maps to exactly one repository", async () => {
+		routes = [
+			{
+				channelId: CHANNEL_ID,
+				repositoryIds: ["repo-1"],
+			} as (typeof routes)[number],
+		];
+
+		await coordinator.handleEvent(event());
+
+		expect(startBuzzSession).toHaveBeenCalledWith(
+			expect.objectContaining({ repository: REPOSITORY }),
+		);
+	});
+
+	// DMs have channel ids that cannot be configured in advance.
+	it("falls back to a catch-all route", async () => {
+		routes = [{ channelId: "*", repositoryId: "repo-1" }];
+
+		await coordinator.handleEvent(
+			event({ channelId: "11111111-0000-4000-8000-000000000009" }),
+		);
+
+		expect(startBuzzSession).toHaveBeenCalledWith(
+			expect.objectContaining({ repository: REPOSITORY }),
+		);
+	});
+
+	// Otherwise adding a catch-all would silently widen every pinned channel.
+	it("prefers an exact route over the catch-all", async () => {
+		routes = [
+			{ channelId: CHANNEL_ID, repositoryId: "repo-1" },
+			{ channelId: "*", repositoryId: "repo-2" },
+		];
+
+		await coordinator.handleEvent(event());
+
+		expect(startBuzzSession).toHaveBeenCalledWith(
+			expect.objectContaining({ repository: REPOSITORY }),
+		);
+	});
+
+	it("keeps a thread on the repository it already chose", async () => {
+		routes = [
+			{
+				channelId: CHANNEL_ID,
+				repositoryIds: ["repo-1", "repo-2"],
+			} as (typeof routes)[number],
+		];
+
+		const first = coordinator.handleEvent(event());
+		await vi.waitFor(() =>
+			expect(approvals.hasPendingPrompt(`buzz-${ROOT_ID}`)).toBe(true),
+		);
+		approvals.resolveByReaction(GATE_ID, "1⃣", AUTHOR);
+		await first;
+		sendMessage.mockClear();
+
+		getEvent.mockResolvedValue(
+			record({
+				id: REPLY_ID,
+				content: "and the teardown path",
+				tags: [["e", ROOT_ID, "", "root"]],
+			}),
+		);
+		await coordinator.handleEvent(
+			event({ messageId: REPLY_ID, deliveryId: "message_posted:reply:" }),
+		);
+
+		expect(sendMessage).not.toHaveBeenCalledWith(
+			expect.objectContaining({
+				content: expect.stringContaining("Which repository"),
+			}),
+		);
+		expect(startBuzzSession).toHaveBeenLastCalledWith(
+			expect.objectContaining({ repository: REPOSITORY }),
+		);
+	});
+
+	it("exposes the thread bound to a session, for the question handler", async () => {
+		await coordinator.handleEvent(event());
+
+		expect(coordinator.getThread(`buzz-${ROOT_ID}`)).toEqual({
+			channelId: CHANNEL_ID,
+			threadRootId: ROOT_ID,
+		});
+		expect(coordinator.getThread("buzz-unknown")).toBeNull();
 	});
 });

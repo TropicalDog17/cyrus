@@ -26,6 +26,7 @@ import type {
 	IAgentEventTransport,
 	IIssueTrackerService,
 	Issue,
+	IssueCreateInput,
 	IssueUpdateInput,
 	IssueWithChildren,
 	Label,
@@ -209,6 +210,41 @@ export class LinearIssueTrackerService implements IIssueTrackerService {
 		} catch (error) {
 			const err = new Error(
 				`Failed to update issue ${issueId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			if (error instanceof Error) {
+				err.cause = error;
+			}
+			throw err;
+		}
+	}
+
+	/**
+	 * Create a new issue.
+	 *
+	 * `teamId` may be a team key (e.g. `DEV`); Linear's `team()` lookup accepts
+	 * either, so it is resolved to an id first rather than pushed onto callers.
+	 */
+	async createIssue(input: IssueCreateInput): Promise<Issue> {
+		try {
+			const team = await this.linearClient.team(input.teamId);
+			const createPayload = await this.linearClient.createIssue({
+				...input,
+				teamId: team.id,
+			});
+
+			if (!createPayload.success) {
+				throw new Error("Linear API returned success=false");
+			}
+
+			const createdIssue = await createPayload.issue;
+			if (!createdIssue) {
+				throw new Error("Created issue not returned from Linear API");
+			}
+
+			return createdIssue;
+		} catch (error) {
+			const err = new Error(
+				`Failed to create issue in team ${input.teamId}: ${error instanceof Error ? error.message : String(error)}`,
 			);
 			if (error instanceof Error) {
 				err.cause = error;

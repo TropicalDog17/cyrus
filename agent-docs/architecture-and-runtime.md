@@ -76,7 +76,9 @@ tracker.
 | Edge worker orchestration | `packages/edge-worker/src/EdgeWorker.ts` |
 | GitHub token resolution | `EdgeWorker.resolveGitHubToken()` — CYHOST-forwarded install token → self-minted GitHub App token (`GitHubAppTokenProvider`) → `GITHUB_TOKEN` PAT |
 | GitHub App token minting | `packages/github-event-transport/src/GitHubAppTokenProvider.ts` |
-| Buzz ingress + authz | `packages/buzz-event-transport/src/BuzzEventTransport.ts` (workflow YAML in the same package's `workflows/`) |
+| Buzz ingress + authz | `packages/buzz-event-transport/src/BuzzEventTransport.ts` (workflow YAML in the same package's `workflows/`); `src/buzz/BuzzPollingSource.ts` for the no-inbound-exposure path |
+| Buzz execution gate + approvals | `packages/edge-worker/src/buzz/BuzzApprovalRegistry.ts`, `src/buzz/BuzzQuestionHandler.ts` |
+| Buzz → Linear projection | `packages/edge-worker/src/buzz/BuzzLinearProjection.ts` |
 | Buzz trigger → session | `packages/edge-worker/src/buzz/BuzzSessionCoordinator.ts`, `SessionOrchestrator.startBuzzSession` |
 | Buzz egress | `packages/edge-worker/src/buzz/BuzzCliClient.ts`, `src/sinks/BuzzActivitySink.ts` |
 

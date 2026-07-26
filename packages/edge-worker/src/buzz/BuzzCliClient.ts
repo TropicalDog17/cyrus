@@ -16,6 +16,18 @@ export interface BuzzEventRecord {
 	tags: string[][];
 }
 
+/** One emoji's worth of `reactions get` output, grouped by buzz-cli. */
+export interface BuzzReactionGroup {
+	emoji: string;
+	count: number;
+	pubkeys: string[];
+}
+
+/** Shape of buzz-cli's `reactions get` output. */
+interface BuzzReactionsResponse {
+	reactions?: BuzzReactionGroup[];
+}
+
 /** Shape of buzz-cli's normalized write response (`normalize_write_response`). */
 interface BuzzWriteResponse {
 	event_id?: string;
@@ -157,6 +169,52 @@ export class BuzzCliClient {
 			params.eventId,
 		]);
 		return this.parseJson<BuzzEventRecord[]>(stdout, "messages thread") ?? [];
+	}
+
+	/**
+	 * Fetch recent messages in a channel, oldest first.
+	 *
+	 * `since` is the Nostr filter bound and is **inclusive**, so the event that
+	 * set the previous high-water mark comes back on the next call. Callers must
+	 * dedupe by event id rather than trusting the window.
+	 */
+	async getMessages(params: {
+		channelId: string;
+		since?: number;
+		limit?: number;
+	}): Promise<BuzzEventRecord[]> {
+		const args = ["messages", "get", "--channel", params.channelId];
+		if (params.since !== undefined) {
+			args.push("--since", String(params.since));
+		}
+		if (params.limit !== undefined) {
+			args.push("--limit", String(params.limit));
+		}
+
+		const stdout = await this.run(args);
+		return this.parseJson<BuzzEventRecord[]>(stdout, "messages get") ?? [];
+	}
+
+	/**
+	 * List reactions on an event, grouped by emoji with the reacting pubkeys.
+	 *
+	 * buzz-cli returns the *current* set rather than a delta, so callers poll
+	 * this and diff against what they have already acted on.
+	 */
+	async getReactions(params: {
+		eventId: string;
+	}): Promise<BuzzReactionGroup[]> {
+		const stdout = await this.run([
+			"reactions",
+			"get",
+			"--event",
+			params.eventId,
+		]);
+		const parsed = this.parseJson<BuzzReactionsResponse>(
+			stdout,
+			"reactions get",
+		);
+		return parsed?.reactions ?? [];
 	}
 
 	/** Fetch a single event by id, or null when the relay does not have it. */

@@ -27,12 +27,24 @@ export class BuzzActivitySink implements IActivitySink {
 	private readonly client: BuzzCliClient;
 	private readonly channelId: string;
 	private readonly logger: ILogger;
+	private readonly onResponse?: (threadRootId: string, body: string) => void;
 
-	constructor(client: BuzzCliClient, channelId: string, logger: ILogger) {
+	constructor(
+		client: BuzzCliClient,
+		channelId: string,
+		logger: ILogger,
+		/**
+		 * Notified for each `response` posted. The Linear projection uses the last
+		 * one as a session's summary; observing it here is cheaper than
+		 * re-reading the thread back off the relay afterwards.
+		 */
+		onResponse?: (threadRootId: string, body: string) => void,
+	) {
 		this.client = client;
 		this.channelId = channelId;
 		this.id = `buzz:${channelId}`;
 		this.logger = logger;
+		this.onResponse = onResponse;
 	}
 
 	async post(
@@ -42,6 +54,10 @@ export class BuzzActivitySink implements IActivitySink {
 		const body = this.renderBody(activity);
 		if (!body) {
 			return {};
+		}
+
+		if (activity.type === "response") {
+			this.onResponse?.(sessionId, body);
 		}
 
 		try {
