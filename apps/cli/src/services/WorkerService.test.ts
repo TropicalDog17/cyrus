@@ -58,6 +58,7 @@ const EDGE_CONFIG: EdgeConfig = {
 	userAccessControl: undefined,
 	promptDefaults: undefined,
 	sandbox: undefined,
+	buzz: undefined,
 };
 
 /**

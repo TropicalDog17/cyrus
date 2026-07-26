@@ -2,6 +2,10 @@ import { EventEmitter } from "node:events";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { LinearClient } from "@linear/sdk";
+import {
+	BuzzEventTransport,
+	type BuzzWebhookEvent,
+} from "cyrus-buzz-event-transport";
 import type { SessionStore } from "cyrus-claude-runner";
 import {
 	findTranscriptPath,
@@ -90,6 +94,8 @@ import {
 	formatRepoSetupHookActivity,
 	formatRoutingThought,
 } from "./activity/index.js";
+import { BuzzCliClient } from "./buzz/BuzzCliClient.js";
+import { BuzzSessionCoordinator } from "./buzz/BuzzSessionCoordinator.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
 import { CyrusToolsHost } from "./CyrusToolsHost.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
@@ -114,6 +120,7 @@ import {
 	type SkillSessionContext,
 	SkillsPluginResolver,
 } from "./SkillsPluginResolver.js";
+import { BuzzActivitySink } from "./sinks/BuzzActivitySink.js";
 import type { IActivitySink } from "./sinks/IActivitySink.js";
 import { LinearActivitySink } from "./sinks/LinearActivitySink.js";
 import { NoopActivitySink } from "./sinks/NoopActivitySink.js";
@@ -155,6 +162,10 @@ export class EdgeWorker extends EventEmitter {
 	private linearEventTransport: LinearEventTransport | null = null; // Single event transport for webhook delivery
 	private gitHubEventTransport: GitHubEventTransport | null = null; // GitHub event transport for forwarded GitHub webhooks
 	private gitHubAppTokenProvider: GitHubAppTokenProvider | null = null; // Self-hosted GitHub App token minting
+	private buzzEventTransport: BuzzEventTransport | null = null; // Buzz workflow-bridge transport
+	private buzzSessionCoordinator: BuzzSessionCoordinator | null = null; // Buzz trigger -> session
+	private buzzCliClient: BuzzCliClient | null = null; // Shell-out wrapper over the `buzz` binary
+	private buzzActivitySinks: Map<string, IActivitySink> = new Map(); // Maps Buzz channel ID to its thread-posting sink
 	private gitHubCommentService!: GitHubCommentService; // Service for posting comments back to GitHub PRs
 	private cliRPCServer: CLIRPCServer | null = null; // CLI RPC server for CLI platform mode
 	private configUpdater: ConfigUpdater | null = null; // Single config updater for configuration updates
@@ -966,7 +977,12 @@ export class EdgeWorker extends EventEmitter {
 		// for webhook URL verification to succeed.
 		this.registerGitHubEventTransport();
 
-		// 3. Create and register ConfigUpdater (both platforms)
+		// 3. Register the Buzz event transport when Buzz is configured. Unlike
+		// GitHub this is opt-in: without a channel map and a relay identity
+		// there is nothing for the endpoint to do.
+		this.registerBuzzEventTransport();
+
+		// 4. Create and register ConfigUpdater (both platforms)
 		this.configUpdater = new ConfigUpdater(
 			this.sharedApplicationServer.getFastifyInstance(),
 			this.cyrusHome,
@@ -1103,6 +1119,108 @@ export class EdgeWorker extends EventEmitter {
 			`GitHub event transport registered (${verificationMode} mode)`,
 		);
 		this.logger.info("Webhook endpoint: POST /github-webhook");
+	}
+
+	/**
+	 * Wire the Buzz conversational surface: workflow-bridge ingress, a shared
+	 * `buzz` CLI client, and the coordinator that turns a trigger into a
+	 * session.
+	 *
+	 * Opt-in, and silent when unconfigured. Secrets come from the environment
+	 * rather than `config.json` (which CYHOST may push over the wire), matching
+	 * how GitHub sources its webhook secret and App credentials.
+	 */
+	private registerBuzzEventTransport(): void {
+		const buzz = this.config.buzz;
+		if (!buzz) return;
+
+		const privateKey = process.env.BUZZ_PRIVATE_KEY;
+		const webhookSecret = process.env.CYRUS_BUZZ_WEBHOOK_SECRET;
+		if (!privateKey || !webhookSecret) {
+			this.logger.warn(
+				"Buzz is configured but BUZZ_PRIVATE_KEY and/or CYRUS_BUZZ_WEBHOOK_SECRET are unset — Buzz ingress is disabled",
+			);
+			return;
+		}
+
+		this.buzzCliClient = new BuzzCliClient({
+			binaryPath: buzz.cliPath,
+			relayUrl: buzz.relayUrl,
+			privateKey,
+			...(process.env.BUZZ_AUTH_TAG
+				? { authTag: process.env.BUZZ_AUTH_TAG }
+				: {}),
+		});
+
+		// Surface an unbuilt or drifted CLI at startup rather than at the first
+		// reply, when the failure would look like "the agent went quiet".
+		this.buzzCliClient.checkAvailable().catch((error) => {
+			this.logger.error(
+				"Buzz CLI check failed — Buzz replies will not be delivered",
+				error instanceof Error ? error : new Error(String(error)),
+			);
+		});
+
+		this.buzzSessionCoordinator = new BuzzSessionCoordinator({
+			logger: this.logger,
+			client: this.buzzCliClient,
+			agentSessionManager: this.agentSessionManager,
+			sessionOrchestrator: this.sessionOrchestrator,
+			getChannelRoutes: () => this.config.buzz?.channels ?? [],
+			getRepositoryById: (repositoryId) => this.repositories.get(repositoryId),
+			getActivitySinkForChannel: (channelId) =>
+				this.getBuzzActivitySinkForChannel(channelId),
+		});
+
+		this.buzzEventTransport = new BuzzEventTransport({
+			fastifyServer: this.sharedApplicationServer.getFastifyInstance(),
+			secret: webhookSecret,
+			allowedPubkeys: buzz.allowedPubkeys ?? [],
+		});
+
+		// Fire-and-forget, like the GitHub dispatch: a slow session start must
+		// not hold the workflow's HTTP request open (it times out at 10s).
+		this.buzzEventTransport.on("event", (event: BuzzWebhookEvent) => {
+			this.buzzSessionCoordinator?.handleEvent(event).catch((error) => {
+				this.logger.error(
+					"Failed to handle Buzz event",
+					error instanceof Error ? error : new Error(String(error)),
+				);
+			});
+		});
+
+		this.buzzEventTransport.on("error", (error: Error) => {
+			this.handleError(error);
+		});
+
+		this.buzzEventTransport.register();
+
+		this.logger.info(
+			`Buzz event transport registered (${buzz.channels?.length ?? 0} channel route(s))`,
+		);
+		this.logger.info("Webhook endpoint: POST /buzz-webhook");
+	}
+
+	/**
+	 * One sink per Buzz channel, created on first use. The sink is bound to a
+	 * channel rather than a workspace because Buzz has no workspace concept —
+	 * the channel is what a reply has to be addressed to.
+	 */
+	private getBuzzActivitySinkForChannel(channelId: string): IActivitySink {
+		const existing = this.buzzActivitySinks.get(channelId);
+		if (existing) return existing;
+
+		if (!this.buzzCliClient) {
+			return new NoopActivitySink(`buzz:${channelId}`);
+		}
+
+		const sink = new BuzzActivitySink(
+			this.buzzCliClient,
+			channelId,
+			this.logger,
+		);
+		this.buzzActivitySinks.set(channelId, sink);
+		return sink;
 	}
 
 	/**

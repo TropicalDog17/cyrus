@@ -96,6 +96,25 @@ export interface StartGitHubSessionRequest {
 	systemPrompt: string;
 }
 
+export interface StartBuzzSessionRequest {
+	repository: RepositoryConfig;
+	workspace: { path: string; isGitWorktree: boolean };
+	/** Internal session id, `buzz-<threadRootId>`. */
+	sessionId: string;
+	/** Synthesized tracker-style identifier, e.g. `BUZZ-a1b2c3`. */
+	sessionKey: string;
+	/**
+	 * Buzz thread root event id. Doubles as the session's `externalSessionId`,
+	 * so every activity the sink posts threads under the originating message.
+	 */
+	threadRootId: string;
+	branchName: string;
+	title: string;
+	taskInstructions: string;
+	/** Sink bound to the originating Buzz channel. */
+	activitySink: IActivitySink;
+}
+
 /**
  * Injected collaborators for {@link SessionOrchestrator}. Prompt assembly
  * (Phase E) and tool derivation (Phase D) still live on EdgeWorker in Phase F,
@@ -265,6 +284,55 @@ export interface SessionOrchestratorDeps {
 		issue: Issue,
 		repositoryId: string,
 	): void;
+}
+
+/**
+ * Build the issue-shaped object `GitService.createGitWorktree` needs for a
+ * session that has no tracker issue behind it (a GitHub PR, a Buzz thread).
+ *
+ * GitService only reads `identifier`, `branchName` and `title`, but it also
+ * defensively awaits the lazy relations the Linear SDK's `Issue` declares, so
+ * every one of them has to be present and resolve empty. That is what the cast
+ * is buying — there is no narrower public type to satisfy.
+ */
+function syntheticIssueForWorkspace(params: {
+	id: string;
+	identifier: string;
+	title: string;
+	branchName: string;
+}): Issue {
+	return {
+		id: params.id,
+		identifier: params.identifier,
+		title: params.title,
+		description: null,
+		url: "",
+		branchName: params.branchName,
+		assigneeId: null,
+		stateId: null,
+		teamId: null,
+		labelIds: [],
+		priority: 0,
+		createdAt: new Date(),
+		updatedAt: new Date(),
+		archivedAt: null,
+		state: Promise.resolve(undefined),
+		assignee: Promise.resolve(undefined),
+		team: Promise.resolve(undefined),
+		parent: Promise.resolve(undefined),
+		project: Promise.resolve(undefined),
+		labels: () => Promise.resolve({ nodes: [] }),
+		comments: () => Promise.resolve({ nodes: [] }),
+		attachments: () => Promise.resolve({ nodes: [] }),
+		children: () => Promise.resolve({ nodes: [] }),
+		inverseRelations: () => Promise.resolve({ nodes: [] }),
+		update: () =>
+			Promise.resolve({
+				success: true,
+				issue: undefined,
+				lastSyncId: 0,
+			}),
+	} as unknown as Issue;
 }
 
 /**
@@ -1308,43 +1376,13 @@ export class SessionOrchestrator {
 		prNumber: number,
 	): Promise<{ path: string; isGitWorktree: boolean } | null> {
 		try {
-			// Use the GitService to create the worktree
-			// Create a synthetic issue-like object for the git service
-			const syntheticIssue = {
-				id: `github-pr-${prNumber}`,
-				identifier: `PR-${prNumber}`,
-				title: `PR #${prNumber}`,
-				description: null,
-				url: "",
-				branchName: branchRef,
-				assigneeId: null,
-				stateId: null,
-				teamId: null,
-				labelIds: [],
-				priority: 0,
-				createdAt: new Date(),
-				updatedAt: new Date(),
-				archivedAt: null,
-				state: Promise.resolve(undefined),
-				assignee: Promise.resolve(undefined),
-				team: Promise.resolve(undefined),
-				parent: Promise.resolve(undefined),
-				project: Promise.resolve(undefined),
-				labels: () => Promise.resolve({ nodes: [] }),
-				comments: () => Promise.resolve({ nodes: [] }),
-				attachments: () => Promise.resolve({ nodes: [] }),
-				children: () => Promise.resolve({ nodes: [] }),
-				inverseRelations: () => Promise.resolve({ nodes: [] }),
-				update: () =>
-					Promise.resolve({
-						success: true,
-						issue: undefined,
-						lastSyncId: 0,
-					}),
-			} as unknown as Issue;
-
 			return await this.deps.gitService.createGitWorktree(
-				syntheticIssue,
+				syntheticIssueForWorkspace({
+					id: `github-pr-${prNumber}`,
+					identifier: `PR-${prNumber}`,
+					title: `PR #${prNumber}`,
+					branchName: branchRef,
+				}),
 				[repository],
 				{
 					crossRepoSiblingRepositories: this.deps.getAllRepositories(),
@@ -1353,6 +1391,39 @@ export class SessionOrchestrator {
 		} catch (error) {
 			this.deps.logger.error(
 				`Failed to create GitHub workspace for PR #${prNumber}`,
+				error instanceof Error ? error : new Error(String(error)),
+			);
+			return null;
+		}
+	}
+
+	/**
+	 * Create a git worktree for a Buzz conversation. The worktree is keyed on
+	 * the synthesized `BUZZ-xxxxxx` identifier, so it lands at
+	 * `<workspaceBaseDir>/BUZZ-xxxxxx/` exactly as an issue-keyed one would.
+	 */
+	async createBuzzWorkspace(
+		repository: RepositoryConfig,
+		sessionKey: string,
+		branchName: string,
+		title: string,
+	): Promise<{ path: string; isGitWorktree: boolean } | null> {
+		try {
+			return await this.deps.gitService.createGitWorktree(
+				syntheticIssueForWorkspace({
+					id: sessionKey,
+					identifier: sessionKey,
+					title,
+					branchName,
+				}),
+				[repository],
+				{
+					crossRepoSiblingRepositories: this.deps.getAllRepositories(),
+				},
+			);
+		} catch (error) {
+			this.deps.logger.error(
+				`Failed to create Buzz workspace for ${sessionKey}`,
 				error instanceof Error ? error : new Error(String(error)),
 			);
 			return null;
@@ -1575,6 +1646,123 @@ export class SessionOrchestrator {
 		} catch (error) {
 			this.deps.logger.error(
 				`GitHub session error for ${repoFullName}#${prNumber}`,
+				error instanceof Error ? error : new Error(String(error)),
+			);
+		} finally {
+			await this.deps.savePersistedState();
+		}
+	}
+
+	/**
+	 * The Buzz acting spine: register a session for a chat thread, bind the
+	 * thread-scoped activity sink, and start a runner.
+	 *
+	 * Structurally this mirrors {@link startGitHubSession}, with two
+	 * differences that follow from Buzz being a conversation rather than a
+	 * review surface:
+	 *
+	 * - The session's `externalSessionId` is the Buzz thread root, so activity
+	 *   streams back into the thread as the run proceeds. GitHub instead posts
+	 *   one summary at the end, because a PR thread is not a live chat.
+	 * - There is no terminal reply step here for the same reason.
+	 */
+	async startBuzzSession(req: StartBuzzSessionRequest): Promise<void> {
+		const {
+			repository,
+			workspace,
+			sessionId,
+			sessionKey,
+			threadRootId,
+			branchName,
+			title,
+			taskInstructions,
+			activitySink,
+		} = req;
+		const agentSessionManager = this.deps.agentSessionManager;
+
+		const existingSessions =
+			agentSessionManager.getActiveSessionsByBranchName(branchName);
+		const firstExisting = existingSessions[0];
+		if (firstExisting) {
+			this.deps.logger.warn(
+				`Reusing workspace from active session ${firstExisting.id} — concurrent writes possible`,
+			);
+		}
+
+		const issueMinimal: IssueMinimal = {
+			id: sessionKey,
+			identifier: sessionKey,
+			title,
+			branchName,
+		};
+
+		agentSessionManager.createCyrusAgentSession(
+			sessionId,
+			sessionKey,
+			issueMinimal,
+			workspace,
+			"buzz",
+			[
+				{
+					repositoryId: repository.id,
+					branchName,
+					baseBranchName: repository.baseBranch,
+				},
+			],
+			threadRootId,
+		);
+
+		this.deps.setSessionRepository(sessionId, repository.id);
+		agentSessionManager.setActivitySink(sessionId, activitySink);
+
+		const session = agentSessionManager.getSession(sessionId);
+		if (!session) {
+			this.deps.logger.error(
+				`Failed to create session for Buzz thread ${threadRootId}`,
+			);
+			return;
+		}
+
+		const allowedTools = this.deps.buildAllowedTools(repository);
+		const disallowedTools = this.deps.buildDisallowedTools(repository);
+		const allowedDirectories: string[] = [repository.repositoryPath];
+
+		const { config: runnerConfig, runnerType } =
+			await this.buildAgentRunnerConfig(
+				session,
+				repository,
+				sessionId,
+				undefined, // systemPrompt (label-based prompts are a Linear concept)
+				allowedTools,
+				allowedDirectories,
+				disallowedTools,
+				undefined, // resumeSessionId
+				undefined, // labels
+				undefined, // issueDescription
+				undefined, // maxTurns
+				undefined, // linearWorkspaceId
+				this.deps.buildSkillSessionContext(repository, undefined, session),
+				undefined, // labelPromptModel
+				undefined, // effort
+				// No `buzzMcpConfigs` list exists; Buzz sessions take the default
+				// (Linear) MCP catalog rather than growing a third config knob.
+				"linear",
+			);
+
+		const runner = this.createRunnerForType(runnerType, runnerConfig);
+		agentSessionManager.addAgentRunner(sessionId, runner);
+		await this.deps.savePersistedState();
+
+		this.deps.logger.info(
+			`Starting ${runnerType} runner for Buzz thread ${sessionKey}`,
+		);
+
+		try {
+			const sessionInfo = await runner.start(taskInstructions);
+			this.deps.logger.info(`Buzz session started: ${sessionInfo.sessionId}`);
+		} catch (error) {
+			this.deps.logger.error(
+				`Buzz session error for ${sessionKey}`,
 				error instanceof Error ? error : new Error(String(error)),
 			);
 		} finally {

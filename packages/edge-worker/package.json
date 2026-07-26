@@ -34,6 +34,7 @@
 		"cyrus-config-updater": "workspace:*",
 		"cyrus-core": "workspace:*",
 		"cyrus-cursor-runner": "workspace:*",
+		"cyrus-buzz-event-transport": "workspace:*",
 		"cyrus-github-event-transport": "workspace:*",
 		"cyrus-linear-event-transport": "workspace:*",
 		"cyrus-mcp-tools": "workspace:*",

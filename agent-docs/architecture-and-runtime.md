@@ -50,6 +50,7 @@ cyrus/
     ├── edge-worker/               # Orchestrator (webhooks, sessions, routing, MCP)
     ├── linear-event-transport/    # Linear webhooks + LinearIssueTrackerService
     ├── github-event-transport/    # GitHub webhook handling
+    ├── buzz-event-transport/      # Buzz (Nostr chat) workflow-bridge ingress
     ├── cloudflare-tunnel-client/  # Optional tunnel for self-hosted webhook exposure
     ├── config-updater/            # Remote config push from CYHOST
     └── mcp-tools/                 # cyrus-tools MCP server
@@ -75,6 +76,9 @@ tracker.
 | Edge worker orchestration | `packages/edge-worker/src/EdgeWorker.ts` |
 | GitHub token resolution | `EdgeWorker.resolveGitHubToken()` — CYHOST-forwarded install token → self-minted GitHub App token (`GitHubAppTokenProvider`) → `GITHUB_TOKEN` PAT |
 | GitHub App token minting | `packages/github-event-transport/src/GitHubAppTokenProvider.ts` |
+| Buzz ingress + authz | `packages/buzz-event-transport/src/BuzzEventTransport.ts` (workflow YAML in the same package's `workflows/`) |
+| Buzz trigger → session | `packages/edge-worker/src/buzz/BuzzSessionCoordinator.ts`, `SessionOrchestrator.startBuzzSession` |
+| Buzz egress | `packages/edge-worker/src/buzz/BuzzCliClient.ts`, `src/sinks/BuzzActivitySink.ts` |
 
 ## Linear webhooks
 

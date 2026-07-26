@@ -387,6 +387,45 @@ export const RepositoryConfigSchema = z.object({
 });
 
 /**
+ * Maps one Buzz channel to the repository its sessions run against. This is the
+ * `projectKeys` analog for the conversational surface. Resolving an ambiguous
+ * or catch-all channel by asking in-thread is deliberately not modeled here —
+ * that arrives with the execution gate.
+ */
+export const BuzzChannelRouteSchema = z.object({
+	/** Buzz channel UUID (from `buzz channels list`). */
+	channelId: z.string(),
+	/** `id` of the repository in `repositories`. */
+	repositoryId: z.string(),
+});
+
+/**
+ * Buzz integration settings.
+ *
+ * Secrets are deliberately absent: the Nostr private key (`BUZZ_PRIVATE_KEY`),
+ * the optional NIP-OA attestation (`BUZZ_AUTH_TAG`) and the workflow shared
+ * secret (`CYRUS_BUZZ_WEBHOOK_SECRET`) are read from the environment, the same
+ * way GitHub's webhook secret and app credentials are. That keeps them out of
+ * `config.json`, which CYHOST may push over the wire.
+ */
+export const BuzzConfigSchema = z.object({
+	/**
+	 * Path to the Buzz CLI binary. Upstream's crate is named `buzz-cli` but the
+	 * binary it builds is named **`buzz`**.
+	 */
+	cliPath: z.string().register(pathRegistry, { path: true }),
+	/** Relay base URL, e.g. `https://buzz.example.com`. */
+	relayUrl: z.string(),
+	/**
+	 * Nostr pubkeys (64 hex) allowed to trigger Cyrus from Buzz. Empty or
+	 * omitted denies everyone — the webhook endpoint is public.
+	 */
+	allowedPubkeys: z.array(z.string()).optional(),
+	/** Channel-to-repository routes. A channel with no route is ignored. */
+	channels: z.array(BuzzChannelRouteSchema).optional(),
+});
+
+/**
  * Idle window a finished Claude session is kept alive for, when
  * `claudeSessionKeepAliveMinutes` is not configured. Sits under Anthropic's
  * 1-hour prompt-cache TTL so a follow-up comment appends to a still-cached
@@ -671,6 +710,11 @@ export const EdgeConfigSchema = z.object({
 	 * all agent network traffic through it for inspection and filtering.
 	 */
 	sandbox: SandboxConfigSchema.optional(),
+
+	/**
+	 * Buzz conversational surface. Omit to leave Buzz ingress/egress disabled.
+	 */
+	buzz: BuzzConfigSchema.optional(),
 });
 
 /**
@@ -790,6 +834,8 @@ export type RepositoryConfig = z.infer<typeof RepositoryConfigSchema>;
 export type EdgeConfig = z.infer<typeof EdgeConfigSchema>;
 export type SandboxConfig = z.infer<typeof SandboxConfigSchema>;
 export type NetworkPolicy = z.infer<typeof NetworkPolicySchema>;
+export type BuzzConfig = z.infer<typeof BuzzConfigSchema>;
+export type BuzzChannelRoute = z.infer<typeof BuzzChannelRouteSchema>;
 export type RepositoryConfigPayload = z.infer<
 	typeof RepositoryConfigPayloadSchema
 >;
