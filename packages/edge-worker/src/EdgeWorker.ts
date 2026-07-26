@@ -97,6 +97,7 @@ import {
 } from "./activity/index.js";
 import { BuzzApprovalRegistry } from "./buzz/BuzzApprovalRegistry.js";
 import { BuzzCliClient } from "./buzz/BuzzCliClient.js";
+import { BuzzLinearProjection } from "./buzz/BuzzLinearProjection.js";
 import { BuzzPollingSource } from "./buzz/BuzzPollingSource.js";
 import { BuzzQuestionHandler } from "./buzz/BuzzQuestionHandler.js";
 import { BuzzSessionCoordinator } from "./buzz/BuzzSessionCoordinator.js";
@@ -173,6 +174,7 @@ export class EdgeWorker extends EventEmitter {
 	private buzzPollingSource: BuzzPollingSource | null = null; // Relay poller, for deployments with no public ingress
 	private buzzApprovals: BuzzApprovalRegistry | null = null; // Gate + question prompts awaiting a human
 	private buzzQuestionHandler: BuzzQuestionHandler | null = null; // AskUserQuestion, asked in a Buzz thread
+	private buzzProjection: BuzzLinearProjection | null = null; // Buzz work recorded as unassigned Linear issues
 	private gitHubCommentService!: GitHubCommentService; // Service for posting comments back to GitHub PRs
 	private cliRPCServer: CLIRPCServer | null = null; // CLI RPC server for CLI platform mode
 	private configUpdater: ConfigUpdater | null = null; // Single config updater for configuration updates
@@ -1179,6 +1181,14 @@ export class EdgeWorker extends EventEmitter {
 
 		this.buzzApprovals = new BuzzApprovalRegistry(this.logger);
 
+		this.buzzProjection = new BuzzLinearProjection({
+			logger: this.logger,
+			getIssueTracker: (repository) =>
+				repository.linearWorkspaceId
+					? (this.issueTrackers.get(repository.linearWorkspaceId) ?? null)
+					: null,
+		});
+
 		this.buzzSessionCoordinator = new BuzzSessionCoordinator({
 			logger: this.logger,
 			client: this.buzzCliClient,
@@ -1189,6 +1199,7 @@ export class EdgeWorker extends EventEmitter {
 			getRepositoryById: (repositoryId) => this.repositories.get(repositoryId),
 			getActivitySinkForChannel: (channelId) =>
 				this.getBuzzActivitySinkForChannel(channelId),
+			projection: this.buzzProjection,
 		});
 
 		this.buzzQuestionHandler = new BuzzQuestionHandler({
@@ -1273,6 +1284,8 @@ export class EdgeWorker extends EventEmitter {
 			this.buzzCliClient,
 			channelId,
 			this.logger,
+			(threadRootId, body) =>
+				this.buzzSessionCoordinator?.recordResponse(threadRootId, body),
 		);
 		this.buzzActivitySinks.set(channelId, sink);
 		return sink;

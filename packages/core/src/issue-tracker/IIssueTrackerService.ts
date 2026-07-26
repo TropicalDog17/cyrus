@@ -25,6 +25,7 @@ import type {
 	FileUploadRequest,
 	FileUploadResponse,
 	Issue,
+	IssueCreateInput,
 	IssueTrackerAgentSession,
 	IssueTrackerAgentSessionPayload,
 	IssueUpdateInput,
@@ -239,6 +240,24 @@ export interface IIssueTrackerService {
 	 * See `fetchIssue()` documentation for details.
 	 */
 	updateIssue(issueId: string, updates: IssueUpdateInput): Promise<Issue>;
+
+	/**
+	 * Create a new issue.
+	 *
+	 * @param input - Issue fields; `teamId` accepts a team ID or a team key
+	 * @returns Promise resolving to the created issue
+	 * @throws Error if the tracker rejects the create
+	 *
+	 * @remarks
+	 * Leave `assigneeId` unset to create the issue **unassigned**. Assigning an
+	 * issue to the agent's own user is what triggers a Linear agent session, so
+	 * an issue Cyrus creates to *record* work it is already doing must stay
+	 * unassigned or it will trigger a second, duplicate session.
+	 *
+	 * **Linear Platform Warning**: The returned issue has async properties that must be awaited.
+	 * See `fetchIssue()` documentation for details.
+	 */
+	createIssue(input: IssueCreateInput): Promise<Issue>;
 
 	/**
 	 * Fetch attachments for an issue.

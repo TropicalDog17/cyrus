@@ -393,10 +393,20 @@ export const RepositoryConfigSchema = z.object({
  * that arrives with the execution gate.
  */
 export const BuzzChannelRouteSchema = z.object({
-	/** Buzz channel UUID (from `buzz channels list`). */
+	/**
+	 * Buzz channel UUID (from `buzz channels list`), or `"*"` for a catch-all
+	 * route. A catch-all applies to any channel with no exact route of its own —
+	 * including DMs, which have channel ids that cannot be known in advance.
+	 */
 	channelId: z.string(),
-	/** `id` of the repository in `repositories`. */
-	repositoryId: z.string(),
+	/** `id` of the repository in `repositories`. Shorthand for one repository. */
+	repositoryId: z.string().optional(),
+	/**
+	 * `id`s of the repositories this channel may reach. More than one makes the
+	 * channel ambiguous: Cyrus asks which to use rather than guessing, so a
+	 * triage channel can stay repo-agnostic until there is work to do.
+	 */
+	repositoryIds: z.array(z.string()).optional(),
 });
 
 /**

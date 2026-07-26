@@ -1052,9 +1052,15 @@
 							},
 							"repositoryId": {
 								"type": "string"
+							},
+							"repositoryIds": {
+								"type": "array",
+								"items": {
+									"type": "string"
+								}
 							}
 						},
-						"required": ["channelId", "repositoryId"],
+						"required": ["channelId"],
 						"additionalProperties": false
 					}
 				},

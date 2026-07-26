@@ -36,10 +36,24 @@ export interface BuzzSessionCoordinatorDeps {
 	/** Sink bound to a channel; one per channel, created lazily by EdgeWorker. */
 	getActivitySinkForChannel(channelId: string): IActivitySink;
 	/**
-	 * Called when a human picks 📝 rather than ▶️. Optional so the gate works
-	 * without an issue tracker configured; the Linear projection supplies it.
+	 * Issue-tracker projection. Optional so the gate works with no tracker
+	 * configured; {@link BuzzLinearProjection} supplies it.
 	 */
-	onTrackRequested?(request: BuzzTrackRequest): Promise<void>;
+	projection?: BuzzProjectionHooks;
+}
+
+/**
+ * The slice of an issue tracker the gate needs. Narrow on purpose: the
+ * coordinator decides *when* work is worth recording, and knows nothing about
+ * which tracker records it.
+ */
+export interface BuzzProjectionHooks {
+	/** Create the tracking issue. Returns its identifier, or null. */
+	track(request: BuzzTrackRequest): Promise<string | null>;
+	/** Append a comment to a tracked thread's issue. */
+	note(sessionId: string, body: string): Promise<void>;
+	/** Move a tracked thread's issue to a workflow state by name. */
+	setState(sessionId: string, stateName: string): Promise<void>;
 }
 
 /**
@@ -54,6 +68,12 @@ const MAX_SEEN_DELIVERIES = 500;
 
 const GATE_IMPLEMENT_EMOJI = "▶️";
 const GATE_TRACK_EMOJI = "📝";
+
+/** Channel id that matches any channel without a route of its own. */
+const CATCH_ALL_CHANNEL = "*";
+
+/** Reactable option markers, shared with {@link BuzzQuestionHandler}. */
+const OPTION_EMOJI = ["1⃣", "2⃣", "3⃣", "4⃣"];
 
 /** Everything Cyrus needs to run another phase of an existing Buzz thread. */
 interface BuzzThreadContext {
@@ -70,6 +90,8 @@ interface BuzzThreadContext {
 	agentSessionId?: string;
 	/** First human message in the thread, kept for the tracked-issue body. */
 	openingMessage: string;
+	/** Latest response Cyrus posted, used as the projected issue's summary. */
+	lastResponse?: string;
 }
 
 /**
@@ -129,8 +151,10 @@ export class BuzzSessionCoordinator {
 			return;
 		}
 
-		const repository = this.resolveRepository(event.channelId);
-		if (!repository) {
+		// A channel with no route at all is somebody else's channel. Checking that
+		// before reading the message keeps Cyrus from touching the relay — and
+		// from paying attention — for traffic it will never act on.
+		if (this.routesForChannel(event.channelId).length === 0) {
 			logger.debug(
 				`No repository routed for Buzz channel ${event.channelId}; ignoring`,
 			);
@@ -158,6 +182,12 @@ export class BuzzSessionCoordinator {
 			logger.info(`Buzz reply answered the open prompt for ${sessionId}`);
 			return;
 		}
+
+		const existingThread = this.threads.get(sessionId);
+		const repository = existingThread
+			? existingThread.repository
+			: await this.chooseRepository(event, sessionId, threadRootId);
+		if (!repository) return;
 
 		await this.enqueue(sessionId, async () => {
 			const existing = this.threads.get(sessionId);
@@ -371,23 +401,35 @@ export class BuzzSessionCoordinator {
 			});
 	}
 
+	/**
+	 * Act on the gate. Both answers project an issue: the gate is the moment a
+	 * conversation becomes a piece of work worth a durable record, whether or not
+	 * anybody writes code for it.
+	 */
 	private async applyGateDecision(
 		context: BuzzThreadContext,
 		decision: BuzzGateDecision,
 	): Promise<void> {
+		const identifier = await this.deps.projection?.track({
+			sessionId: context.sessionId,
+			sessionKey: context.sessionKey,
+			channelId: context.channelId,
+			threadRootId: context.threadRootId,
+			title: context.title,
+			summary: context.openingMessage,
+			repository: context.repository,
+		});
+
 		if (decision === "track") {
 			this.deps.logger.info(
 				`Buzz thread ${context.sessionKey} tracked without implementation`,
 			);
-			await this.deps.onTrackRequested?.({
-				sessionId: context.sessionId,
-				sessionKey: context.sessionKey,
-				channelId: context.channelId,
-				threadRootId: context.threadRootId,
-				title: context.title,
-				summary: context.openingMessage,
-				repository: context.repository,
-			});
+			await this.say(
+				context,
+				identifier
+					? `📝 Tracked as **${identifier}**. I won't make any changes.`
+					: "📝 Noted — I won't make any changes.",
+			);
 			return;
 		}
 
@@ -396,12 +438,54 @@ export class BuzzSessionCoordinator {
 		);
 		context.phase = "execute";
 
+		if (identifier) {
+			await this.say(context, `▶️ On it — tracking as **${identifier}**.`);
+			await this.deps.projection?.setState(context.sessionId, "In Progress");
+			await this.deps.projection?.note(
+				context.sessionId,
+				`Working on branch \`${context.branchName}\` in \`${context.repository.name}\`.`,
+			);
+		}
+
 		// Already inside the per-session queue; enqueueing again would wait on the
 		// task that is running this line.
 		await this.runTurn(
 			context,
 			`The change above is approved. Implement it now on branch \`${context.branchName}\`, then summarise what you changed.`,
 		);
+
+		if (identifier) {
+			await this.deps.projection?.note(
+				context.sessionId,
+				context.lastResponse
+					? `**Summary from the Buzz thread**\n\n${context.lastResponse}`
+					: "The implementation run finished without posting a summary.",
+			);
+			await this.deps.projection?.setState(context.sessionId, "In Review");
+		}
+	}
+
+	/** Record the latest response Cyrus posted, for the projection's summary. */
+	recordResponse(threadRootId: string, body: string): void {
+		const context = this.threads.get(`buzz-${threadRootId}`);
+		if (context) context.lastResponse = body;
+	}
+
+	private async say(
+		context: BuzzThreadContext,
+		content: string,
+	): Promise<void> {
+		try {
+			await this.deps.client.sendMessage({
+				channelId: context.channelId,
+				content,
+				replyTo: context.threadRootId,
+			});
+		} catch (error) {
+			this.deps.logger.debug(
+				`Could not post gate acknowledgement: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 
 	private async seedGateReactions(eventId: string): Promise<void> {
@@ -416,19 +500,134 @@ export class BuzzSessionCoordinator {
 		}
 	}
 
-	private resolveRepository(channelId: string): RepositoryConfig | undefined {
-		const route = this.deps
-			.getChannelRoutes()
-			.find((candidate) => candidate.channelId === channelId);
-		if (!route) return undefined;
+	/**
+	 * Routes that apply to a channel: its own if it has any, otherwise the
+	 * catch-all. An exact route always wins, so adding a catch-all cannot
+	 * silently widen a channel that was already pinned to one repository.
+	 */
+	private routesForChannel(channelId: string): BuzzChannelRoute[] {
+		const all = this.deps.getChannelRoutes();
+		const exact = all.filter((route) => route.channelId === channelId);
+		return exact.length > 0
+			? exact
+			: all.filter((route) => route.channelId === CATCH_ALL_CHANNEL);
+	}
 
-		const repository = this.deps.getRepositoryById(route.repositoryId);
-		if (!repository) {
-			this.deps.logger.warn(
-				`Buzz channel ${channelId} routes to unknown repository "${route.repositoryId}"`,
-			);
+	private repositoriesForChannel(channelId: string): RepositoryConfig[] {
+		const ids = this.routesForChannel(channelId).flatMap((route) => [
+			...(route.repositoryId ? [route.repositoryId] : []),
+			...(route.repositoryIds ?? []),
+		]);
+
+		const resolved: RepositoryConfig[] = [];
+		for (const id of new Set(ids)) {
+			const repository = this.deps.getRepositoryById(id);
+			if (!repository) {
+				this.deps.logger.warn(
+					`Buzz channel ${channelId} routes to unknown repository "${id}"`,
+				);
+				continue;
+			}
+			resolved.push(repository);
 		}
-		return repository;
+		return resolved;
+	}
+
+	/**
+	 * Pick the repository a new thread runs against, asking when the channel does
+	 * not determine it.
+	 *
+	 * A triage channel — or a DM, whose channel id cannot be configured in
+	 * advance — is deliberately allowed to reach several repositories. Guessing
+	 * would mean creating a worktree and reading the wrong codebase, which is
+	 * slower and more confusing than a single question.
+	 */
+	private async chooseRepository(
+		event: BuzzWebhookEvent,
+		sessionId: string,
+		threadRootId: string,
+	): Promise<RepositoryConfig | undefined> {
+		const candidates = this.repositoriesForChannel(event.channelId);
+
+		if (candidates.length === 0) {
+			this.deps.logger.warn(
+				`Buzz channel ${event.channelId} has a route but no resolvable repository`,
+			);
+			return undefined;
+		}
+		if (candidates.length === 1) return candidates[0];
+
+		const options = candidates
+			.slice(0, OPTION_EMOJI.length)
+			.map((repository, index) => ({
+				// biome-ignore lint/style/noNonNullAssertion: index is bounded by the slice
+				emoji: OPTION_EMOJI[index]!,
+				value: repository.id,
+				label: repository.name,
+			}));
+
+		let eventId: string;
+		try {
+			eventId = await this.deps.client.sendMessage({
+				channelId: event.channelId,
+				content: [
+					"❓ **Which repository should I work in?**",
+					"",
+					...options.map((option) => `${option.emoji} ${option.label}`),
+					"",
+					"_React to choose, or reply with the repository name._",
+				].join("\n"),
+				replyTo: threadRootId,
+			});
+		} catch (error) {
+			this.deps.logger.error(
+				`Could not ask which repository to use in ${event.channelId}`,
+				error instanceof Error ? error : new Error(String(error)),
+			);
+			return undefined;
+		}
+		if (!eventId) return undefined;
+
+		for (const option of options) {
+			try {
+				await this.deps.client.addReaction({ eventId, emoji: option.emoji });
+			} catch {
+				// Best-effort seeding; the human can still react themselves.
+			}
+		}
+
+		const resolution = await this.deps.approvals.register({
+			eventId,
+			channelId: event.channelId,
+			sessionId,
+			kind: "question",
+			options,
+		});
+
+		if (resolution.via === "timeout") return undefined;
+
+		// A reply may name the repository rather than match an option exactly.
+		const chosen =
+			candidates.find((repository) => repository.id === resolution.value) ??
+			candidates.find(
+				(repository) =>
+					repository.name.toLowerCase() ===
+					resolution.value.trim().toLowerCase(),
+			);
+
+		if (!chosen) {
+			this.deps.logger.warn(
+				`Buzz repository answer "${resolution.value}" matched no candidate`,
+			);
+			await this.deps.client
+				.sendMessage({
+					channelId: event.channelId,
+					content: `I don't have a repository called "${resolution.value}". Say the message again and pick one of the options.`,
+					replyTo: threadRootId,
+				})
+				.catch(() => undefined);
+		}
+		return chosen;
 	}
 
 	/**

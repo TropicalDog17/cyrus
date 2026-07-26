@@ -15,8 +15,7 @@ Design rationale and rejected alternatives:
 - Reacting ▶️ promotes the thread to a full session that may write code.
 - Replies in that thread steer the running session, and answer its questions.
 
-Not yet wired: the Linear projection, and asking which repository to use when a
-channel is ambiguous.
+Work that passes the gate is also recorded in Linear as an unassigned issue.
 
 ## The execution gate
 
@@ -74,7 +73,8 @@ Non-secret settings go in `~/.cyrus/config.json`:
     "selfPubkey": "<Cyrus's own 64-hex pubkey>",
     "allowedPubkeys": ["<64-hex nostr pubkey>"],
     "channels": [
-      { "channelId": "<channel UUID>", "repositoryId": "<repo id>" }
+      { "channelId": "<channel UUID>", "repositoryId": "<repo id>" },
+      { "channelId": "*", "repositoryIds": ["<repo id>", "<other repo id>"] }
     ]
   }
 }
@@ -82,6 +82,19 @@ Non-secret settings go in `~/.cyrus/config.json`:
 
 `channelId` comes from `buzz channels list`; `repositoryId` is the `id` of an
 entry in `repositories`. A channel with no route is ignored.
+
+### Routing and ambiguity
+
+A route may name one repository (`repositoryId`) or several (`repositoryIds`).
+`channelId: "*"` is a catch-all that applies to any channel without a route of
+its own — including DMs, whose channel ids cannot be known in advance. An exact
+route always beats the catch-all, so adding one cannot silently widen a channel
+that was already pinned.
+
+When a channel resolves to **more than one** repository, Cyrus asks which to use
+before it starts anything, and remembers the answer for the rest of the thread.
+It does not guess: guessing means building a worktree and reading the wrong
+codebase.
 
 `allowedPubkeys` is the authorization boundary. Buzz channels can be open, so
 channel membership is not a permission — **an empty or missing allowlist denies
@@ -171,6 +184,24 @@ individual tool calls are dropped. A Buzz thread is a chat log humans read,
 where narrating every tool call buries the answer — unlike Linear, which renders
 those in a collapsible agent-session timeline.
 
+## The Linear projection
+
+Reaching the gate — either answer — creates a Linear issue recording the work.
+Cyrus is no longer *driven* from Linear; the issue is a durable, searchable
+record that outlives the chat scrollback.
+
+- The issue is created **unassigned**, and that is load-bearing. Assignment is
+  what makes Linear open an agent session, so an assigned projection would start
+  a second session racing the Buzz one against the same branch.
+- Its description carries the Buzz thread and channel ids.
+- ▶️ additionally moves it to `In Progress`, notes the branch, then posts the
+  session's final summary and moves it to `In Review`.
+- The team comes from the repository's `teamKeys[0]`. A repository without
+  `teamKeys` is simply not projected.
+
+Every Linear write is best-effort with a short retry and is never awaited by
+anything that matters: a Linear outage must not stall or fail a Buzz session.
+
 ## Troubleshooting
 
 | Symptom | Cause |
@@ -182,3 +213,5 @@ those in a collapsible agent-session timeline.
 | Agent starts but never replies | `BUZZ_PRIVATE_KEY`'s account is not a member of the channel — check the logged relay rejection. |
 | Agent answers but never edits anything | The thread is still in triage; react ▶️ on the gate message. |
 | Cyrus replies to itself in a loop | `selfPubkey` is unset or wrong under `ingress: "poll"`. |
+| No Linear issue appears | The repository has no `teamKeys`, or no `linearWorkspaceId`. Check the logged warning. |
+| Cyrus keeps asking which repository | The channel resolves to several repositories and the answer matched none of them. |
