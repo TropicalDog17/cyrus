@@ -215,3 +215,14 @@ anything that matters: a Linear outage must not stall or fail a Buzz session.
 | Cyrus replies to itself in a loop | `selfPubkey` is unset or wrong under `ingress: "poll"`. |
 | No Linear issue appears | The repository has no `teamKeys`, or no `linearWorkspaceId`. Check the logged warning. |
 | Cyrus keeps asking which repository | The channel resolves to several repositories and the answer matched none of them. |
+
+## Glossary
+
+**Thread root** — the first event in a Buzz thread. Its event id is the thread's
+stable identity: Cyrus derives the `BUZZ-<first 6 hex>` session key, worktree, and
+branch from it, so replies resume the same session instead of starting a new one.
+
+**Execution gate** — the ▶️/📝 checkpoint that separates read-only `triage` from
+`execute`. A thread stays in triage (read-only tools) until an allowlisted human
+reacts ▶️ to implement or 📝 to track-only; it never times out, and consent comes
+from the reaction, not from prose in the thread.
