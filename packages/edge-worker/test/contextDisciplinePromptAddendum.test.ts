@@ -28,6 +28,25 @@ describe("context-discipline prompt addendum", () => {
 		expect(CONTEXT_DISCIPLINE_PROMPT_ADDENDUM).toMatch(/auto-compact/);
 	});
 
+	it("bounds delegation rather than encouraging it", () => {
+		// Claude 5-generation models already delegate readily; guidance that pushes
+		// further spawns subagents for work a few tool calls would finish.
+		expect(CONTEXT_DISCIPLINE_PROMPT_ADDENDUM).toMatch(
+			/do not delegate what a few tool calls would finish/,
+		);
+		expect(CONTEXT_DISCIPLINE_PROMPT_ADDENDUM).toMatch(
+			/(one|single) delegated search/,
+		);
+	});
+
+	it("does not restate rules the harness system prompt already carries", () => {
+		// Claude Code already tells the model not to re-read a file it just edited.
+		// A second copy here is the cross-layer duplication that costs attention.
+		expect(CONTEXT_DISCIPLINE_PROMPT_ADDENDUM).not.toMatch(
+			/trust that the edit applied/,
+		);
+	});
+
 	it("frames the guidance as avoiding wasted work, not cutting corners", () => {
 		expect(CONTEXT_DISCIPLINE_PROMPT_ADDENDUM).toMatch(/wasted/i);
 		expect(CONTEXT_DISCIPLINE_PROMPT_ADDENDUM).toMatch(
