@@ -221,7 +221,8 @@ record that outlives the chat scrollback.
 
 - The issue is created **unassigned**, and that is load-bearing. Assignment is
   what makes Linear open an agent session, so an assigned projection would start
-  a second session racing the Buzz one against the same branch.
+  a second session on its own branch and worktree, duplicating the Buzz session's
+  work — with both able to open a pull request for it.
 - Its description carries the Buzz thread and channel ids.
 - ▶️ additionally moves it to `In Progress`, notes the branch, then posts the
   session's final summary and moves it to `In Review`.

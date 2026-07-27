@@ -374,6 +374,66 @@ Credentials are environment-only (`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`,
 `BUZZ_AUTH_TAG`) — the keypair *is* the identity, there is no token or config
 file. Message bodies go on **stdin** (`--content -`), never argv.
 
+## Buzz Linear projections are created unassigned, and must stay that way
+
+`BuzzLinearProjection.track()` calls `createIssue` with no `assigneeId`. That
+is not an omission waiting to be tidied up: assignment and @mention are the
+only two things that make Linear open an agent session, and Linear ingress
+stays enabled alongside Buzz, so an assigned projection would immediately
+trigger a *second* Cyrus session. Not on the same branch — a Linear-origin
+session derives `DEV-nnn-<slug>` in `<base>/DEV-nnn/` while the Buzz one holds
+`BUZZ-xxxxxx-<slug>` — which is worse: two worktrees doing the same work, both
+able to open a PR. No config flag demotes Linear ingress, so the missing
+`assigneeId` is the only thing standing between the projection and a
+self-trigger loop.
+
+**Rule:** never add `assigneeId` to anything the Buzz projection writes, and
+never put an @mention of Cyrus in a projected description or comment body. If
+a projection must be assigned, assign a human, and check first that the Linear
+webhook path cannot read that write as a delegation.
+
+## The Buzz tool set, not the prompt, is the execution gate
+
+The Buzz start path in `SessionOrchestrator` chooses `allowedTools` from the
+thread's `BuzzSessionPhase`: the read-only preset
+(`READONLY_DEFAULT_ALLOWED_TOOLS` plus `AskUserQuestion`, which the preset
+omits and triage cannot work without) or the repository's full set. That
+selection is the gate — a triage run that decides to "just fix it" still
+cannot reach `Edit`, `Write` or general `Bash` — so the prompt is a courtesy
+and the tool set is the enforcement.
+
+The trap is which way the condition is written. `BuzzSessionPhase` is a
+two-member union (`triage | execute`), so testing for `triage` and falling
+through to the full set is equivalent *only while that stays true*. Any third
+phase — a plan phase, a review phase — lands in the fall-through branch and is
+handed write access silently, with no test failing, which is precisely the
+defeat the gate exists to prevent.
+
+**Rule:** the test must be positive on `execute`, so anything that is not
+`execute` is read-only by construction. Whichever change widens
+`BuzzSessionPhase` (`SessionOrchestrator.ts`) or `BuzzThreadContext.phase`
+(`BuzzSessionCoordinator.ts`) owns inverting it first, plus a test that a
+phase value the code has never seen yields the read-only set.
+
+## One branch cannot be in two worktrees — Cyrus shares one instead of failing
+
+`GitService.provisionSingleRepoWorktree` checks, when the branch already
+exists, whether it is checked out somewhere else (`findWorktreeByBranch`) and
+if so **returns that other worktree** — "Branch … is already checked out in
+worktree at …, reusing existing worktree" — with no `setupPath`, so setup
+scripts do not re-run either. Git would reject a second `worktree add` for one
+branch; Cyrus never sees that error because it hands back the first tree.
+
+For Buzz this is load-bearing. A Buzz session holds its work unit's branch in
+its own worktree, so a `PR-<n>` session for the same branch does not get a
+tree of its own: it gets the Buzz session's, and two sessions then edit the
+same files with no lock. Nothing errors; it looks like an agent undoing its
+own work.
+
+**Rule:** do not mint a second session for a branch some session already
+holds — route PR review back into the originating session — and never infer a
+fresh workspace from having asked for one.
+
 ## `postToSink` silently drops activities without `externalSessionId`
 
 `AgentSessionManager.postToSink` returns early when
