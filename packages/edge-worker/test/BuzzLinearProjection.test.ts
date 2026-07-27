@@ -4,7 +4,10 @@ import type {
 	RepositoryConfig,
 } from "cyrus-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { BuzzLinearProjection } from "../src/buzz/BuzzLinearProjection.js";
+import {
+	BuzzLinearProjection,
+	buzzThreadDeepLink,
+} from "../src/buzz/BuzzLinearProjection.js";
 import type { BuzzTrackRequest } from "../src/buzz/BuzzSessionCoordinator.js";
 
 const SESSION_ID = "buzz-abc";
@@ -82,42 +85,49 @@ describe("BuzzLinearProjection", () => {
 			fetchWorkflowStates,
 		} as unknown as IIssueTrackerService;
 
+		// The real builder, not a stand-in: the scheme is the whole risk here, and
+		// a test link would let a dead `https://` one ship unnoticed.
 		projection = new BuzzLinearProjection({
 			logger,
 			getIssueTracker: () => tracker,
-			buildThreadUrl: (channelId, root) =>
-				`https://buzz.example.com/${channelId}/${root}`,
+			buildThreadUrl: buzzThreadDeepLink,
 		});
 	});
 
 	// Load-bearing: assignment is what makes Linear open an agent session, so an
 	// assigned projection would race a second session against the same branch.
+	// Asserting the key set, not `assigneeId === undefined`, is what makes the
+	// invariant testable — an explicitly-undefined key would pass the latter and
+	// then become a real id the first time somebody threads a value through.
+	// See `agent-docs/dev-gotchas.md`, "Buzz Linear projections are created
+	// unassigned, and must stay that way".
 	it("creates the issue unassigned", async () => {
 		await projection.track(request());
 
 		expect(createIssue).toHaveBeenCalledTimes(1);
 		const input = createIssue.mock.calls[0]?.[0];
-		expect(input.assigneeId).toBeUndefined();
-		expect(input).toEqual(
-			expect.objectContaining({
-				teamId: "DEV",
-				title: "Fix the flaky worktree test",
-			}),
-		);
+		expect(Object.keys(input)).toEqual(["teamId", "title", "description"]);
+		expect(input.teamId).toBe("DEV");
+		expect(input.title).toBe("Fix the flaky worktree test");
 	});
 
+	// The whole description, because the `Link:` line is the part that can be
+	// wrong while still looking right: `buzz://` opens the thread, and an
+	// `https://` link derived from the relay base would be dead in every issue.
 	it("carries the Buzz thread reference into the description", async () => {
 		await projection.track(request());
 
-		const description = createIssue.mock.calls[0]?.[0].description as string;
-		expect(description).toContain(THREAD_ROOT);
-		expect(description).toContain(CHANNEL_ID);
-		expect(description).toContain(
-			`https://buzz.example.com/${CHANNEL_ID}/${THREAD_ROOT}`,
+		expect(createIssue.mock.calls[0]?.[0].description).toBe(
+			[
+				`**Buzz thread:** \`${THREAD_ROOT}\` in channel \`${CHANNEL_ID}\``,
+				`**Link:** buzz://message?channel=${CHANNEL_ID}&id=${THREAD_ROOT}&thread=${THREAD_ROOT}`,
+				"",
+				"Fix the flaky worktree test, it fails about 1 run in 5",
+				"",
+				"---",
+				"_Projected from Buzz session BUZZ-abc123. This issue is intentionally unassigned: assigning it would start a second agent session on the same work._",
+			].join("\n"),
 		);
-		expect(description).toContain("fails about 1 run in 5");
-		// The reason it is unassigned must survive contact with a future reader.
-		expect(description).toContain("intentionally unassigned");
 	});
 
 	it("returns the identifier and only creates once per session", async () => {

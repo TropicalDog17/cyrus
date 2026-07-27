@@ -696,6 +696,23 @@ export class BuzzSessionCoordinator {
 			repository: context.repository,
 		});
 
+		// A repository with no `teamKeys` cannot be projected at all, and the
+		// projection has no way to say so — it writes to Linear or nowhere. Left
+		// to a log line, a whole program silently does not exist while the human
+		// carries on believing it does. Only when `teamKeys` is the reason: a
+		// Linear outage also returns null, and telling somebody to fix their
+		// config over a 503 would be a lie.
+		if (
+			this.deps.projection &&
+			!identifier &&
+			!context.repository.teamKeys?.length
+		) {
+			await this.say(
+				context,
+				`⚠️ I can't record this in Linear: the \`${context.repository.name}\` repository has no \`teamKeys\` configured.`,
+			);
+		}
+
 		// Keep the issue itself, not just its key: a restart that could not find
 		// the program issue would project a second one for the same thread.
 		const projected = this.deps.projection?.get(context.sessionId);

@@ -401,6 +401,62 @@ describe("BuzzSessionCoordinator", () => {
 		]);
 	});
 
+	// A repository with no `teamKeys` projects nothing, and the projection has
+	// no way to say so. Silence there means a human watches a gate release and
+	// assumes a program issue exists somewhere.
+	it("says which repository cannot be projected when it has no teamKeys", async () => {
+		repositories = {
+			"repo-1": { ...REPOSITORY, teamKeys: [] } as RepositoryConfig,
+		};
+		track.mockResolvedValue(null);
+		getProjected.mockReturnValue(undefined);
+
+		await coordinator.handleEvent(event());
+		sendMessage.mockClear();
+
+		await coordinator.handleEvent(
+			event({
+				eventType: "reaction_added",
+				messageId: GATE_ID,
+				emoji: "▶️",
+				deliveryId: `reaction_added:${GATE_ID}:▶️:${AUTHOR}`,
+			}),
+		);
+		await settle();
+
+		expect(sendMessage.mock.calls.map((call) => call[0].content)).toEqual([
+			"⚠️ I can't record this in Linear: the `cyrus` repository has no `teamKeys` configured.",
+		]);
+		// The work still runs; only its shadow is missing.
+		expect(startBuzzSession).toHaveBeenLastCalledWith(
+			expect.objectContaining({ phase: "execute" }),
+		);
+		expect(setState).not.toHaveBeenCalled();
+		expect(note).not.toHaveBeenCalled();
+	});
+
+	// A Linear outage also returns null. Telling somebody to fix their config
+	// over a 503 sends them looking for a problem they do not have.
+	it("stays quiet when the projection fails for any other reason", async () => {
+		track.mockResolvedValue(null);
+		getProjected.mockReturnValue(undefined);
+
+		await coordinator.handleEvent(event());
+		sendMessage.mockClear();
+
+		await coordinator.handleEvent(
+			event({
+				eventType: "reaction_added",
+				messageId: GATE_ID,
+				emoji: "▶️",
+				deliveryId: `reaction_added:${GATE_ID}:▶️:${AUTHOR}`,
+			}),
+		);
+		await settle();
+
+		expect(sendMessage.mock.calls.map((call) => call[0].content)).toEqual([]);
+	});
+
 	it("carries the thread's final response into the projected issue", async () => {
 		await coordinator.handleEvent(event());
 		coordinator.recordResponse(

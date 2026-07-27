@@ -392,6 +392,11 @@ never put an @mention of Cyrus in a projected description or comment body. If
 a projection must be assigned, assign a human, and check first that the Linear
 webhook path cannot read that write as a delegation.
 
+Enforced by `BuzzLinearProjection.test.ts`, *"creates the issue unassigned"*,
+which asserts the whole key set of the `createIssue` input rather than
+`assigneeId === undefined` — the latter passes for an explicitly-undefined key,
+which is one careless `?? assignee` away from a real id.
+
 ## The Buzz tool set, not the prompt, is the execution gate
 
 The Buzz start path in `SessionOrchestrator` chooses `allowedTools` from the

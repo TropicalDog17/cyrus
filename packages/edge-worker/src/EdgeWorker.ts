@@ -97,7 +97,10 @@ import {
 } from "./activity/index.js";
 import { BuzzApprovalRegistry } from "./buzz/BuzzApprovalRegistry.js";
 import { BuzzCliClient } from "./buzz/BuzzCliClient.js";
-import { BuzzLinearProjection } from "./buzz/BuzzLinearProjection.js";
+import {
+	BuzzLinearProjection,
+	buzzThreadDeepLink,
+} from "./buzz/BuzzLinearProjection.js";
 import { BuzzPollingSource } from "./buzz/BuzzPollingSource.js";
 import { BuzzQuestionHandler } from "./buzz/BuzzQuestionHandler.js";
 import {
@@ -1185,12 +1188,15 @@ export class EdgeWorker extends EventEmitter {
 
 		this.buzzApprovals = new BuzzApprovalRegistry(this.logger);
 
+		this.warnUnprojectableBuzzRepositories();
+
 		this.buzzProjection = new BuzzLinearProjection({
 			logger: this.logger,
 			getIssueTracker: (repository) =>
 				repository.linearWorkspaceId
 					? (this.issueTrackers.get(repository.linearWorkspaceId) ?? null)
 					: null,
+			buildThreadUrl: buzzThreadDeepLink,
 		});
 
 		this.buzzSessionCoordinator = new BuzzSessionCoordinator({
@@ -1281,6 +1287,41 @@ export class EdgeWorker extends EventEmitter {
 			`Buzz event transport registered (${buzz.channels?.length ?? 0} channel route(s))`,
 		);
 		this.logger.info("Webhook endpoint: POST /buzz-webhook");
+	}
+
+	/**
+	 * Name, at startup, the repositories a Buzz route can reach but the Linear
+	 * projection cannot write to.
+	 *
+	 * The team a projected issue lands in comes from `teamKeys[0]`, so a routed
+	 * repository without `teamKeys` produces no issue at all — and the only
+	 * evidence today is a warning at the moment a human answers a gate, hours
+	 * after the config was deployed. Checking the routes up front turns
+	 * "projection is configured" from something an operator asserts into
+	 * something the process states.
+	 */
+	private warnUnprojectableBuzzRepositories(): void {
+		const routedIds = new Set(
+			(this.config.buzz?.channels ?? []).flatMap((route) => [
+				...(route.repositoryId ? [route.repositoryId] : []),
+				...(route.repositoryIds ?? []),
+			]),
+		);
+
+		// An id matching no repository is a different fault, and the coordinator
+		// already names it when a message actually arrives on that route.
+		const unprojectable = Array.from(routedIds).flatMap((id) => {
+			const repository = this.repositories.get(id);
+			return repository && !repository.teamKeys?.length
+				? [repository.name]
+				: [];
+		});
+
+		if (unprojectable.length === 0) return;
+
+		this.logger.warn(
+			`Buzz routes reach ${unprojectable.length} repositor${unprojectable.length === 1 ? "y" : "ies"} with no teamKeys, so their threads will not be projected into Linear: ${unprojectable.join(", ")}`,
+		);
 	}
 
 	/**

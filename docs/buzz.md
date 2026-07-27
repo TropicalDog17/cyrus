@@ -223,11 +223,17 @@ record that outlives the chat scrollback.
   what makes Linear open an agent session, so an assigned projection would start
   a second session on its own branch and worktree, duplicating the Buzz session's
   work — with both able to open a pull request for it.
-- Its description carries the Buzz thread and channel ids.
+- Its description carries the Buzz thread and channel ids, plus a
+  `buzz://message?…` deep link that opens the thread in the desktop app.
 - ▶️ additionally moves it to `In Progress`, notes the branch, then posts the
   session's final summary and moves it to `In Review`.
-- The team comes from the repository's `teamKeys[0]`. A repository without
-  `teamKeys` is simply not projected.
+
+**Every repository a `channels` route can reach needs `teamKeys`.** The team an
+issue lands in is `teamKeys[0]`, so a routed repository without it is projected
+nowhere — its threads run normally and leave no record at all. Cyrus names the
+gap twice: once at startup, listing every routed repository missing `teamKeys`,
+and again in the thread itself when a gate on such a repository is answered.
+Remember the catch-all `"*"` route here: its repositories are routed too.
 
 Every Linear write is best-effort with a short retry and is never awaited by
 anything that matters: a Linear outage must not stall or fail a Buzz session.

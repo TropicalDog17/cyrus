@@ -16,6 +16,27 @@ export interface BuzzLinearProjectionDeps {
 	buildThreadUrl?(channelId: string, threadRootId: string): string | undefined;
 }
 
+/**
+ * Address that opens a Buzz thread in the desktop app.
+ *
+ * The scheme is the only address a reader can follow: `buzz.relayUrl` is a
+ * relay *API* base with no web view of a thread, so an `https://` link derived
+ * from it would be dead in every projected issue. Shape is fixed by the
+ * desktop's own handler — `buzz://message?channel=<uuid>&id=<eventId>[&thread=<rootId>]`
+ * — and a thread root is both the message to open and the thread to open it in.
+ */
+export function buzzThreadDeepLink(
+	channelId: string,
+	threadRootId: string,
+): string {
+	const params = new URLSearchParams({
+		channel: channelId,
+		id: threadRootId,
+		thread: threadRootId,
+	});
+	return `buzz://message?${params.toString()}`;
+}
+
 /** One projected issue, remembered so later updates find it. */
 interface ProjectedIssue {
 	issueId: string;
