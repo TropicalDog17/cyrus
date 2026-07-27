@@ -200,6 +200,11 @@ export class BuzzSessionCoordinator {
 	private readonly deps: BuzzSessionCoordinatorDeps;
 	private readonly seenDeliveries = new Set<string>();
 	private readonly threads = new Map<string, BuzzThreadContext>();
+	/**
+	 * Persisted threads hydration could not restore, kept verbatim so the next
+	 * save writes them back rather than erasing them. See {@link serialize}.
+	 */
+	private readonly parkedThreads = new Map<string, PersistedBuzzThread>();
 	/** Per-session serialization, so a burst of messages cannot race. */
 	private readonly queues = new Map<string, Promise<void>>();
 
@@ -227,9 +232,22 @@ export class BuzzSessionCoordinator {
 	 *
 	 * An open prompt is read back from the approval registry rather than tracked
 	 * here, so persistence cannot disagree with the registry about what is live.
+	 *
+	 * Threads hydration could not restore are written back untouched, ahead of
+	 * the live ones so a restored thread always wins its key. A repository can be
+	 * absent for a restart and back for the next one — `isActive: false`, a
+	 * CYHOST config push that transiently omits it — and this record is the only
+	 * place a thread's phase, program issue and worktree exist. Dropping it would
+	 * make a one-restart config change permanently destructive, which is the same
+	 * reason `EdgeWorker.serializeMappings` writes parked state back when Buzz
+	 * itself is unconfigured.
 	 */
 	serialize(): PersistedBuzzState {
 		const threads: Record<string, PersistedBuzzThread> = {};
+
+		for (const [sessionId, parked] of this.parkedThreads) {
+			threads[sessionId] = parked;
+		}
 
 		for (const [sessionId, context] of this.threads) {
 			const openPrompt = this.deps.approvals.openPromptFor(sessionId);
@@ -279,8 +297,9 @@ export class BuzzSessionCoordinator {
 	 * triggered by any other session would serialize the half-empty map over the
 	 * threads still waiting to be restored.
 	 *
-	 * A thread whose repository has left the configuration is dropped rather than
-	 * kept: its worktree is no longer reachable, so there is no turn to run in it.
+	 * A thread whose repository is not currently configured is parked rather than
+	 * restored: there is no worktree to run a turn in, but see {@link serialize} —
+	 * it is not erased either.
 	 */
 	async hydrate(state: SerializableEdgeWorkerState["buzz"]): Promise<void> {
 		// A pre-v5 state file is migrated to a present-but-empty container, so a
@@ -296,8 +315,9 @@ export class BuzzSessionCoordinator {
 			const repository = this.deps.getRepositoryById(thread.repositoryId);
 			if (!repository) {
 				this.deps.logger.warn(
-					`Dropping Buzz thread ${thread.sessionKey}: repository "${thread.repositoryId}" is no longer configured`,
+					`Parking Buzz thread ${thread.sessionKey}: repository "${thread.repositoryId}" is not configured`,
 				);
+				this.parkedThreads.set(sessionId, thread);
 				continue;
 			}
 
@@ -324,6 +344,7 @@ export class BuzzSessionCoordinator {
 				...(thread.plan ? { plan: thread.plan } : {}),
 			};
 			this.threads.set(sessionId, context);
+			this.parkedThreads.delete(sessionId);
 			restored++;
 
 			if (thread.program) {
@@ -554,6 +575,8 @@ export class BuzzSessionCoordinator {
 			workUnits: [],
 		};
 		this.threads.set(sessionId, context);
+		// A live thread supersedes any parked record under the same key.
+		this.parkedThreads.delete(sessionId);
 
 		await this.runTurn(context, prompt);
 	}

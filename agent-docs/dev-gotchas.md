@@ -485,11 +485,17 @@ and a message arriving mid-hydration misses the map: it is read as a new
 thread, cuts a second worktree, and the next save serializes the half-filled
 map over the threads still waiting to be restored.
 
+A thread whose repository is not in the config is *parked*, not dropped:
+`serialize()` writes parked records back verbatim. `isActive: false` and a
+CYHOST push that transiently omits a repository are both reversible, and this
+record is the only place the thread's phase, program issue and worktree exist.
+
 **Rule:** state owned by a component built in `initializeComponents` is
 restored where that component is constructed, not in `restoreMappings`. And
 whenever a Buzz thread parks on — or un-parks from — something a human answers
 later, save at that moment: the turn's own saves have already happened, or have
-not happened yet.
+not happened yet. Never make a persisted Buzz thread disappear because
+something it references is momentarily absent.
 
 ## `postToSink` silently drops activities without `externalSessionId`
 

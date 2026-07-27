@@ -584,13 +584,37 @@ describe("BuzzSessionCoordinator persistence", () => {
 		).toBeUndefined();
 	});
 
-	// Its worktree is unreachable, so there is no turn left to run in it.
-	it("drops a thread whose repository has left the configuration", async () => {
+	// Its worktree is unreachable, so no turn can run in it — but the record is
+	// the only place the thread's phase, program issue and worktree exist, and a
+	// repository can be gone for one restart (`isActive: false`, a config push
+	// that transiently omits it) and back for the next. Erasing it here would
+	// make a reversible config change permanently destructive.
+	it("parks a thread whose repository is not configured instead of erasing it", async () => {
 		await hydrate({ repositoryId: "repo-gone" });
 
-		expect(coordinator.serialize()).toEqual({ threads: {}, repoMru: [] });
+		expect(coordinator.serialize()).toEqual({
+			threads: { [SESSION_ID]: persistedThread({ repositoryId: "repo-gone" }) },
+			repoMru: [],
+		});
 		expect(logger.warn).toHaveBeenCalledWith(
-			'Dropping Buzz thread BUZZ-a1b2c3: repository "repo-gone" is no longer configured',
+			'Parking Buzz thread BUZZ-a1b2c3: repository "repo-gone" is not configured',
+		);
+	});
+
+	it("restores a parked thread once its repository is configured again", async () => {
+		await hydrate({ repositoryId: "repo-gone" });
+		const writtenBackWhileParked = coordinator.serialize();
+
+		repositories["repo-gone"] = { ...REPOSITORY, id: "repo-gone" };
+		await coordinator.hydrate(writtenBackWhileParked);
+
+		expect(coordinator.serialize()).toEqual({
+			threads: { [SESSION_ID]: persistedThread({ repositoryId: "repo-gone" }) },
+			repoMru: ["repo-gone"],
+		});
+		await followUp();
+		expect(startBuzzSession).toHaveBeenCalledWith(
+			expect.objectContaining({ phase: "execute", branchName: BRANCH }),
 		);
 	});
 
