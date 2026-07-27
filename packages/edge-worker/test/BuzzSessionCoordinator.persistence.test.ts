@@ -582,6 +582,10 @@ describe("BuzzSessionCoordinator persistence", () => {
 		expect(
 			coordinator.serialize().threads[SESSION_ID]?.openPrompt,
 		).toBeUndefined();
+		// And that save happens here, not at whatever unrelated event writes state
+		// next: two restarts with nothing in between would otherwise apologize
+		// twice for the same lost question.
+		expect(saveState).toHaveBeenCalled();
 	});
 
 	// Its worktree is unreachable, so no turn can run in it — but the record is

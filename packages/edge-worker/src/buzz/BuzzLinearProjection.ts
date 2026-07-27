@@ -37,6 +37,25 @@ export function buzzThreadDeepLink(
 	return `buzz://message?${params.toString()}`;
 }
 
+/**
+ * The team a projection would land in, or undefined when the repository has none
+ * usable.
+ *
+ * `teamKeys` is `z.array(z.string())` with no `.min(1)` and nothing normalizing
+ * it, so `[""]` is a configuration a human can write and a config push can
+ * deliver. Every caller that asks "is this repository projectable?" must decide
+ * it the same way this does, or a warning goes silent on exactly the config that
+ * needed it.
+ */
+export function projectionTeamKey(
+	repository: RepositoryConfig,
+): string | undefined {
+	return repository.teamKeys?.find((key) => key.trim().length > 0);
+}
+
+/** Why a repository cannot be projected. Ordered as `track()` decides it. */
+export type UnprojectableReason = "no-tracker" | "no-team-keys";
+
 /** One projected issue, remembered so later updates find it. */
 interface ProjectedIssue {
 	issueId: string;
@@ -63,8 +82,10 @@ const RETRY_DELAY_MS = 2_000;
  * -------------------------------------------
  * Assignment (and @mention) is exactly what makes Linear open an agent session.
  * An issue Cyrus creates to *record* work it is already doing must therefore
- * stay unassigned, or the projection would trigger a second session racing the
- * Buzz one against the same branch. This is a load-bearing property, not a
+ * stay unassigned, or the projection would trigger a second session — not on the
+ * same branch, since a Linear-origin session derives `DEV-nnn-<slug>` while this
+ * thread holds `BUZZ-xxxxxx-<slug>`, which is worse: two worktrees doing the same
+ * work, both able to open a pull request. This is a load-bearing property, not a
  * default that happens to be convenient.
  *
  * Every write is best-effort: a Linear outage must never stall or fail a Buzz
@@ -88,6 +109,24 @@ export class BuzzLinearProjection {
 	 *
 	 * @returns the issue identifier, or null when nothing was created.
 	 */
+	/**
+	 * Why `track` would refuse this repository, or null when it would try.
+	 *
+	 * Exists so a caller can tell an operator something true. `track` returns a
+	 * bare null for three different reasons, and the remedy differs: a missing
+	 * `teamKeys` is the operator's to fix, while a workspace with no tracker at
+	 * all is a deployment that does not use Linear and cannot be helped by
+	 * editing `teamKeys`. Asking here keeps that knowledge in the one class that
+	 * has it, rather than giving this one an egress seam.
+	 */
+	unprojectableReason(
+		repository: RepositoryConfig,
+	): UnprojectableReason | null {
+		if (!this.deps.getIssueTracker(repository)) return "no-tracker";
+		if (!projectionTeamKey(repository)) return "no-team-keys";
+		return null;
+	}
+
 	async track(request: BuzzTrackRequest): Promise<string | null> {
 		const existing = this.bySessionId.get(request.sessionId);
 		if (existing) return existing.identifier;
@@ -100,7 +139,7 @@ export class BuzzLinearProjection {
 			return null;
 		}
 
-		const teamKey = request.repository.teamKeys?.[0];
+		const teamKey = projectionTeamKey(request.repository);
 		if (!teamKey) {
 			this.deps.logger.warn(
 				`Cannot project Buzz thread ${request.sessionKey}: repository "${request.repository.name}" has no teamKeys`,

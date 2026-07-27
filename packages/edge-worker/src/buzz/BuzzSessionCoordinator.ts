@@ -76,6 +76,14 @@ export interface BuzzProjectionHooks {
 	setState(sessionId: string, stateName: string): Promise<void>;
 	/** The issue projected for a thread, if any — read to persist it. */
 	get(sessionId: string): BuzzProjectedProgram | undefined;
+	/**
+	 * Why this repository cannot be projected, or null when it can. Asked so the
+	 * thread is told something true: `track` returns null for reasons with
+	 * different remedies, and only the projection knows which applies.
+	 */
+	unprojectableReason(
+		repository: RepositoryConfig,
+	): "no-tracker" | "no-team-keys" | null;
 	/** Re-seed a hydrated thread's projection so no second issue is created. */
 	restore(
 		sessionId: string,
@@ -373,8 +381,10 @@ export class BuzzSessionCoordinator {
 	 * `AskUserQuestion` needs the SDK session and the blocked caller the restart
 	 * took with it — so it dies, out loud, because silence there is
 	 * indistinguishable from Cyrus ignoring an answer that was already given.
-	 * Nothing clears it explicitly: an unarmed prompt is not in the registry, so
-	 * the next save does not carry it.
+	 * An unarmed prompt is not in the registry, so no later save carries it; the
+	 * save here is what makes that true *now* rather than at whatever unrelated
+	 * event happens to write state next. Two restarts with nothing in between
+	 * would otherwise post the same apology twice.
 	 */
 	private async resumePrompt(
 		context: BuzzThreadContext,
@@ -391,6 +401,7 @@ export class BuzzSessionCoordinator {
 			context,
 			"⚠️ I restarted while waiting on your answer, so the question above is lost. Say what you'd like again and I'll pick it up from there.",
 		);
+		await this.deps.saveState();
 	}
 
 	/**
@@ -742,13 +753,15 @@ export class BuzzSessionCoordinator {
 		// A repository with no `teamKeys` cannot be projected at all, and the
 		// projection has no way to say so — it writes to Linear or nowhere. Left
 		// to a log line, a whole program silently does not exist while the human
-		// carries on believing it does. Only when `teamKeys` is the reason: a
-		// Linear outage also returns null, and telling somebody to fix their
-		// config over a 503 would be a lie.
+		// carries on believing it does. Ask the projection *why* rather than
+		// re-deciding it here: a Linear outage also returns null and telling
+		// somebody to fix their config over a 503 would be a lie, and so would
+		// naming `teamKeys` as the remedy on a deployment that has no Linear
+		// tracker at all — where setting them changes nothing.
 		if (
-			this.deps.projection &&
 			!identifier &&
-			!context.repository.teamKeys?.length
+			this.deps.projection?.unprojectableReason(context.repository) ===
+				"no-team-keys"
 		) {
 			await this.say(
 				context,

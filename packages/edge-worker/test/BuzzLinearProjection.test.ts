@@ -95,8 +95,9 @@ describe("BuzzLinearProjection", () => {
 	});
 
 	// Load-bearing: assignment is what makes Linear open an agent session, so an
-	// assigned projection would race a second session against the same branch.
-	// Asserting the key set, not `assigneeId === undefined`, is what makes the
+	// assigned projection would start a second one — on its own branch and its
+	// own worktree, duplicating this thread's work with both able to open a pull
+	// request. Asserting the key set, not `assigneeId === undefined`, is what makes the
 	// invariant testable — an explicitly-undefined key would pass the latter and
 	// then become a real id the first time somebody threads a value through.
 	// See `agent-docs/dev-gotchas.md`, "Buzz Linear projections are created
@@ -154,6 +155,50 @@ describe("BuzzLinearProjection", () => {
 
 		expect(await projection.track(request())).toBeNull();
 		expect(createIssue).not.toHaveBeenCalled();
+	});
+
+	// `teamKeys` is `z.array(z.string())` with no `.min(1)`, so a blank entry is
+	// a config a human can write. It has to read as "no team" everywhere or the
+	// startup warning and the in-thread message go silent on the one config that
+	// needed them, while the projection quietly refuses.
+	it("treats a blank team key as no team at all", async () => {
+		const blank = { ...REPOSITORY, teamKeys: ["  "] } as RepositoryConfig;
+
+		expect(await projection.track(request({ repository: blank }))).toBeNull();
+		expect(createIssue).not.toHaveBeenCalled();
+		expect(projection.unprojectableReason(blank)).toBe("no-team-keys");
+	});
+
+	it("skips a blank team key rather than the whole repository", async () => {
+		const padded = { ...REPOSITORY, teamKeys: ["", "DEV"] } as RepositoryConfig;
+
+		expect(projection.unprojectableReason(padded)).toBeNull();
+		expect(await projection.track(request({ repository: padded }))).toBe(
+			"DEV-42",
+		);
+		expect(createIssue.mock.calls[0]?.[0]?.teamId).toBe("DEV");
+	});
+
+	// The two reasons are not interchangeable: one is the operator's to fix and
+	// the other says this deployment does not use Linear.
+	it("distinguishes a missing tracker from missing team keys", () => {
+		expect(projection.unprojectableReason(REPOSITORY)).toBeNull();
+		expect(
+			projection.unprojectableReason({
+				...REPOSITORY,
+				teamKeys: [],
+			} as RepositoryConfig),
+		).toBe("no-team-keys");
+
+		tracker = null;
+		// Checked before team keys, so a repository missing both reports the one
+		// that setting `teamKeys` would not fix.
+		expect(
+			projection.unprojectableReason({
+				...REPOSITORY,
+				teamKeys: [],
+			} as RepositoryConfig),
+		).toBe("no-tracker");
 	});
 
 	it("comments on the projected issue", async () => {

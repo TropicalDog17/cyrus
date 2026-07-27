@@ -539,6 +539,12 @@ describe("PersistenceManager", () => {
 			await persistenceManager.saveEdgeWorkerState(v5State.state);
 			const payload = handleWriteFile.mock.calls[0][0] as string;
 
+			// The stamp, asserted first and on its own: a round-trip through
+			// JSON.parse(JSON.stringify(...)) preserves an unknown `buzz` key on
+			// *any* version of this file, so without this line the assertion below
+			// passes against the pre-bump source and proves nothing.
+			expect(JSON.parse(payload).version).toBe("5.0");
+
 			vi.mocked(existsSync).mockReturnValue(true);
 			vi.mocked(readFileSync).mockReturnValue(payload);
 			const result = await persistenceManager.loadEdgeWorkerState();

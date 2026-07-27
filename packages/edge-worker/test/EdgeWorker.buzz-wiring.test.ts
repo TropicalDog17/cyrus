@@ -154,6 +154,25 @@ describe("EdgeWorker Buzz wiring", () => {
 		]);
 	});
 
+	// The schema permits `[""]`, and a check on array length would call that
+	// repository projectable while the projection refuses it.
+	it("counts a blank team key as no teamKeys", () => {
+		registerBuzz(
+			config([
+				repository("repo-1", "cyrus", ["DEV"]),
+				repository("repo-2", "honey-automation", [""]),
+				repository("repo-3", "trop-ops", ["OPS"]),
+			]),
+			logger,
+		);
+
+		expect(vi.mocked(logger.warn).mock.calls).toEqual([
+			[
+				"Buzz routes reach 1 repository with no teamKeys, so their threads will not be projected into Linear: honey-automation",
+			],
+		]);
+	});
+
 	it("says nothing when every routed repository has teamKeys", () => {
 		registerBuzz(
 			config([

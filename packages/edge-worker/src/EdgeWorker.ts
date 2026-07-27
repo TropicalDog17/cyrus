@@ -100,6 +100,7 @@ import { BuzzCliClient } from "./buzz/BuzzCliClient.js";
 import {
 	BuzzLinearProjection,
 	buzzThreadDeepLink,
+	projectionTeamKey,
 } from "./buzz/BuzzLinearProjection.js";
 import { BuzzPollingSource } from "./buzz/BuzzPollingSource.js";
 import { BuzzQuestionHandler } from "./buzz/BuzzQuestionHandler.js";
@@ -1297,8 +1298,9 @@ export class EdgeWorker extends EventEmitter {
 	 * Name, at startup, the repositories a Buzz route can reach but the Linear
 	 * projection cannot write to.
 	 *
-	 * The team a projected issue lands in comes from `teamKeys[0]`, so a routed
-	 * repository without `teamKeys` produces no issue at all — and the only
+	 * The team a projected issue lands in is the repository's first usable
+	 * `teamKeys` entry, so a routed repository without one produces no issue at
+	 * all — and the only
 	 * evidence today is a warning at the moment a human answers a gate, hours
 	 * after the config was deployed. Checking the routes up front turns
 	 * "projection is configured" from something an operator asserts into
@@ -1316,7 +1318,7 @@ export class EdgeWorker extends EventEmitter {
 		// already names it when a message actually arrives on that route.
 		const unprojectable = Array.from(routedIds).flatMap((id) => {
 			const repository = this.repositories.get(id);
-			return repository && !repository.teamKeys?.length
+			return repository && !projectionTeamKey(repository)
 				? [repository.name]
 				: [];
 		});

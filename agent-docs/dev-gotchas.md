@@ -397,6 +397,15 @@ which asserts the whole key set of the `createIssue` input rather than
 `assigneeId === undefined` — the latter passes for an explicitly-undefined key,
 which is one careless `?? assignee` away from a real id.
 
+**Second rule, for the same class of silence:** never re-decide "is this
+repository projectable?" at a call site. `teamKeys` is `z.array(z.string())`
+with no `.min(1)`, so `[""]` is a config a human can write, and a site testing
+`teamKeys?.length` calls it projectable while `track()` refuses it — the warning
+goes quiet on exactly the config that needed it. Ask `projectionTeamKey()` for
+the team, or `unprojectableReason()` for the reason. The reason matters too: a
+workspace with no issue tracker at all also has no `teamKeys`, and telling that
+operator to set them names a remedy that would change nothing.
+
 ## The Buzz tool set, not the prompt, is the execution gate
 
 The Buzz start path in `SessionOrchestrator` chooses `allowedTools` from the
