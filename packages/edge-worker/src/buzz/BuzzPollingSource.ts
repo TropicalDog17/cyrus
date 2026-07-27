@@ -47,6 +47,18 @@ const INITIAL_LOOKBACK_SECONDS = 120;
 const DISCOVERY_INTERVAL_MS = 60_000;
 
 /**
+ * How many dispatched reactions to remember, mirroring the coordinator's
+ * delivery cache.
+ *
+ * The set is only ever added to, and a restart that re-arms an open gate makes
+ * every reaction already on it re-deliver, so an unbounded set grows with every
+ * emoji anybody puts on anything Cyrus is waiting for. Evicting the oldest is
+ * safe because the downstream gate ignores a decision for a thread that has
+ * already moved past it.
+ */
+const MAX_SEEN_REACTIONS = 500;
+
+/**
  * Pulls Buzz activity by polling the relay instead of receiving webhooks.
  *
  * WHY THIS EXISTS ALONGSIDE {@link BuzzEventTransport}
@@ -244,7 +256,7 @@ export class BuzzPollingSource {
 				for (const pubkey of group.pubkeys) {
 					const key = `${eventId}:${group.emoji}:${pubkey}`;
 					if (this.seenReactions.has(key)) continue;
-					this.seenReactions.add(key);
+					this.remember(key);
 
 					if (!this.isActionable(pubkey)) continue;
 
@@ -259,6 +271,15 @@ export class BuzzPollingSource {
 					});
 				}
 			}
+		}
+	}
+
+	/** Record a dispatched reaction, evicting the oldest key past the cap. */
+	private remember(key: string): void {
+		this.seenReactions.add(key);
+		if (this.seenReactions.size > MAX_SEEN_REACTIONS) {
+			const oldest = this.seenReactions.values().next().value;
+			if (oldest !== undefined) this.seenReactions.delete(oldest);
 		}
 	}
 

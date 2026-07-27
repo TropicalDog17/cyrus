@@ -210,6 +210,46 @@ describe("BuzzPollingSource", () => {
 		expect(emitted()).toHaveLength(1);
 	});
 
+	// The seen set is only ever added to, so a gate that collects reactions from a
+	// busy channel would grow it without limit. Past the cap the oldest key is
+	// evicted and its reaction re-delivers, which is the at-least-once path the
+	// gate's phase guard already absorbs.
+	it("forgets the oldest reaction once the cap is passed", async () => {
+		approvals.register({
+			eventId: GATE_ID,
+			channelId: CHANNEL_ID,
+			sessionId: "buzz-session",
+			kind: "gate",
+			options: [{ emoji: "▶️", value: "implement", label: "implement" }],
+		});
+		const crowd = Array.from({ length: 499 }, (_, index) =>
+			index.toString(16).padStart(64, "0"),
+		);
+		getReactions.mockResolvedValue([
+			{ emoji: "▶️", count: 500, pubkeys: [ALLOWED, ...crowd] },
+		]);
+
+		// 500 keys remembered, one of them the allowlisted human's.
+		await source.tick();
+
+		getReactions.mockResolvedValue([
+			{
+				emoji: "▶️",
+				count: 501,
+				pubkeys: [ALLOWED, ...crowd, "a".repeat(64)],
+			},
+		]);
+		// The 501st key evicts the first, which the next tick therefore re-emits.
+		await source.tick();
+		await source.tick();
+
+		const deliveryId = `reaction_added:${GATE_ID}:▶️:${ALLOWED}`;
+		expect(emitted().map((event) => event.deliveryId)).toEqual([
+			deliveryId,
+			deliveryId,
+		]);
+	});
+
 	// An unbounded reaction poll would be one relay round trip per message ever
 	// posted; only events something is waiting on are worth the call.
 	it("does not poll reactions when nothing is pending", async () => {

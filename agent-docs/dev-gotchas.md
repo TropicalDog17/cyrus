@@ -437,6 +437,32 @@ own work.
 holds — route PR review back into the originating session — and never infer a
 fresh workspace from having asked for one.
 
+## Buzz thread state is restored late, and a parked gate saves itself
+
+Two invariants that both fail silently, in opposite directions.
+
+`start()` calls `loadPersistedState()` long before `initializeComponents()`
+builds the Buzz coordinator, so `restoreMappings` cannot hand it anything: it
+parks `state.buzz` in `persistedBuzzState` and `registerBuzzEventTransport`
+drains it through `hydrateBuzzThreads()`. Hydrating inside `restoreMappings`
+compiles, runs, logs nothing and restores nothing. The same field is why
+`serializeMappings` writes the parked state back when Buzz is unconfigured —
+one restart with `buzz` removed from config must not erase every thread's
+phase, program issue and worktree.
+
+The other direction is the gate. A Buzz turn saves at both ends
+(`SessionOrchestrator.startBuzzSession`), but the gate is posted and armed
+*after* that turn returns, and the thread's next turn only happens once the
+gate resolves — so nothing would ever write an open gate to disk.
+`offerGate` therefore calls `deps.saveState()` itself, and without it a boot
+finds no `openPrompt` to re-arm while the message sits in the scrollback
+collecting reactions that go nowhere.
+
+**Rule:** state owned by a component built in `initializeComponents` is
+restored where that component is constructed, not in `restoreMappings`. And
+whenever a Buzz thread parks on something a human answers later, save at the
+moment it parks — the turn's own saves have already happened.
+
 ## `postToSink` silently drops activities without `externalSessionId`
 
 `AgentSessionManager.postToSink` returns early when

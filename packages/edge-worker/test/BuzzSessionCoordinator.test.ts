@@ -141,6 +141,8 @@ describe("BuzzSessionCoordinator", () => {
 	let track: ReturnType<typeof vi.fn>;
 	let note: ReturnType<typeof vi.fn>;
 	let setState: ReturnType<typeof vi.fn>;
+	let getProjected: ReturnType<typeof vi.fn>;
+	let restoreProjection: ReturnType<typeof vi.fn>;
 	let approvals: BuzzApprovalRegistry;
 	let logger: ILogger;
 	let coordinator: BuzzSessionCoordinator;
@@ -161,6 +163,12 @@ describe("BuzzSessionCoordinator", () => {
 		track = vi.fn().mockResolvedValue("DEV-42");
 		note = vi.fn().mockResolvedValue(undefined);
 		setState = vi.fn().mockResolvedValue(undefined);
+		getProjected = vi.fn().mockReturnValue({
+			issueId: "issue-42",
+			identifier: "DEV-42",
+			url: "https://linear.app/team/issue/DEV-42",
+		});
+		restoreProjection = vi.fn();
 		logger = createLogger();
 		approvals = new BuzzApprovalRegistry(logger);
 		routes = [{ channelId: CHANNEL_ID, repositoryId: "repo-1" }];
@@ -185,8 +193,15 @@ describe("BuzzSessionCoordinator", () => {
 			getChannelRoutes: () => routes,
 			getSelfPubkey: () => selfPubkey,
 			getRepositoryById: (id) => repositories[id],
+			saveState: vi.fn().mockResolvedValue(undefined),
 			getActivitySinkForChannel: () => ({}) as IActivitySink,
-			projection: { track, note, setState },
+			projection: {
+				track,
+				note,
+				setState,
+				get: getProjected,
+				restore: restoreProjection,
+			},
 		});
 	});
 

@@ -178,6 +178,7 @@ export class EdgeWorker extends EventEmitter {
 	private buzzApprovals: BuzzApprovalRegistry | null = null; // Gate + question prompts awaiting a human
 	private buzzQuestionHandler: BuzzQuestionHandler | null = null; // AskUserQuestion, asked in a Buzz thread
 	private buzzProjection: BuzzLinearProjection | null = null; // Buzz work recorded as unassigned Linear issues
+	private persistedBuzzState: SerializableEdgeWorkerState["buzz"]; // Buzz threads read from disk, parked until the coordinator exists
 	private gitHubCommentService!: GitHubCommentService; // Service for posting comments back to GitHub PRs
 	private cliRPCServer: CLIRPCServer | null = null; // CLI RPC server for CLI platform mode
 	private configUpdater: ConfigUpdater | null = null; // Single config updater for configuration updates
@@ -1201,10 +1202,15 @@ export class EdgeWorker extends EventEmitter {
 			getChannelRoutes: () => this.config.buzz?.channels ?? [],
 			getSelfPubkey: () => this.config.buzz?.selfPubkey,
 			getRepositoryById: (repositoryId) => this.repositories.get(repositoryId),
+			saveState: () => this.savePersistedState(),
 			getActivitySinkForChannel: (channelId) =>
 				this.getBuzzActivitySinkForChannel(channelId),
 			projection: this.buzzProjection,
 		});
+
+		// Threads read from disk at boot. Restored before either ingress starts, so
+		// no event can reach a thread that has not been given its phase back.
+		this.hydrateBuzzThreads();
 
 		this.buzzQuestionHandler = new BuzzQuestionHandler({
 			logger: this.logger,
@@ -4485,11 +4491,20 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 			this.repositoryRouter.getIssueRepositoryCache().entries(),
 		);
 
+		// Buzz thread state comes from the coordinator when Buzz is configured.
+		// When it is not, the state read at boot is written back untouched: a
+		// deployment that disables Buzz for one restart must not be how a thread's
+		// phase, program issue and worktree are lost.
+		const buzz = this.buzzSessionCoordinator
+			? this.buzzSessionCoordinator.serialize()
+			: this.persistedBuzzState;
+
 		return {
 			agentSessions: serializedState.sessions,
 			agentSessionEntries: serializedState.entries,
 			childToParentAgentSession,
 			issueRepositoryCache,
+			...(buzz ? { buzz } : {}),
 		};
 	}
 
@@ -4561,6 +4576,33 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 				`Restored ${cache.size} issue-to-repository cache mappings`,
 			);
 		}
+
+		// Buzz threads. Parked rather than applied here: start() loads persisted
+		// state well before initializeComponents() builds the coordinator, so
+		// hydrating at this point would silently do nothing.
+		this.persistedBuzzState = state.buzz;
+		this.hydrateBuzzThreads();
+	}
+
+	/**
+	 * Hand parked Buzz thread state to the coordinator, once there is one.
+	 *
+	 * Called from both ends of the ordering problem — after state is read and
+	 * after the coordinator is built — because either can happen first, and only
+	 * the later of the two can do the work.
+	 */
+	private hydrateBuzzThreads(): void {
+		const coordinator = this.buzzSessionCoordinator;
+		if (!coordinator || !this.persistedBuzzState) return;
+
+		// Hydration posts into the threads whose questions were lost, so it can
+		// fail on a relay that is down. That must not take startup with it.
+		coordinator.hydrate(this.persistedBuzzState).catch((error) => {
+			this.logger.error(
+				"Failed to restore Buzz thread state",
+				error instanceof Error ? error : new Error(String(error)),
+			);
+		});
 	}
 
 	/**

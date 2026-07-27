@@ -63,11 +63,18 @@ interface PendingPrompt {
  * message and the answer arrives later as an unrelated event. The registry is
  * the join between the two, keyed by the event id reactions attach to.
  *
- * State is in-memory and deliberately so — a restart drops pending prompts,
- * exactly as {@link AskUserQuestionHandler} does for Linear, because the
- * blocked runner does not survive the restart either. A gate that outlives its
- * session would be worse than one that disappears: reacting ▶️ to it would
- * start work nobody is still watching for.
+ * State is in-memory, but a gate no longer dies with the process. A gate parks
+ * indefinitely and the message stays in the scrollback, so a human who reacts
+ * ▶️ after a deploy has no way to tell that the reaction went nowhere — the
+ * coordinator therefore persists an open gate's event id and options and
+ * re-arms it on boot ({@link BuzzSessionCoordinator.hydrate}). The hazard that
+ * once argued against that — a ▶️ starting work nobody is watching for — is
+ * answered where it belongs: a gate decision only acts on a thread still in
+ * `triage`, so a reaction re-delivered against a promoted thread is a no-op.
+ *
+ * A `question` is different and still dies with the process: it needs a live
+ * SDK session and a caller blocked on the answer, and neither survives a
+ * restart. Hydration says so in the thread instead of re-arming it.
  */
 export class BuzzApprovalRegistry {
 	private readonly logger: ILogger;
@@ -194,6 +201,32 @@ export class BuzzApprovalRegistry {
 	/** Event ids with an open prompt, for the poller to check reactions on. */
 	pendingEventIds(): string[] {
 		return [...this.byEventId.keys()];
+	}
+
+	/**
+	 * A session's open prompt, in the shape a boot re-arm needs.
+	 *
+	 * The registry is the only place that knows what is actually open, so
+	 * persistence reads it here rather than keeping a second copy alongside the
+	 * thread — a copy that could disagree about whether a prompt is still live.
+	 */
+	openPromptFor(sessionId: string):
+		| {
+				eventId: string;
+				channelId: string;
+				kind: BuzzPromptKind;
+				options: BuzzPromptOption[];
+		  }
+		| undefined {
+		const pending = this.bySessionId.get(sessionId);
+		if (!pending) return undefined;
+
+		return {
+			eventId: pending.eventId,
+			channelId: pending.channelId,
+			kind: pending.kind,
+			options: pending.options,
+		};
 	}
 
 	hasPendingPrompt(sessionId: string): boolean {

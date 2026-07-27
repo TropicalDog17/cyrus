@@ -3,7 +3,10 @@ import type {
 	ILogger,
 	RepositoryConfig,
 } from "cyrus-core";
-import type { BuzzTrackRequest } from "./BuzzSessionCoordinator.js";
+import type {
+	BuzzProjectedProgram,
+	BuzzTrackRequest,
+} from "./BuzzSessionCoordinator.js";
 
 export interface BuzzLinearProjectionDeps {
 	logger: ILogger;
@@ -155,6 +158,23 @@ export class BuzzLinearProjection {
 				return tracker.updateIssue(projected.issueId, { stateId: target.id });
 			},
 		);
+	}
+
+	/**
+	 * Re-seed a hydrated thread's projection from persisted state.
+	 *
+	 * `track()` refuses to create a second issue only because it finds the first
+	 * one in this map, which a restart empties. Without this, the first gate
+	 * decision after a restart would project a duplicate issue for a thread that
+	 * already has one — and the duplicate would then collect the status writes,
+	 * leaving the original stale.
+	 */
+	restore(
+		sessionId: string,
+		program: BuzzProjectedProgram,
+		repository: RepositoryConfig,
+	): void {
+		this.bySessionId.set(sessionId, { ...program, repository });
 	}
 
 	/** Forget a session's projection, e.g. when its thread is torn down. */
