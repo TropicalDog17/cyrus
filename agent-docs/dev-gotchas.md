@@ -404,16 +404,19 @@ and the tool set is the enforcement.
 
 The trap is which way the condition is written. `BuzzSessionPhase` is a
 two-member union (`triage | execute`), so testing for `triage` and falling
-through to the full set is equivalent *only while that stays true*. Any third
-phase — a plan phase, a review phase — lands in the fall-through branch and is
-handed write access silently, with no test failing, which is precisely the
-defeat the gate exists to prevent.
+through to the full set was equivalent *only while that stayed true*: a third
+phase — a plan phase, a review phase — would land in the fall-through branch
+and be handed write access silently, with no test failing, which is precisely
+the defeat the gate exists to prevent. The condition is therefore positive on
+`execute` and the read-only preset is the fall-through, so anything that is not
+`execute` is read-only by construction.
 
-**Rule:** the test must be positive on `execute`, so anything that is not
-`execute` is read-only by construction. Whichever change widens
+**Rule:** keep the test positive on `execute`. Never rewrite it as a negative
+test against the phases that happen to exist, and when widening
 `BuzzSessionPhase` (`SessionOrchestrator.ts`) or `BuzzThreadContext.phase`
-(`BuzzSessionCoordinator.ts`) owns inverting it first, plus a test that a
-phase value the code has never seen yields the read-only set.
+(`BuzzSessionCoordinator.ts`), leave
+`SessionOrchestrator.buzz-tools.test.ts` — which drives a phase value the union
+does not admit and expects the read-only set — passing rather than adapting it.
 
 ## One branch cannot be in two worktrees — Cyrus shares one instead of failing
 

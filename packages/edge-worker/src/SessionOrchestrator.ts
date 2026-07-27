@@ -1753,13 +1753,16 @@ export class SessionOrchestrator {
 		}
 
 		// The gate is enforced here, in the tool set, not only in the prompt: a
-		// triage run that decided to "just fix it" still cannot reach Edit, Write
-		// or general Bash. `AskUserQuestion` is added because the read-only preset
-		// omits it, and a triage turn that cannot ask questions is not triage.
+		// run that decided to "just fix it" still cannot reach Edit, Write or
+		// general Bash unless its phase was promoted to `execute`. The test is
+		// positive on `execute` so write access is opt-in for that one named
+		// phase and every other phase — present or future — is read-only by
+		// construction. `AskUserQuestion` is added because the read-only preset
+		// omits it, and a turn that cannot ask questions cannot triage.
 		const allowedTools =
-			phase === "triage"
-				? [...READONLY_DEFAULT_ALLOWED_TOOLS, "AskUserQuestion"]
-				: this.deps.buildAllowedTools(repository);
+			phase === "execute"
+				? this.deps.buildAllowedTools(repository)
+				: [...READONLY_DEFAULT_ALLOWED_TOOLS, "AskUserQuestion"];
 		const disallowedTools = this.deps.buildDisallowedTools(repository);
 		const allowedDirectories: string[] = [repository.repositoryPath];
 
