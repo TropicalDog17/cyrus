@@ -422,6 +422,9 @@ test against the phases that happen to exist, and when widening
 (`BuzzSessionCoordinator.ts`), leave
 `SessionOrchestrator.buzz-tools.test.ts` — which drives a phase value the union
 does not admit and expects the read-only set — passing rather than adapting it.
+Its sentinel is `__not_a_phase__` for that reason: a realistic name (`planning`,
+`review`) becomes an admitted member the day someone adds it, and the case then
+degenerates into a duplicate of the triage one while still passing green.
 
 ## One branch cannot be in two worktrees — Cyrus shares one instead of failing
 

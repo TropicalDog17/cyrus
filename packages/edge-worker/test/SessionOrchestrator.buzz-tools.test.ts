@@ -151,7 +151,12 @@ describe("startBuzzSession allowedTools (the execution gate)", () => {
 	// later, or one deserialized from an older persisted record — is read-only
 	// rather than silently handed Edit/Write/Bash.
 	it("gives a phase the union does not admit the read-only tool set", async () => {
-		const unknownPhase = "planning" as unknown as BuzzSessionPhase;
+		// Deliberately not a plausible phase name: a sentinel like "planning" or
+		// "review" stops being "a phase the union does not admit" the moment
+		// someone widens `BuzzSessionPhase` to include it, and this case would
+		// then quietly degenerate into a duplicate of the triage one while still
+		// passing. `__not_a_phase__` can never become a member.
+		const unknownPhase = "__not_a_phase__" as unknown as BuzzSessionPhase;
 
 		expect(await allowedToolsFor(unknownPhase)).toEqual([
 			...READONLY_DEFAULT_ALLOWED_TOOLS,
