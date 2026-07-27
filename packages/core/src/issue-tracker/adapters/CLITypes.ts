@@ -262,11 +262,19 @@ export interface CLIAgentActivityData {
 
 /**
  * Create a CLI Issue object compatible with our Pick-based Issue type.
+ *
+ * `inverseRelations` is a resolver, not an array, because on Linear
+ * `Issue.inverseRelations()` is a query answered when it is called. Snapshotting
+ * it at construction time makes a relation written after the handle was obtained
+ * invisible through that handle — which is how the one production consumer,
+ * `GitService.fetchBlockingIssues`, always holds it: the issue was fetched at the
+ * start of the session, long before anything in that session declared a `blocks`
+ * relation.
  */
 export function createCLIIssue(
 	data: CLIIssueData,
 	resolvedLabels?: CLILabelData[],
-	inverseRelations?: IssueRelation[],
+	inverseRelations?: () => IssueRelation[],
 ): Issue {
 	// Create a partial object with all the required properties
 	const issue = {
@@ -398,7 +406,7 @@ export function createCLIIssue(
 				"id"
 			>,
 		): Promise<Connection<IssueRelation>> {
-			return Promise.resolve({ nodes: inverseRelations ?? [] });
+			return Promise.resolve({ nodes: inverseRelations?.() ?? [] });
 		},
 		update(
 			_input?: LinearSDK.LinearDocument.IssueUpdateInput,

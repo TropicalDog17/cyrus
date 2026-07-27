@@ -176,9 +176,7 @@ export class CLIIssueTrackerService
 			.map((id) => this.state.labels.get(id))
 			.filter((l): l is CLILabelData => l !== undefined);
 
-		return createCLIIssue(
-			issueData,
-			resolvedLabels,
+		return createCLIIssue(issueData, resolvedLabels, () =>
 			this.inverseRelationsFor(issueData.id),
 		);
 	}
@@ -268,9 +266,7 @@ export class CLIIssueTrackerService
 			.filter((l): l is CLILabelData => l !== undefined);
 
 		// Create and return the issue
-		const issue = createCLIIssue(
-			issueData,
-			resolvedLabels,
+		const issue = createCLIIssue(issueData, resolvedLabels, () =>
 			this.inverseRelationsFor(issueData.id),
 		);
 
@@ -359,9 +355,7 @@ export class CLIIssueTrackerService
 					.map((id) => this.state.labels.get(id))
 					.filter((l): l is CLILabelData => l !== undefined);
 				allChildren.push(
-					createCLIIssue(
-						issueData,
-						resolvedLabels,
+					createCLIIssue(issueData, resolvedLabels, () =>
 						this.inverseRelationsFor(issueData.id),
 					),
 				);
@@ -488,9 +482,7 @@ export class CLIIssueTrackerService
 		const resolvedLabels = issueData.labelIds
 			.map((id) => this.state.labels.get(id))
 			.filter((l): l is CLILabelData => l !== undefined);
-		const issue = createCLIIssue(
-			issueData,
-			resolvedLabels,
+		const issue = createCLIIssue(issueData, resolvedLabels, () =>
 			this.inverseRelationsFor(issueData.id),
 		);
 		this.emit("issue:updated", { issue });

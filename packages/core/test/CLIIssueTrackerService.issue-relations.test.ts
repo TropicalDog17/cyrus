@@ -43,6 +43,25 @@ describe("CLIIssueTrackerService - Issue Relations", () => {
 		expect((await relations[0].relatedIssue)?.id).toBe(blocked.id);
 	});
 
+	// `inverseRelations()` is a query on Linear, so it is one here too. The
+	// handle below was obtained before the relation existed, which is exactly how
+	// `GitService.fetchBlockingIssues` holds it: the issue was fetched when the
+	// session started, and the relation is written later in the same session.
+	it("reports a relation written after the issue handle was obtained", async () => {
+		const created = await service.createIssueRelation({
+			issueId: blocker.id,
+			relatedIssueId: blocked.id,
+			type: "blocks",
+		});
+
+		const relations = await blocked
+			.inverseRelations()
+			.then((connection) => connection.nodes);
+
+		expect(relations.map((relation) => relation.id)).toEqual([created.id]);
+		expect((await relations[0].issue)?.id).toBe(blocker.id);
+	});
+
 	it("leaves the declaring issue's inverseRelations empty", async () => {
 		await service.createIssueRelation({
 			issueId: blocker.id,
