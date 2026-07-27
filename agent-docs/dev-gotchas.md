@@ -73,6 +73,20 @@ Compare output to `availableTools` in `packages/claude-runner/src/config.ts`.
 Also review `readOnlyTools`, `writeTools`, and helpers. Skipping this can cause
 sessions to silently miss new tools or reference removed ones.
 
+**The SDK pin, not `config.json`, decides which model version runs.** Cyrus
+defaults to the *alias* `opus` (`RunnerSelectionService.getDefaultModelForRunner`),
+and the alias table lives inside the bundled CLI binary — an SDK that predates a
+release cannot reach it, whatever config says. Verify a bump landed the model, not
+just the version string:
+
+```bash
+"$(ls ~/.local/share/pnpm/store/v10/links/@anthropic-ai/claude-agent-sdk-linux-x64/*/*/node_modules/*/claude | tail -1)" \
+  --model opus --output-format stream-json --verbose -p ok | head -1
+```
+
+The `init` line's `model` field is the resolved id. Pinning a concrete id in
+config instead pins the model *forever* — the alias is what tracks releases.
+
 ## Context compaction (`claudeAutoCompactWindow`)
 
 The Claude CLI validates the setting as
@@ -85,7 +99,7 @@ would make an existing out-of-range `config.json` fail to parse).
 The compaction threshold is
 `min(nativeWindow, w) − min(maxOutputTokens, 20_000) − 13_000`, applied **before**
 any model-specific branch — the model is irrelevant once the window is set. At
-`w = 120_000` the threshold is ~87k. With `w` unset on `claude-opus-4-8` (1M native
+`w = 120_000` the threshold is ~87k. With `w` unset on `claude-opus-5` (1M native
 window) it is ~967k, which a real session never reaches — so an unset window means
 effectively no compaction on 1M-context models.
 

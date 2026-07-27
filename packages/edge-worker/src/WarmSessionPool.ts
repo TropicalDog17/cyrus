@@ -186,7 +186,11 @@ export class WarmSessionPool {
 						(session.metadata?.model as string | undefined) ||
 						(repoConfig.claudeDefaultModel as string | undefined) ||
 						(repoConfig.model as string | undefined) ||
-						"claude-opus-4-6";
+						// Alias, not a pinned id: the bundled CLI resolves `opus` to its
+						// current version, matching RunnerSelectionService's default. A
+						// pinned id here silently strands warm sessions on an old model
+						// across SDK bumps.
+						"opus";
 
 					// Build allowed/disallowed tools — same as what buildAgentRunnerConfig() uses.
 					// Without these, startup() inherits the user's defaultMode ("default"),
