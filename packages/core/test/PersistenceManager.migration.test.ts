@@ -1,5 +1,5 @@
 /**
- * Tests for PersistenceManager migrations (v2.0 → v3.0 → v4.0),
+ * Tests for PersistenceManager migrations (v2.0 → v3.0 → v4.0 → v5.0),
  * plus atomic-write and crash-recovery behavior.
  */
 
@@ -8,6 +8,7 @@ import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	PERSISTENCE_VERSION,
+	type PersistedBuzzThread,
 	PersistenceManager,
 } from "../src/PersistenceManager.js";
 
@@ -49,7 +50,7 @@ describe("PersistenceManager", () => {
 	const lastSavedData = () =>
 		JSON.parse(handleWriteFile.mock.calls[0][0] as string);
 
-	describe("v2.0 to v4.0 Migration (via v3.0)", () => {
+	describe("v2.0 to v5.0 Migration (via v3.0 and v4.0)", () => {
 		const v2State = {
 			version: "2.0",
 			savedAt: "2025-01-15T12:00:00.000Z",
@@ -98,7 +99,7 @@ describe("PersistenceManager", () => {
 			},
 		};
 
-		it("should migrate v2.0 state through v3.0 to v4.0 flat format", async () => {
+		it("should migrate v2.0 state through v3.0 and v4.0 to the flat format", async () => {
 			vi.mocked(existsSync).mockReturnValue(true);
 			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v2State));
 
@@ -145,15 +146,25 @@ describe("PersistenceManager", () => {
 			]);
 		});
 
-		it("should save migrated state as v4.0", async () => {
+		it("should save migrated state as the current version", async () => {
 			vi.mocked(existsSync).mockReturnValue(true);
 			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v2State));
 
 			await persistenceManager.loadEdgeWorkerState();
 
-			// Verify the atomic write happened with v4.0 version
+			// Verify the atomic write happened with the current version
 			expect(handleWriteFile).toHaveBeenCalled();
 			expect(lastSavedData().version).toBe(PERSISTENCE_VERSION);
+		});
+
+		it("should run the whole chain, ending with an empty buzz container", async () => {
+			vi.mocked(existsSync).mockReturnValue(true);
+			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v2State));
+
+			const result = await persistenceManager.loadEdgeWorkerState();
+
+			// v5.0 is the last hop of the chain, not just of a v4.0 load.
+			expect(result!.buzz).toEqual({ threads: {}, repoMru: [] });
 		});
 
 		it("should flatten entries and preserve mappings during v2→v4 migration", async () => {
@@ -215,7 +226,7 @@ describe("PersistenceManager", () => {
 		});
 	});
 
-	describe("v3.0 to v4.0 Migration", () => {
+	describe("v3.0 to v5.0 Migration (via v4.0)", () => {
 		const v3State = {
 			version: "3.0",
 			savedAt: "2025-01-15T12:00:00.000Z",
@@ -337,18 +348,18 @@ describe("PersistenceManager", () => {
 			});
 		});
 
-		it("should save migrated v3→v4 state with correct version", async () => {
+		it("should save migrated v3→v5 state with correct version", async () => {
 			vi.mocked(existsSync).mockReturnValue(true);
 			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v3State));
 
 			await persistenceManager.loadEdgeWorkerState();
 
 			expect(handleWriteFile).toHaveBeenCalled();
-			expect(lastSavedData().version).toBe("4.0");
+			expect(lastSavedData().version).toBe("5.0");
 		});
 	});
 
-	describe("v4.0 state (current)", () => {
+	describe("v4.0 to v5.0 Migration", () => {
 		const v4State = {
 			version: "4.0",
 			savedAt: "2025-01-15T12:00:00.000Z",
@@ -364,23 +375,160 @@ describe("PersistenceManager", () => {
 						},
 					},
 				},
+				agentSessionEntries: {
+					"session-123": [{ type: "user", content: "Hello" }],
+				},
+				childToParentAgentSession: { "child-1": "parent-1" },
+				issueRepositoryCache: { "issue-456": ["repo-1"] },
 			},
 		};
 
-		it("should load v4.0 state without migration", async () => {
+		it("should add an empty buzz container and change nothing else", async () => {
 			vi.mocked(existsSync).mockReturnValue(true);
 			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v4State));
 
 			const result = await persistenceManager.loadEdgeWorkerState();
 
-			expect(result).toEqual(v4State.state);
+			// Whole-state assertion: v4→v5 adds exactly one key.
+			expect(result).toEqual({
+				...v4State.state,
+				buzz: { threads: {}, repoMru: [] },
+			});
+		});
+
+		it("should save the migrated state as v5.0", async () => {
+			vi.mocked(existsSync).mockReturnValue(true);
+			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v4State));
+
+			await persistenceManager.loadEdgeWorkerState();
+
+			expect(handleWriteFile).toHaveBeenCalled();
+			expect(lastSavedData().version).toBe("5.0");
+		});
+	});
+
+	describe("v5.0 state (current)", () => {
+		// A thread mid-program: promoted to `execute`, projected, one finished
+		// unit with its PR and one planned unit blocked on it, plus the plan it
+		// was approved from and the gate it is parked on.
+		const thread: PersistedBuzzThread = {
+			channelId: "channel-1",
+			threadRootId: "a1b2c3d4",
+			sessionKey: "BUZZ-a1b2c3",
+			title: "Add a health endpoint",
+			repositoryId: "repo-1",
+			branchName: "BUZZ-a1b2c3-add-a-health-endpoint",
+			workspace: { path: "/tmp/worktrees/BUZZ-a1b2c3", isGitWorktree: true },
+			phase: "execute",
+			openingMessage: "can we add a health endpoint",
+			lastResponse: "Opened the PR for the endpoint.",
+			agentSessionId: "claude-789",
+			lastUsedAt: 1705320000000,
+			program: {
+				issueId: "issue-456",
+				identifier: "DEV-1",
+				url: "https://linear.app/acme/issue/DEV-1",
+			},
+			workUnits: [
+				{
+					unitId: "unit-1",
+					unitKey: "BUZZ-a1b2c3-1",
+					title: "Add the route",
+					branchName: "BUZZ-a1b2c3-1-add-the-route",
+					workspace: {
+						path: "/tmp/worktrees/BUZZ-a1b2c3-1",
+						isGitWorktree: true,
+					},
+					agentSessionId: "claude-790",
+					issueId: "issue-457",
+					identifier: "DEV-2",
+					url: "https://linear.app/acme/issue/DEV-2",
+					blockedBy: [],
+					state: "finished",
+					pr: { number: 61, url: "https://github.com/acme/api/pull/61" },
+				},
+				{
+					unitId: "unit-2",
+					unitKey: "BUZZ-a1b2c3-2",
+					title: "Document the route",
+					branchName: "BUZZ-a1b2c3-2-document-the-route",
+					workspace: {
+						path: "/tmp/worktrees/BUZZ-a1b2c3-2",
+						isGitWorktree: true,
+					},
+					blockedBy: ["unit-1"],
+					state: "planned",
+				},
+			],
+			plan: {
+				postedEventId: "event-plan",
+				slices: [
+					{
+						unitId: "unit-1",
+						title: "Add the route",
+						rationale: "Ships alone as a reviewable endpoint change.",
+						blockedBy: [],
+					},
+					{
+						unitId: "unit-2",
+						title: "Document the route",
+						rationale: "Docs land after the route exists.",
+						blockedBy: ["unit-1"],
+					},
+				],
+			},
+			openPrompt: {
+				eventId: "event-gate",
+				channelId: "channel-1",
+				kind: "gate",
+				options: [
+					{ emoji: "▶️", value: "implement", label: "Implement" },
+					{ emoji: "📝", value: "track", label: "Track only" },
+				],
+			},
+		};
+
+		const v5State = {
+			version: "5.0",
+			savedAt: "2025-01-15T12:00:00.000Z",
+			state: {
+				childToParentAgentSession: { "child-1": "parent-1" },
+				buzz: {
+					threads: { "buzz-a1b2c3d4": thread },
+					repoMru: ["repo-1", "repo-2"],
+				},
+			},
+		};
+
+		it("should load v5.0 state without migration", async () => {
+			vi.mocked(existsSync).mockReturnValue(true);
+			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v5State));
+
+			const result = await persistenceManager.loadEdgeWorkerState();
+
+			expect(result).toEqual(v5State.state);
 			// Should not write anything since no migration is needed
 			expect(handleWriteFile).not.toHaveBeenCalled();
+		});
+
+		it("should round-trip a whole Buzz thread record through a save and load", async () => {
+			vi.mocked(existsSync).mockReturnValue(false);
+
+			await persistenceManager.saveEdgeWorkerState(v5State.state);
+			const payload = handleWriteFile.mock.calls[0][0] as string;
+
+			vi.mocked(existsSync).mockReturnValue(true);
+			vi.mocked(readFileSync).mockReturnValue(payload);
+			const result = await persistenceManager.loadEdgeWorkerState();
+
+			// Every field survives JSON, including the ones whose producers land
+			// later in the program: nothing in the record needs a custom encoder.
+			expect(result!.buzz).toEqual(v5State.state.buzz);
 		});
 	});
 
 	describe("atomic write behavior", () => {
-		const v4State = {
+		const currentState = {
 			agentSessions: { "session-1": { id: "session-1" } },
 		};
 
@@ -388,7 +536,7 @@ describe("PersistenceManager", () => {
 			vi.mocked(existsSync).mockReturnValue(false); // no prior file to rotate
 
 			await persistenceManager.saveEdgeWorkerState(
-				v4State as unknown as Parameters<
+				currentState as unknown as Parameters<
 					typeof persistenceManager.saveEdgeWorkerState
 				>[0],
 			);
@@ -410,7 +558,7 @@ describe("PersistenceManager", () => {
 			vi.mocked(existsSync).mockReturnValue(true); // prior file exists
 
 			await persistenceManager.saveEdgeWorkerState(
-				v4State as unknown as Parameters<
+				currentState as unknown as Parameters<
 					typeof persistenceManager.saveEdgeWorkerState
 				>[0],
 			);
@@ -456,7 +604,7 @@ describe("PersistenceManager", () => {
 
 	describe("crash recovery", () => {
 		const goodState = {
-			version: "4.0",
+			version: "5.0",
 			savedAt: "2025-01-15T12:00:00.000Z",
 			state: { agentSessions: { "session-1": { id: "session-1" } } },
 		};
@@ -467,7 +615,7 @@ describe("PersistenceManager", () => {
 			vi.mocked(readFileSync).mockImplementation((p: unknown) => {
 				const path = String(p);
 				if (path.endsWith(".bak")) return JSON.stringify(goodState);
-				return '{"version":"4.0","state":{"agentSess'; // truncated
+				return '{"version":"5.0","state":{"agentSess'; // truncated
 			});
 
 			const result = await persistenceManager.loadEdgeWorkerState();
@@ -504,8 +652,8 @@ describe("PersistenceManager", () => {
 	});
 
 	describe("PERSISTENCE_VERSION constant", () => {
-		it("should be 4.0", () => {
-			expect(PERSISTENCE_VERSION).toBe("4.0");
+		it("should be 5.0", () => {
+			expect(PERSISTENCE_VERSION).toBe("5.0");
 		});
 	});
 });

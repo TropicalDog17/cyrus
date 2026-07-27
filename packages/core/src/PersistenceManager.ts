@@ -11,7 +11,7 @@ import type {
 import { createLogger, type ILogger } from "./logging/index.js";
 
 /** Current persistence format version */
-export const PERSISTENCE_VERSION = "4.0";
+export const PERSISTENCE_VERSION = "5.0";
 
 // Serialized versions with Date fields as strings
 export type SerializedCyrusAgentSession = CyrusAgentSession;
@@ -50,8 +50,120 @@ interface V2CyrusAgentSession {
 }
 
 /**
+ * One proposed work unit of a Buzz plan, as posted for approval and before any
+ * issue for it exists.
+ *
+ * `unitId` is minted with the slice rather than at approval time: committing a
+ * plan performs 1 + N non-atomic `createIssue` calls, so a re-approval after a
+ * partial failure needs a key that already names each slice, or it duplicates
+ * the survivors.
+ */
+export interface PersistedBuzzPlanSlice {
+	unitId: string;
+	title: string;
+	/** Why this slice ships as its own reviewable pull request. */
+	rationale: string;
+	/** `unitId`s this slice waits on, projected as `blockedBy` relations. */
+	blockedBy: string[];
+}
+
+/**
+ * One work unit of a Buzz thread's program: one branch, one worktree, one pull
+ * request, one tracker sub-issue.
+ *
+ * There is deliberately no `pr-open` and no `done` state. Nothing on the Buzz
+ * path observes a pull request opening or merging — the GitHub transport
+ * subscribes to comment and review events only — and merge → `Done` is the
+ * tracker integration's write, not Cyrus's. A state nothing can ever set would
+ * make hydrated threads look stuck.
+ */
+export interface PersistedBuzzWorkUnit {
+	/** Stable idempotency key, carried over from the plan slice. */
+	unitId: string;
+	/** Synthesized `BUZZ-…` key naming this unit's branch and worktree. */
+	unitKey: string;
+	title: string;
+	branchName: string;
+	workspace: { path: string; isGitWorktree: boolean };
+	/** Agent-side session id of the unit's last run, for resuming it. */
+	agentSessionId?: string;
+	/** The unit's tracker sub-issue, once created. */
+	issueId?: string;
+	identifier?: string;
+	url?: string;
+	/** `unitId`s that must finish first; the sole source of truth for the edges. */
+	blockedBy: string[];
+	state: "planned" | "running" | "finished";
+	pr?: { number: number; url: string };
+}
+
+/**
+ * One Buzz thread, as persisted. Keyed by session id (`buzz-<threadRootId>`).
+ *
+ * A Buzz thread's identity is synthesized, not read back from an issue tracker,
+ * so nothing outside this record can reconstruct it: a thread hydrated without
+ * `branchName` and `workspace` cannot run a turn at all.
+ */
+export interface PersistedBuzzThread {
+	channelId: string;
+	threadRootId: string;
+	/** Synthesized issue-like key for the thread, e.g. `BUZZ-a1b2c3`. */
+	sessionKey: string;
+	title: string;
+	/** Routed repository, re-resolved to a full config on hydrate. */
+	repositoryId: string;
+	branchName: string;
+	workspace: { path: string; isGitWorktree: boolean };
+	/**
+	 * The thread's phase, on the wire as a plain string.
+	 *
+	 * The runtime union (`BuzzSessionPhase`) lives in the edge-worker package,
+	 * which depends on this one — typing the field with it would invert the
+	 * layering. A string is also the right wire type: hydration narrows it with a
+	 * total function (`persisted === "execute" ? "execute" : "triage"`), so a
+	 * phase added to the union later needs no change here and no version bump,
+	 * and a phase written by a newer build reverts to `triage` rather than
+	 * hydrating as a value the running build cannot execute.
+	 */
+	phase: string;
+	/** First human message in the thread, kept for the projected issue body. */
+	openingMessage: string;
+	/** Latest response Cyrus posted, used as the projected issue's summary. */
+	lastResponse?: string;
+	/** Agent-side session id of the last completed run, for resuming it. */
+	agentSessionId?: string;
+	/** Epoch ms of the thread's last turn, which orders `buzz.repoMru`. */
+	lastUsedAt: number;
+	/**
+	 * The thread's program issue, once projected. Rehydrating this is what stops
+	 * a restart from creating a second program for the same thread.
+	 */
+	program?: { issueId: string; identifier: string; url: string };
+	/** The program's work units, in plan order. Empty until a plan is committed. */
+	workUnits: PersistedBuzzWorkUnit[];
+	/** The plan awaiting or granted approval, so it can be re-posted. */
+	plan?: {
+		/** Event the plan was posted as — the id humans react to. */
+		postedEventId: string;
+		slices: PersistedBuzzPlanSlice[];
+	};
+	/** The prompt this thread is parked on, so a boot can re-arm it. */
+	openPrompt?: {
+		eventId: string;
+		channelId: string;
+		kind: "gate" | "question";
+		/**
+		 * Structurally the edge-worker's `BuzzPromptOption`: a re-arm hands these
+		 * back to the approval registry unchanged, so the shapes must stay equal.
+		 */
+		options: { emoji: string; value: string; label: string }[];
+	};
+}
+
+/**
  * Serializable EdgeWorker state for persistence
  *
+ * v5.0: Adds `buzz` - Buzz thread state (phase, program, work units, open prompt)
  * v4.0: Flat session format - sessions keyed directly by sessionId (no repo nesting)
  * v3.0: Nested format - sessions keyed by [repoId][sessionId]
  */
@@ -64,6 +176,13 @@ export interface SerializableEdgeWorkerState {
 	// Issue to repository mapping (for caching user repository selections)
 	// v4.1: string[] (multi-repo). Migration: old Record<string, string> auto-converts.
 	issueRepositoryCache?: Record<string, string[]>;
+	// Buzz thread state (v5.0), keyed by session id. `repoMru` lists repository
+	// ids most-recently-used first, so a channel routed to several repositories
+	// offers them in the order they were last worked on.
+	buzz?: {
+		threads: Record<string, PersistedBuzzThread>;
+		repoMru: string[];
+	};
 }
 
 /**
@@ -78,6 +197,15 @@ export interface V3SerializableEdgeWorkerState {
 	childToParentAgentSession?: Record<string, string>;
 	issueRepositoryCache?: Record<string, string>;
 }
+
+/**
+ * v4.0 state format (for migration purposes): the current format without Buzz
+ * thread state.
+ */
+export type V4SerializableEdgeWorkerState = Omit<
+	SerializableEdgeWorkerState,
+	"buzz"
+>;
 
 /**
  * Manages persistence of critical mappings to survive restarts
@@ -196,7 +324,7 @@ export class PersistenceManager {
 
 	/**
 	 * Load EdgeWorker state from disk (single file for all repositories)
-	 * Automatically migrates from v2.0 to v3.0 format if needed.
+	 * Automatically migrates any older format (v2.0, v3.0, v4.0) forward.
 	 */
 	async loadEdgeWorkerState(): Promise<SerializableEdgeWorkerState | null> {
 		try {
@@ -232,9 +360,9 @@ export class PersistenceManager {
 
 			// Handle version migration
 			if (stateData.version === "2.0") {
-				this.logger.info("Migrating state from v2.0 to v3.0 to v4.0");
+				this.logger.info("Migrating state from v2.0 to v3.0 to v4.0 to v5.0");
 				const v3State = this.migrateV2ToV3(stateData.state);
-				const migratedState = this.migrateV3ToV4(v3State);
+				const migratedState = this.migrateV4ToV5(this.migrateV3ToV4(v3State));
 				await this.saveEdgeWorkerState(migratedState);
 				this.logger.info(
 					`Migration complete, saved as v${PERSISTENCE_VERSION}`,
@@ -243,9 +371,21 @@ export class PersistenceManager {
 			}
 
 			if (stateData.version === "3.0") {
-				this.logger.info("Migrating state from v3.0 to v4.0");
-				const migratedState = this.migrateV3ToV4(
-					stateData.state as V3SerializableEdgeWorkerState,
+				this.logger.info("Migrating state from v3.0 to v4.0 to v5.0");
+				const migratedState = this.migrateV4ToV5(
+					this.migrateV3ToV4(stateData.state as V3SerializableEdgeWorkerState),
+				);
+				await this.saveEdgeWorkerState(migratedState);
+				this.logger.info(
+					`Migration complete, saved as v${PERSISTENCE_VERSION}`,
+				);
+				return migratedState;
+			}
+
+			if (stateData.version === "4.0") {
+				this.logger.info("Migrating state from v4.0 to v5.0");
+				const migratedState = this.migrateV4ToV5(
+					stateData.state as V4SerializableEdgeWorkerState,
 				);
 				await this.saveEdgeWorkerState(migratedState);
 				this.logger.info(
@@ -367,6 +507,23 @@ export class PersistenceManager {
 			agentSessionEntries: flatEntries,
 			childToParentAgentSession: v3State.childToParentAgentSession,
 			issueRepositoryCache: migratedCache,
+		};
+	}
+
+	/**
+	 * Migrate v4.0 state format to v5.0 format
+	 *
+	 * Changes:
+	 * - Add `buzz`, empty. A pre-v5 deployment has Buzz threads in memory only,
+	 *   so there is nothing to recover — the migration exists to give hydration a
+	 *   present-but-empty container instead of a shape it has to guess at.
+	 */
+	private migrateV4ToV5(
+		v4State: V4SerializableEdgeWorkerState,
+	): SerializableEdgeWorkerState {
+		return {
+			...v4State,
+			buzz: { threads: {}, repoMru: [] },
 		};
 	}
 
