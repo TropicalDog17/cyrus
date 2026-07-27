@@ -29,6 +29,9 @@ const PLAN_ID = "d".repeat(64);
 const AUTHOR = "9".repeat(64);
 const SELF = "5".repeat(64);
 const SESSION_ID = `buzz-${ROOT_ID}`;
+/** A second persisted thread, ordered after the one hydration blocks on. */
+const LATER_ROOT_ID = `b2c3d4${"0".repeat(58)}`;
+const LATER_SESSION_ID = `buzz-${LATER_ROOT_ID}`;
 const BRANCH = "BUZZ-a1b2c3-please-look-at-the-flaky-workt";
 const OPENING = "Please look at the flaky worktree test";
 
@@ -589,5 +592,46 @@ describe("BuzzSessionCoordinator persistence", () => {
 		expect(logger.warn).toHaveBeenCalledWith(
 			'Dropping Buzz thread BUZZ-a1b2c3: repository "repo-gone" is no longer configured',
 		);
+	});
+
+	// Hydration awaits the relay for a thread whose question was lost — up to the
+	// buzz CLI's 30s timeout — while the polling ingress is already running and
+	// any session's save serializes the coordinator. Every thread must therefore
+	// be back in the map before the first await, or a message for a later thread
+	// starts a second worktree for it and a save erases the ones still to come.
+	it("restores every thread before it awaits the relay", async () => {
+		sendMessage.mockReturnValue(new Promise(() => {}));
+
+		void coordinator
+			.hydrate({
+				threads: {
+					[SESSION_ID]: persistedThread({
+						openPrompt: {
+							eventId: PLAN_ID,
+							channelId: CHANNEL_ID,
+							kind: "question",
+							options: [{ emoji: "1⃣", value: "approve", label: "approve" }],
+						},
+					}),
+					[LATER_SESSION_ID]: persistedThread({
+						threadRootId: LATER_ROOT_ID,
+						sessionKey: "BUZZ-b2c3d4",
+						openPrompt: undefined,
+					}),
+				},
+				repoMru: ["repo-1"],
+			})
+			.catch(() => {});
+
+		// Deliberately not awaited: this is what an event arriving, or a save
+		// firing, part-way through hydration sees.
+		expect(coordinator.getThread(LATER_SESSION_ID)).toEqual({
+			channelId: CHANNEL_ID,
+			threadRootId: LATER_ROOT_ID,
+		});
+		expect(Object.keys(coordinator.serialize().threads)).toEqual([
+			SESSION_ID,
+			LATER_SESSION_ID,
+		]);
 	});
 });

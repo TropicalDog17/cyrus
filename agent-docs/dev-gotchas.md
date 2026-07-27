@@ -475,6 +475,16 @@ re-arms an answered gate, the reaction the human already pressed re-delivers
 map is in memory, projects a *second* program issue. It saves right after the
 decision, before either branch's relay and Linear round trips.
 
+Hydration has its own ordering rule. `hydrateBuzzThreads()` does not await
+`coordinator.hydrate()` — a relay that is down would otherwise hold up the
+whole worker's startup — and the polling ingress starts a few lines later in
+the same function. What makes that safe is that `hydrate` puts *every* thread
+into its map before its first `await` (resuming a lost question posts to the
+relay, up to the CLI's 30s timeout). Move a thread's restore after that await
+and a message arriving mid-hydration misses the map: it is read as a new
+thread, cuts a second worktree, and the next save serializes the half-filled
+map over the threads still waiting to be restored.
+
 **Rule:** state owned by a component built in `initializeComponents` is
 restored where that component is constructed, not in `restoreMappings`. And
 whenever a Buzz thread parks on — or un-parks from — something a human answers

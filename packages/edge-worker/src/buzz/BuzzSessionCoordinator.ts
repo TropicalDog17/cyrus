@@ -269,6 +269,16 @@ export class BuzzSessionCoordinator {
 	 * Restore threads from the state file, and deal with whatever each one was
 	 * waiting on.
 	 *
+	 * Every thread is put back in the map *before this function awaits anything*,
+	 * so a caller that does not await it still gets a fully restored coordinator
+	 * the moment it returns control. That ordering is load-bearing: resuming a
+	 * lost question posts to the relay, which can block for the CLI's 30s
+	 * timeout, and in that window the polling ingress is already running. A
+	 * message for a not-yet-restored thread would be read as a brand new one —
+	 * second worktree, second branch, thread reset to triage — and a save
+	 * triggered by any other session would serialize the half-empty map over the
+	 * threads still waiting to be restored.
+	 *
 	 * A thread whose repository has left the configuration is dropped rather than
 	 * kept: its worktree is no longer reachable, so there is no turn to run in it.
 	 */
@@ -278,6 +288,9 @@ export class BuzzSessionCoordinator {
 		const persisted = Object.entries(state?.threads ?? {});
 		if (persisted.length === 0) return;
 
+		const resumable: Array<
+			[BuzzThreadContext, PersistedBuzzThread["openPrompt"]]
+		> = [];
 		let restored = 0;
 		for (const [sessionId, thread] of persisted) {
 			const repository = this.deps.getRepositoryById(thread.repositoryId);
@@ -317,10 +330,17 @@ export class BuzzSessionCoordinator {
 				this.deps.projection?.restore(sessionId, thread.program, repository);
 			}
 
-			await this.resumePrompt(context, thread.openPrompt);
+			if (thread.openPrompt) {
+				resumable.push([context, thread.openPrompt]);
+			}
 		}
 
 		this.deps.logger.info(`Restored ${restored} Buzz thread(s)`);
+
+		// Only now, with the map complete, is it safe to await the relay.
+		for (const [context, openPrompt] of resumable) {
+			await this.resumePrompt(context, openPrompt);
+		}
 	}
 
 	/**

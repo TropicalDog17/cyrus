@@ -1214,8 +1214,12 @@ export class EdgeWorker extends EventEmitter {
 			projection: this.buzzProjection,
 		});
 
-		// Threads read from disk at boot. Restored before either ingress starts, so
-		// no event can reach a thread that has not been given its phase back.
+		// Threads read from disk at boot. `hydrate` puts every thread back in the
+		// coordinator synchronously and only then awaits the relay work a lost
+		// prompt needs, so by the time this returns — well before either ingress
+		// starts below — no event can reach a thread that has not been given its
+		// phase back. Do not turn that into a bare `await`: a relay that is slow
+		// or down would then hold up the whole worker's startup.
 		this.hydrateBuzzThreads();
 
 		this.buzzQuestionHandler = new BuzzQuestionHandler({
@@ -4636,8 +4640,11 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 		const coordinator = this.buzzSessionCoordinator;
 		if (!coordinator || !this.persistedBuzzState) return;
 
-		// Hydration posts into the threads whose questions were lost, so it can
-		// fail on a relay that is down. That must not take startup with it.
+		// Deliberately not awaited: hydration posts into the threads whose
+		// questions were lost, so it can block on — or fail against — a relay
+		// that is down, and that must not take startup with it. Safe only because
+		// `hydrate` restores every thread before its first await; see the note on
+		// that method before changing either side.
 		coordinator.hydrate(this.persistedBuzzState).catch((error) => {
 			this.logger.error(
 				"Failed to restore Buzz thread state",
