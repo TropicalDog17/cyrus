@@ -40,6 +40,8 @@ import {
 	type FileUploadResponse,
 	type Issue,
 	type IssueCreateInput,
+	type IssueRelation,
+	type IssueRelationCreateInput,
 	type IssueTrackerAgentSession,
 	type IssueTrackerAgentSessionPayload,
 	type IssueUpdateInput,
@@ -56,6 +58,7 @@ import {
 	type CLIAgentSessionData,
 	type CLICommentData,
 	type CLIIssueData,
+	type CLIIssueRelationData,
 	type CLILabelData,
 	type CLITeamData,
 	type CLIUserData,
@@ -63,6 +66,7 @@ import {
 	createCLIAgentSession,
 	createCLIComment,
 	createCLIIssue,
+	createCLIIssueRelation,
 	createCLILabel,
 	createCLITeam,
 	createCLIUser,
@@ -74,6 +78,7 @@ import {
  */
 export interface CLIIssueTrackerState {
 	issues: Map<string, CLIIssueData>;
+	issueRelations: Map<string, CLIIssueRelationData>;
 	comments: Map<string, CLICommentData>;
 	teams: Map<string, CLITeamData>;
 	labels: Map<string, CLILabelData>;
@@ -83,6 +88,7 @@ export interface CLIIssueTrackerState {
 	agentActivities: Map<string, CLIAgentActivityData>;
 	currentUserId: string;
 	issueCounter: number;
+	relationCounter: number;
 	commentCounter: number;
 	sessionCounter: number;
 	activityCounter: number;
@@ -123,6 +129,7 @@ export class CLIIssueTrackerService
 		super();
 		this.state = {
 			issues: initialState?.issues ?? new Map(),
+			issueRelations: initialState?.issueRelations ?? new Map(),
 			comments: initialState?.comments ?? new Map(),
 			teams: initialState?.teams ?? new Map(),
 			labels: initialState?.labels ?? new Map(),
@@ -132,6 +139,7 @@ export class CLIIssueTrackerService
 			agentActivities: initialState?.agentActivities ?? new Map(),
 			currentUserId: initialState?.currentUserId ?? "user-default",
 			issueCounter: initialState?.issueCounter ?? 1,
+			relationCounter: initialState?.relationCounter ?? 1,
 			commentCounter: initialState?.commentCounter ?? 1,
 			sessionCounter: initialState?.sessionCounter ?? 1,
 			activityCounter: initialState?.activityCounter ?? 1,
@@ -168,7 +176,11 @@ export class CLIIssueTrackerService
 			.map((id) => this.state.labels.get(id))
 			.filter((l): l is CLILabelData => l !== undefined);
 
-		return createCLIIssue(issueData, resolvedLabels);
+		return createCLIIssue(
+			issueData,
+			resolvedLabels,
+			this.inverseRelationsFor(issueData.id),
+		);
 	}
 
 	/**
@@ -256,12 +268,60 @@ export class CLIIssueTrackerService
 			.filter((l): l is CLILabelData => l !== undefined);
 
 		// Create and return the issue
-		const issue = createCLIIssue(issueData, resolvedLabels);
+		const issue = createCLIIssue(
+			issueData,
+			resolvedLabels,
+			this.inverseRelationsFor(issueData.id),
+		);
 
 		// Emit state change event
 		this.emit("issue:created", { issue });
 
 		return issue;
+	}
+
+	/**
+	 * Declare a relation between two existing issues.
+	 *
+	 * Both issues are validated the way `createIssue` validates its parent, so a
+	 * typo'd id fails here rather than surfacing as a relation nothing reads.
+	 */
+	async createIssueRelation(
+		input: IssueRelationCreateInput,
+	): Promise<IssueRelation> {
+		const issue = await this.fetchIssue(input.issueId);
+		const relatedIssue = await this.fetchIssue(input.relatedIssueId);
+
+		const relationData: CLIIssueRelationData = {
+			id: `relation-${this.state.relationCounter++}`,
+			type: input.type,
+			createdAt: new Date(),
+			updatedAt: new Date(),
+			issueId: issue.id,
+			relatedIssueId: relatedIssue.id,
+		};
+
+		this.state.issueRelations.set(relationData.id, relationData);
+
+		return createCLIIssueRelation(relationData, (issueId) =>
+			this.fetchIssue(issueId),
+		);
+	}
+
+	/**
+	 * Build the relations pointing *at* an issue, which is the direction
+	 * `Issue.inverseRelations()` reports on the Linear platform.
+	 */
+	private inverseRelationsFor(issueId: string): IssueRelation[] {
+		const relations: IssueRelation[] = [];
+		for (const [, relationData] of this.state.issueRelations) {
+			if (relationData.relatedIssueId === issueId) {
+				relations.push(
+					createCLIIssueRelation(relationData, (id) => this.fetchIssue(id)),
+				);
+			}
+		}
+		return relations;
 	}
 
 	/**
@@ -298,7 +358,13 @@ export class CLIIssueTrackerService
 				const resolvedLabels = issueData.labelIds
 					.map((id) => this.state.labels.get(id))
 					.filter((l): l is CLILabelData => l !== undefined);
-				allChildren.push(createCLIIssue(issueData, resolvedLabels));
+				allChildren.push(
+					createCLIIssue(
+						issueData,
+						resolvedLabels,
+						this.inverseRelationsFor(issueData.id),
+					),
+				);
 			}
 		}
 
@@ -422,7 +488,11 @@ export class CLIIssueTrackerService
 		const resolvedLabels = issueData.labelIds
 			.map((id) => this.state.labels.get(id))
 			.filter((l): l is CLILabelData => l !== undefined);
-		const issue = createCLIIssue(issueData, resolvedLabels);
+		const issue = createCLIIssue(
+			issueData,
+			resolvedLabels,
+			this.inverseRelationsFor(issueData.id),
+		);
 		this.emit("issue:updated", { issue });
 
 		return issue;

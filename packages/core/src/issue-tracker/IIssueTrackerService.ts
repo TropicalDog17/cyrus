@@ -26,6 +26,8 @@ import type {
 	FileUploadResponse,
 	Issue,
 	IssueCreateInput,
+	IssueRelation,
+	IssueRelationCreateInput,
 	IssueTrackerAgentSession,
 	IssueTrackerAgentSessionPayload,
 	IssueUpdateInput,
@@ -258,6 +260,38 @@ export interface IIssueTrackerService {
 	 * See `fetchIssue()` documentation for details.
 	 */
 	createIssue(input: IssueCreateInput): Promise<Issue>;
+
+	/**
+	 * Declare a relation between two existing issues.
+	 *
+	 * @param input - Both sides of the relation and its kind
+	 * @returns Promise resolving to the created relation
+	 * @throws Error if either issue is unknown or the tracker rejects the write
+	 *
+	 * @example
+	 * ```typescript
+	 * // Make `blocked` wait on `blocker`
+	 * await service.createIssueRelation({
+	 *   issueId: blocker.id,
+	 *   relatedIssueId: blocked.id,
+	 *   type: 'blocks'
+	 * });
+	 * ```
+	 *
+	 * @remarks
+	 * Both sides are **ids**, never `TEAM-123` identifiers: this seam is called
+	 * by code that already holds the issues it is relating, so resolving human
+	 * identifiers is not its job. The agent-facing `linear_set_issue_relation`
+	 * MCP tool does that resolution itself and writes through the Linear client
+	 * directly — the two are independent on purpose.
+	 *
+	 * Relations are write-only here. The read side is `Issue.inverseRelations()`,
+	 * which lists the relations pointing *at* an issue.
+	 *
+	 * **Linear Platform Warning**: the returned relation's `issue` and
+	 * `relatedIssue` are async properties that must be awaited.
+	 */
+	createIssueRelation(input: IssueRelationCreateInput): Promise<IssueRelation>;
 
 	/**
 	 * Fetch attachments for an issue.

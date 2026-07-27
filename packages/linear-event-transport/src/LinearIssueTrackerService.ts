@@ -8,7 +8,7 @@
  * @module issue-tracker/adapters/LinearIssueTrackerService
  */
 
-import type { LinearClient } from "@linear/sdk";
+import { IssueRelationType, type LinearClient } from "@linear/sdk";
 
 import type {
 	AgentActivityCreateInput,
@@ -27,6 +27,9 @@ import type {
 	IIssueTrackerService,
 	Issue,
 	IssueCreateInput,
+	IssueRelation,
+	IssueRelationCreateInput,
+	IssueRelationKind,
 	IssueUpdateInput,
 	IssueWithChildren,
 	Label,
@@ -43,6 +46,17 @@ import {
 } from "./LinearTokenRefresher.js";
 
 export type { LinearOAuthConfig };
+
+/**
+ * The platform-agnostic relation vocabulary spelled as Linear's enum. Linear's
+ * values happen to be the same strings, but going through a map keeps the
+ * core type free to name a kind Linear does not have.
+ */
+const LINEAR_RELATION_TYPES: Record<IssueRelationKind, IssueRelationType> = {
+	blocks: IssueRelationType.Blocks,
+	duplicate: IssueRelationType.Duplicate,
+	related: IssueRelationType.Related,
+};
 
 /**
  * Linear implementation of IIssueTrackerService.
@@ -245,6 +259,43 @@ export class LinearIssueTrackerService implements IIssueTrackerService {
 		} catch (error) {
 			const err = new Error(
 				`Failed to create issue in team ${input.teamId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			if (error instanceof Error) {
+				err.cause = error;
+			}
+			throw err;
+		}
+	}
+
+	/**
+	 * Declare a relation between two existing issues.
+	 *
+	 * Unlike `createIssue`, nothing is resolved first: both sides are already
+	 * ids, so this is a single mutation.
+	 */
+	async createIssueRelation(
+		input: IssueRelationCreateInput,
+	): Promise<IssueRelation> {
+		try {
+			const createPayload = await this.linearClient.createIssueRelation({
+				issueId: input.issueId,
+				relatedIssueId: input.relatedIssueId,
+				type: LINEAR_RELATION_TYPES[input.type],
+			});
+
+			if (!createPayload.success) {
+				throw new Error("Linear API returned success=false");
+			}
+
+			const createdRelation = await createPayload.issueRelation;
+			if (!createdRelation) {
+				throw new Error("Created relation not returned from Linear API");
+			}
+
+			return createdRelation;
+		} catch (error) {
+			const err = new Error(
+				`Failed to create ${input.type} relation from ${input.issueId} to ${input.relatedIssueId}: ${error instanceof Error ? error.message : String(error)}`,
 			);
 			if (error instanceof Error) {
 				err.cause = error;
