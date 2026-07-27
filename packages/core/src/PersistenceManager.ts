@@ -363,10 +363,7 @@ export class PersistenceManager {
 				this.logger.info("Migrating state from v2.0 to v3.0 to v4.0 to v5.0");
 				const v3State = this.migrateV2ToV3(stateData.state);
 				const migratedState = this.migrateV4ToV5(this.migrateV3ToV4(v3State));
-				await this.saveEdgeWorkerState(migratedState);
-				this.logger.info(
-					`Migration complete, saved as v${PERSISTENCE_VERSION}`,
-				);
+				await this.persistMigratedState(migratedState);
 				return migratedState;
 			}
 
@@ -375,10 +372,7 @@ export class PersistenceManager {
 				const migratedState = this.migrateV4ToV5(
 					this.migrateV3ToV4(stateData.state as V3SerializableEdgeWorkerState),
 				);
-				await this.saveEdgeWorkerState(migratedState);
-				this.logger.info(
-					`Migration complete, saved as v${PERSISTENCE_VERSION}`,
-				);
+				await this.persistMigratedState(migratedState);
 				return migratedState;
 			}
 
@@ -387,10 +381,7 @@ export class PersistenceManager {
 				const migratedState = this.migrateV4ToV5(
 					stateData.state as V4SerializableEdgeWorkerState,
 				);
-				await this.saveEdgeWorkerState(migratedState);
-				this.logger.info(
-					`Migration complete, saved as v${PERSISTENCE_VERSION}`,
-				);
+				await this.persistMigratedState(migratedState);
 				return migratedState;
 			}
 
@@ -405,6 +396,31 @@ export class PersistenceManager {
 		} catch (error) {
 			this.logger.error("Failed to load EdgeWorker state:", error);
 			return null;
+		}
+	}
+
+	/**
+	 * Write a just-migrated state back, best-effort.
+	 *
+	 * Migration is an in-memory transform; persisting it is an optimisation that
+	 * saves doing it again next boot. Letting a failed write propagate would make
+	 * *loading* conditional on the state directory being writable — an unwritable
+	 * directory or a full disk would turn a readable state file into `null`, and
+	 * every in-flight session would be dropped by a run that could otherwise have
+	 * restored all of them. Worse, the next successful save then overwrites the
+	 * good file with the empty in-memory state, making the loss permanent.
+	 */
+	private async persistMigratedState(
+		state: SerializableEdgeWorkerState,
+	): Promise<void> {
+		try {
+			await this.saveEdgeWorkerState(state);
+			this.logger.info(`Migration complete, saved as v${PERSISTENCE_VERSION}`);
+		} catch (error) {
+			this.logger.warn(
+				"Migrated state could not be written; continuing with the migrated state in memory:",
+				error,
+			);
 		}
 	}
 

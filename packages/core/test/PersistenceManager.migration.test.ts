@@ -405,6 +405,28 @@ describe("PersistenceManager", () => {
 			expect(handleWriteFile).toHaveBeenCalled();
 			expect(lastSavedData().version).toBe("5.0");
 		});
+
+		// Writing the migrated file back is an optimisation; loading must not
+		// depend on it. Every deployment is on v4.0, so a state directory that
+		// is momentarily unwritable (wrong uid after a deploy, ENOSPC) would
+		// otherwise drop every persisted session on the first boot of this
+		// build — and the next successful save would make that loss permanent.
+		it("still returns the migrated state when the write-back fails", async () => {
+			vi.mocked(existsSync).mockReturnValue(true);
+			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v4State));
+			vi.mocked(open).mockRejectedValue(
+				Object.assign(new Error("EACCES: permission denied"), {
+					code: "EACCES",
+				}),
+			);
+
+			const result = await persistenceManager.loadEdgeWorkerState();
+
+			expect(result).toEqual({
+				...v4State.state,
+				buzz: { threads: {}, repoMru: [] },
+			});
+		});
 	});
 
 	describe("v5.0 state (current)", () => {
