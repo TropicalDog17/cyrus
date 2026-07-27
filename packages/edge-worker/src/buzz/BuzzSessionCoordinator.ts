@@ -724,6 +724,21 @@ export class BuzzSessionCoordinator {
 			};
 		}
 
+		if (decision === "implement") {
+			context.phase = "execute";
+		}
+
+		// Answering the gate is the transition the state file most needs and is
+		// least likely to get: the gate parked, so its record on disk still says
+		// the gate is open and carries no program issue. `track` returns from
+		// here without ever running a turn, and `implement` only saves inside
+		// `runTurn`, after several awaited relay and Linear round trips. Without
+		// a save right here, a restart in between re-arms an answered gate, the
+		// reaction the human already pressed re-delivers, and the projection —
+		// with no persisted program to restore — creates a *second* program issue
+		// for the same thread. Saving before either branch closes both windows.
+		await this.deps.saveState();
+
 		if (decision === "track") {
 			this.deps.logger.info(
 				`Buzz thread ${context.sessionKey} tracked without implementation`,
@@ -740,7 +755,6 @@ export class BuzzSessionCoordinator {
 		this.deps.logger.info(
 			`Buzz thread ${context.sessionKey} approved for implementation`,
 		);
-		context.phase = "execute";
 
 		if (identifier) {
 			await this.say(context, `▶️ On it — tracking as **${identifier}**.`);

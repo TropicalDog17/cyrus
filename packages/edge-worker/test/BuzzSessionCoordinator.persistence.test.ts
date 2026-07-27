@@ -402,6 +402,45 @@ describe("BuzzSessionCoordinator persistence", () => {
 		);
 	});
 
+	/** The record as it stands the moment the gate is answered. */
+	const decided = (phase: string) => ({
+		channelId: CHANNEL_ID,
+		threadRootId: ROOT_ID,
+		sessionKey: "BUZZ-a1b2c3",
+		title: OPENING,
+		repositoryId: "repo-1",
+		branchName: BRANCH,
+		workspace: { path: "/worktrees/BUZZ-a1b2c3", isGitWorktree: true },
+		phase,
+		openingMessage: OPENING,
+		agentSessionId: "claude-session-1",
+		lastUsedAt: NOW,
+		program: PROGRAM,
+		workUnits: [],
+	});
+
+	// The gate parked with no program, and that snapshot is the only one on disk:
+	// `track` never runs a turn, so nothing else would save. A restart before
+	// this save re-arms the answered gate, the 📝 already pressed re-delivers,
+	// and — with no program to restore — a *second* program issue is projected.
+	it("saves the answered gate and its program on the track branch", async () => {
+		await coordinator.handleEvent(event());
+		await coordinator.handleEvent(reaction("📝"));
+		await settle();
+
+		expect(saved.at(-1)?.threads[SESSION_ID]).toEqual(decided("triage"));
+	});
+
+	// Same hole, narrower window: `implement` only saves inside the turn it
+	// starts, after the awaited relay and Linear round trips below it.
+	it("saves the promoted phase and program before the implementation turn", async () => {
+		await coordinator.handleEvent(event());
+		await coordinator.handleEvent(reaction("▶️"));
+		await settle();
+
+		expect(saved[1]?.threads[SESSION_ID]).toEqual(decided("execute"));
+	});
+
 	it("keeps an approved thread in the execute phase", async () => {
 		await hydrate();
 

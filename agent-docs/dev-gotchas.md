@@ -466,10 +466,20 @@ gate resolves — so nothing would ever write an open gate to disk.
 finds no `openPrompt` to re-arm while the message sits in the scrollback
 collecting reactions that go nowhere.
 
+Un-parking has the same shape and is easier to miss: `applyGateDecision`
+records the projected program on the context, and on the `track` branch it then
+returns without ever running a turn. Without its own save, the only record on
+disk is still the pre-decision one — gate open, no program — so a restart
+re-arms an answered gate, the reaction the human already pressed re-delivers
+(the poller's `seenReactions` is empty after a boot) and `track()`, whose dedupe
+map is in memory, projects a *second* program issue. It saves right after the
+decision, before either branch's relay and Linear round trips.
+
 **Rule:** state owned by a component built in `initializeComponents` is
 restored where that component is constructed, not in `restoreMappings`. And
-whenever a Buzz thread parks on something a human answers later, save at the
-moment it parks — the turn's own saves have already happened.
+whenever a Buzz thread parks on — or un-parks from — something a human answers
+later, save at that moment: the turn's own saves have already happened, or have
+not happened yet.
 
 ## `postToSink` silently drops activities without `externalSessionId`
 
