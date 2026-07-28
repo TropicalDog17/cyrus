@@ -362,6 +362,27 @@ Two related traps in the same executor:
 - `call_webhook` sets **no** `Content-Type` unless you list it under `headers:`,
   and sends no body at all when `body:` is omitted.
 
+## `{{trigger.author}}` is a claim, not an identity
+
+`build_trigger_context` (`crates/buzz-workflow/src/lib.rs`) takes `author` from
+an **`actor` tag on the event**, falling back to `event.pubkey` only when no
+such tag exists — with no guard on who signed the event. Any channel member can
+publish a message or reaction tagged `["actor", "<an allowlisted pubkey>"]` and
+be delivered to the webhook as that human.
+
+The relay does **not** make this mistake: its own `effective_message_author`
+(`buzz-relay/src/handlers/ingest.rs`) honours `actor` only on events the relay
+itself signed, and attributes everything else to the signing key. So the relay's
+record is the authority and a delivery is only ever a hint about it.
+
+**Rule:** never let `authorPubkey` off a webhook body be the last word on
+authorization. `BuzzSessionCoordinator.handleEvent` re-checks the allowlist
+against `message.pubkey` from the relay record it already fetches, and reactions
+are not accepted over HTTP at all — they are reconciled from the relay on every
+ingress. The transport's own allowlist check stays as a cheap pre-filter, but it
+is not the boundary. Enforced by *"refuses a delivery whose claimed author the
+relay does not confirm"* in `BuzzSessionCoordinator.test.ts`.
+
 ## A Buzz reaction can never arrive over the webhook
 
 `TriggerDef` in `crates/buzz-workflow/src/schema.rs` is a serde

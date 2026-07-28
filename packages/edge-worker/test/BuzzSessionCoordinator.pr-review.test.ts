@@ -17,6 +17,7 @@ const CHANNEL_ID = "6f1a2b3c-0000-4000-8000-000000000001";
 const ROOT_ID = `a1b2c3${"0".repeat(58)}`;
 const SESSION_ID = `buzz-${ROOT_ID}`;
 const SELF = "5".repeat(64);
+const AUTHOR = "9".repeat(64);
 const OPENING = "Please look at the flaky worktree test";
 
 const THREAD_KEY = "BUZZ-a1b2c3";
@@ -182,6 +183,7 @@ describe("BuzzSessionCoordinator pull request review routing", () => {
 				{ channelId: CHANNEL_ID, repositoryId: "repo-1" },
 			],
 			getSelfPubkey: () => SELF,
+			getAllowedPubkeys: () => [AUTHOR],
 			getRepositoryById: () => REPOSITORY,
 			saveState,
 			getActivitySinkForChannel: () => SINK,

@@ -177,6 +177,7 @@ describe("BuzzSessionCoordinator work units", () => {
 				{ channelId: CHANNEL_ID, repositoryId: "repo-1" },
 			],
 			getSelfPubkey: () => undefined,
+			getAllowedPubkeys: () => [AUTHOR],
 			getRepositoryById: () => REPOSITORY,
 			saveState,
 			getActivitySinkForChannel: () => ({}) as IActivitySink,

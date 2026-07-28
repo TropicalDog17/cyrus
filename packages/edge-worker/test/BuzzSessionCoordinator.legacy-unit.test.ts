@@ -220,6 +220,7 @@ describe("BuzzSessionCoordinator legacy work unit", () => {
 				{ channelId: CHANNEL_ID, repositoryId: "repo-1" },
 			],
 			getSelfPubkey: () => SELF,
+			getAllowedPubkeys: () => [AUTHOR],
 			getRepositoryById: () => REPOSITORY,
 			saveState: vi.fn().mockResolvedValue(undefined),
 			getActivitySinkForChannel: () => ({}) as IActivitySink,

@@ -278,6 +278,7 @@ describe("BuzzSessionCoordinator persistence", () => {
 				{ channelId: CHANNEL_ID, repositoryId: "repo-1" },
 			],
 			getSelfPubkey: () => SELF,
+			getAllowedPubkeys: () => [AUTHOR],
 			getRepositoryById: (id) => repositories[id],
 			saveState,
 			getActivitySinkForChannel: () => activitySink,

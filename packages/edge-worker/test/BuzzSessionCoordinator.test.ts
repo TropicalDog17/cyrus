@@ -163,6 +163,7 @@ describe("BuzzSessionCoordinator", () => {
 	let routes: { channelId: string; repositoryId: string }[];
 	let repositories: Record<string, RepositoryConfig | undefined>;
 	let selfPubkey: string | undefined;
+	let allowedPubkeys: string[];
 
 	beforeEach(() => {
 		getEvent = vi.fn().mockResolvedValue(record());
@@ -189,6 +190,7 @@ describe("BuzzSessionCoordinator", () => {
 		routes = [{ channelId: CHANNEL_ID, repositoryId: "repo-1" }];
 		repositories = { "repo-1": REPOSITORY, "repo-2": OTHER_REPOSITORY };
 		selfPubkey = SELF;
+		allowedPubkeys = [AUTHOR];
 
 		coordinator = new BuzzSessionCoordinator({
 			logger,
@@ -207,6 +209,7 @@ describe("BuzzSessionCoordinator", () => {
 			approvals,
 			getChannelRoutes: () => routes,
 			getSelfPubkey: () => selfPubkey,
+			getAllowedPubkeys: () => allowedPubkeys,
 			getRepositoryById: (id) => repositories[id],
 			saveState: vi.fn().mockResolvedValue(undefined),
 			getActivitySinkForChannel: () => ({}) as IActivitySink,
@@ -233,6 +236,36 @@ describe("BuzzSessionCoordinator", () => {
 				taskInstructions: `${CYRUS_SCOPE}\n\nPlease look at the flaky worktree test`,
 			}),
 		);
+	});
+
+	// The delivery's author is `{{trigger.author}}`, which buzz-workflow reads from
+	// an `actor` tag on the event with no guard on who signed it — so a channel
+	// member can be delivered as somebody else. The relay does not make that
+	// mistake, so the record it returns is the one that decides.
+	it("refuses a delivery whose claimed author the relay does not confirm", async () => {
+		const impostor = "7".repeat(64);
+		getEvent.mockResolvedValue(record({ pubkey: impostor }));
+
+		await coordinator.handleEvent(event({ authorPubkey: AUTHOR }));
+		await settle();
+
+		expect(startBuzzSession).not.toHaveBeenCalled();
+		expect(sendMessage).not.toHaveBeenCalled();
+		expect(vi.mocked(logger.warn).mock.calls).toEqual([
+			[
+				`Dropping Buzz message ${ROOT_ID}: relay attributes it to ${impostor}, which is not allowlisted (delivery claimed ${AUTHOR})`,
+			],
+		]);
+	});
+
+	// Same shape, opposite outcome: the allowlist is about the human, not about
+	// which ingress delivered them, so a confirmed author still runs.
+	it("accepts a delivery the relay confirms", async () => {
+		getEvent.mockResolvedValue(record({ pubkey: AUTHOR.toUpperCase() }));
+
+		await coordinator.handleEvent(event());
+
+		expect(startBuzzSession).toHaveBeenCalledTimes(1);
 	});
 
 	// A channel route binds a thread to one repository, but the session still

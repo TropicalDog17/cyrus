@@ -1208,6 +1208,7 @@ export class EdgeWorker extends EventEmitter {
 			approvals: this.buzzApprovals,
 			getChannelRoutes: () => this.config.buzz?.channels ?? [],
 			getSelfPubkey: () => this.config.buzz?.selfPubkey,
+			getAllowedPubkeys: () => this.config.buzz?.allowedPubkeys ?? [],
 			getRepositoryById: (repositoryId) => this.repositories.get(repositoryId),
 			saveState: () => this.savePersistedState(),
 			getActivitySinkForChannel: (channelId) =>

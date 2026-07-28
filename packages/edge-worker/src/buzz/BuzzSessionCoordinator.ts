@@ -55,6 +55,12 @@ export interface BuzzSessionCoordinatorDeps {
 	 * disables catch-all channels entirely — see {@link isAddressedToCyrus}.
 	 */
 	getSelfPubkey(): string | undefined;
+	/**
+	 * Humans permitted to drive Cyrus. Read here, not only at the ingress, so the
+	 * check lands on the relay's attribution of an event rather than on a
+	 * delivery's claim about it — see {@link handleEvent}. Empty denies everyone.
+	 */
+	getAllowedPubkeys(): readonly string[];
 	getRepositoryById(repositoryId: string): RepositoryConfig | undefined;
 	/**
 	 * Write EdgeWorker state to disk. A turn saves at both ends on its own; this
@@ -590,6 +596,29 @@ export class BuzzSessionCoordinator {
 
 		const message = await this.fetchMessage(event);
 		if (!message) return;
+
+		// Authorize against the *relay's* attribution, not the delivery's.
+		//
+		// A webhook delivery's author is `{{trigger.author}}`, which buzz-workflow
+		// reads from an `actor` tag on the event and only falls back to the real
+		// pubkey when there is none (`buzz-workflow/src/lib.rs`, build_trigger_context).
+		// It applies no guard on who signed the event, so any channel member can
+		// publish a message tagged `["actor", "<an allowlisted pubkey>"]` and be
+		// delivered as that human. The relay does not make that mistake — its own
+		// `effective_message_author` honours `actor` only on events the relay itself
+		// signed — so the record fetched above carries the true author, and this is
+		// the first point in the webhook path where it is known.
+		//
+		// Redundant under the polling ingress, which already filters on relay data
+		// (`BuzzPollingSource`), and deliberately so: the allowlist is the only thing
+		// standing between a channel member and a Cyrus session, and it should not
+		// depend on which ingress happens to be configured.
+		if (!this.isAuthorAllowed(message.pubkey)) {
+			logger.warn(
+				`Dropping Buzz message ${event.messageId}: relay attributes it to ${message.pubkey}, which is not allowlisted (delivery claimed ${event.authorPubkey})`,
+			);
+			return;
+		}
 
 		const prompt = message.content.trim();
 		if (!prompt) {
@@ -1597,6 +1626,20 @@ export class BuzzSessionCoordinator {
 	 * current set rather than delivered once — see `BuzzPollingSource` — and a
 	 * restart, which empties this, is a recovery path rather than a hazard.
 	 */
+	/**
+	 * Whether a pubkey the relay attributed an event to may drive Cyrus.
+	 *
+	 * Case-insensitive because hex pubkeys reach us from three places — config,
+	 * the relay, and a webhook body — and only one of them is under our control.
+	 * An empty allowlist denies everyone, matching the ingress.
+	 */
+	private isAuthorAllowed(pubkey: string): boolean {
+		const candidate = pubkey.trim().toLowerCase();
+		return this.deps
+			.getAllowedPubkeys()
+			.some((allowed) => allowed.trim().toLowerCase() === candidate);
+	}
+
 	private isDuplicate(deliveryId: string): boolean {
 		if (this.seenDeliveries.has(deliveryId)) return true;
 
