@@ -476,6 +476,28 @@ own work.
 holds — route PR review back into the originating session — and never infer a
 fresh workspace from having asked for one.
 
+## A Buzz thread's first work unit has no `-u1` — that absence is the migration
+
+`buzz-unit-identity.ts` mints `BUZZ-xxxxxx-u<n>` for every work unit *except*
+the first, which keeps the thread's own `BUZZ-xxxxxx` key, its branch, its
+worktree and its session id. That asymmetry looks like an oversight and is the
+opposite: it is what lets a thread already live on disk gain a work unit
+without renaming anything. Regularising it to `-u1` compiles, passes a casual
+read, and then provisions a second worktree for a branch a human has checked
+out, strands the first, and splits the thread's agent conversation in two — all
+silently, because `PersistedBuzzThread` has no version to disagree about and
+`unitSessionIdFor` would simply resolve to a session nobody has been talking
+to.
+
+The suffix is also the only encoding of a unit's position: `unitSessionIdFor`
+appends it and `threadSessionIdOf` strips it, so a unit key must never be
+edited by hand or derived from anything but `unitKeyFor`.
+
+**Rule:** never give the first unit a suffix, and never key a unit's session on
+its index in `workUnits` instead of on its key. Enforced by
+`BuzzSessionCoordinator.units.test.ts`, *"runs the first unit on the identity
+the single-unit path already produced"*.
+
 ## Setup scripts hold a process-global, non-reentrant lock
 
 Every setup script `GitService` runs — the per-repo `cyrus-setup.sh` and both

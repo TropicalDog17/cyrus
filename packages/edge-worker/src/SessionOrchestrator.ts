@@ -109,9 +109,18 @@ export type BuzzSessionPhase = "triage" | "execute";
 export interface StartBuzzSessionRequest {
 	repository: RepositoryConfig;
 	workspace: { path: string; isGitWorktree: boolean };
-	/** Internal session id, `buzz-<threadRootId>`. */
+	/**
+	 * Internal session id: `buzz-<threadRootId>` for a thread's first work unit,
+	 * `buzz-<threadRootId>-u<n>` for the units after it. One session per unit,
+	 * because one branch is one worktree.
+	 */
 	sessionId: string;
-	/** Synthesized tracker-style identifier, e.g. `BUZZ-a1b2c3`. */
+	/**
+	 * Synthesized tracker-style identifier of the **work unit** this run
+	 * executes — `BUZZ-a1b2c3` for a thread's first unit, `BUZZ-a1b2c3-u2` for
+	 * the second. It names the branch, the worktree and the session's synthetic
+	 * issue; the unit's tracker identifier is a different thing.
+	 */
 	sessionKey: string;
 	/**
 	 * Buzz thread root event id. Doubles as the session's `externalSessionId`,
@@ -1415,9 +1424,11 @@ export class SessionOrchestrator {
 	}
 
 	/**
-	 * Create a git worktree for a Buzz conversation. The worktree is keyed on
-	 * the synthesized `BUZZ-xxxxxx` identifier, so it lands at
-	 * `<workspaceBaseDir>/BUZZ-xxxxxx/` exactly as an issue-keyed one would.
+	 * Create a git worktree for one work unit of a Buzz conversation. The
+	 * worktree is keyed on the unit's synthesized identifier, so it lands at
+	 * `<workspaceBaseDir>/BUZZ-xxxxxx/` for a thread's first unit and
+	 * `<workspaceBaseDir>/BUZZ-xxxxxx-u2/` for the next — exactly as an
+	 * issue-keyed one would.
 	 */
 	async createBuzzWorkspace(
 		repository: RepositoryConfig,
@@ -1686,7 +1697,10 @@ export class SessionOrchestrator {
 	 * Called once per gate phase against the same `sessionId`: the `triage` run
 	 * answers with read-only tools, and an approved `execute` run replaces the
 	 * runner in place, resuming the same agent conversation with the repository's
-	 * full tool set.
+	 * full tool set. A thread with several work units calls it once per unit
+	 * instead, each with the unit's own session id, key, branch and worktree and
+	 * all with the same `threadRootId` — so the branches diverge while the
+	 * conversation does not.
 	 *
 	 * @returns the agent-side session id of the completed run, for resuming it in
 	 * a later phase, or null when the run could not be started.
@@ -1717,6 +1731,8 @@ export class SessionOrchestrator {
 				);
 			}
 
+			// Names the work unit, not the thread: this is the key the worktree,
+			// the branch and the rendered activity all carry.
 			const issueMinimal: IssueMinimal = {
 				id: sessionKey,
 				identifier: sessionKey,

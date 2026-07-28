@@ -130,6 +130,68 @@ async function allowedToolsFor(
 	return buildIssueConfig.mock.calls[0]?.[0]?.allowedTools;
 }
 
+describe("startBuzzSession identity", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+	});
+
+	// Unit-keyed execution under a thread-keyed conversation (ADR 0014): the
+	// session, its synthetic issue, its branch and its worktree all name the work
+	// unit, while `externalSessionId` stays the thread root — which is what makes
+	// a second unit post into the same Buzz thread with no change to the sink.
+	it("keys the session on the work unit and the conversation on the thread", async () => {
+		const { deps } = makeDeps();
+		const manager = deps.agentSessionManager as unknown as {
+			getSession: ReturnType<typeof vi.fn>;
+			createCyrusAgentSession: ReturnType<typeof vi.fn>;
+		};
+		manager.getSession = vi.fn(() =>
+			manager.createCyrusAgentSession.mock.calls.length === 0
+				? undefined
+				: {
+						id: "buzz-thread-root-u2",
+						issueContext: {
+							issueId: "BUZZ-a1b2c3-u2",
+							issueIdentifier: "BUZZ-a1b2c3-u2",
+						},
+						workspace: { path: "/repo/wt/BUZZ-a1b2c3-u2" },
+					},
+		);
+
+		await new SessionOrchestrator(deps).startBuzzSession(
+			makeReq({
+				sessionId: "buzz-thread-root-u2",
+				sessionKey: "BUZZ-a1b2c3-u2",
+				branchName: "BUZZ-a1b2c3-u2-serialize-worktree-setup",
+				title: "Serialize worktree setup",
+				workspace: { path: "/repo/wt/BUZZ-a1b2c3-u2", isGitWorktree: true },
+				phase: "execute",
+			}),
+		);
+
+		expect(manager.createCyrusAgentSession.mock.calls[0]).toEqual([
+			"buzz-thread-root-u2",
+			"BUZZ-a1b2c3-u2",
+			{
+				id: "BUZZ-a1b2c3-u2",
+				identifier: "BUZZ-a1b2c3-u2",
+				title: "Serialize worktree setup",
+				branchName: "BUZZ-a1b2c3-u2-serialize-worktree-setup",
+			},
+			{ path: "/repo/wt/BUZZ-a1b2c3-u2", isGitWorktree: true },
+			"buzz",
+			[
+				{
+					repositoryId: "repo-1",
+					branchName: "BUZZ-a1b2c3-u2-serialize-worktree-setup",
+					baseBranchName: "main",
+				},
+			],
+			"thread-root",
+		]);
+	});
+});
+
 describe("startBuzzSession allowedTools (the execution gate)", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();

@@ -19,6 +19,14 @@ import type {
 } from "./BuzzApprovalRegistry.js";
 import type { BuzzCliClient, BuzzEventRecord } from "./BuzzCliClient.js";
 import type { BuzzThreadRef } from "./BuzzQuestionHandler.js";
+import {
+	FIRST_UNIT_INDEX,
+	slugify,
+	threadSessionIdOf,
+	unitBranchNameFor,
+	unitKeyFor,
+	unitSessionIdFor,
+} from "./buzz-unit-identity.js";
 
 /** What the human chose at the execution gate. */
 export type BuzzGateDecision = "implement" | "track";
@@ -161,6 +169,33 @@ interface BuzzThreadContext {
 	plan?: PersistedBuzzThread["plan"];
 }
 
+/**
+ * The identity one turn executes under: a session, a synthesized key, a branch
+ * and the worktree that branch lives in.
+ *
+ * Every field here belongs to a work unit. The thread root, the channel sink and
+ * the phase are not: they come from the thread and are the same for all of its
+ * units, which is what keeps one conversation over several branches.
+ */
+interface BuzzUnitExecution {
+	sessionId: string;
+	unitKey: string;
+	branchName: string;
+	title: string;
+	workspace: { path: string; isGitWorktree: boolean };
+	/** Agent-side session of this unit's last run, to resume it. */
+	agentSessionId?: string;
+}
+
+/** A work unit as the planner describes it, before it has an identity. */
+export interface BuzzWorkUnitRequest {
+	/** Stable idempotency key, carried over from the plan slice. */
+	unitId: string;
+	title: string;
+	/** `unitId`s this unit waits on. */
+	blockedBy?: string[];
+}
+
 /** Buzz thread state as persisted, the argument {@link hydrate} takes. */
 type PersistedBuzzState = NonNullable<SerializableEdgeWorkerState["buzz"]>;
 
@@ -174,6 +209,15 @@ type PersistedBuzzState = NonNullable<SerializableEdgeWorkerState["buzz"]>;
  *
  * The thread root, not the triggering message, is the durable identity: every
  * follow-up message in the same thread resumes the same session.
+ *
+ * ONE THREAD, SEVERAL BRANCHES
+ * ----------------------------
+ * A thread holds one conversation and, once it has a program, several pieces of
+ * work. The conversation stays thread-keyed — `threads` is keyed by
+ * `buzz-<threadRootId>`, and every unit's activity threads back under the same
+ * root event — while execution is unit-keyed: one branch, one worktree and one
+ * agent session per unit. See `buzz-unit-identity.ts` for how the two levels
+ * relate, and why the first unit is the thread itself.
  *
  * WHO CYRUS ANSWERS
  * -----------------
@@ -220,9 +264,16 @@ export class BuzzSessionCoordinator {
 		this.deps = deps;
 	}
 
-	/** Channel and thread bound to a session, for the question handler. */
+	/**
+	 * Channel and thread bound to a session, for the question handler.
+	 *
+	 * Takes a *unit* session id as readily as a thread's own: a question raised
+	 * inside the third unit of a program is still asked in the one Buzz thread,
+	 * because that is where the human is. `threads` stays keyed by thread — the
+	 * conversation is the thread — and the unit id resolves to it.
+	 */
 	getThread(sessionId: string): BuzzThreadRef | null {
-		const context = this.threads.get(sessionId);
+		const context = this.threads.get(threadSessionIdOf(sessionId));
 		if (!context) return null;
 		return {
 			channelId: context.channelId,
@@ -258,7 +309,7 @@ export class BuzzSessionCoordinator {
 		}
 
 		for (const [sessionId, context] of this.threads) {
-			const openPrompt = this.deps.approvals.openPromptFor(sessionId);
+			const openPrompt = this.openPromptFor(context);
 			threads[sessionId] = {
 				channelId: context.channelId,
 				threadRootId: context.threadRootId,
@@ -405,6 +456,56 @@ export class BuzzSessionCoordinator {
 	}
 
 	/**
+	 * Sessions that can hold an open prompt for a thread: the thread's own, and
+	 * one per work unit.
+	 *
+	 * A unit's `AskUserQuestion` is registered under the unit's session id, but
+	 * the human answers in the one thread — they have no way to address a unit —
+	 * so anything that goes from a thread back to an open prompt has to consider
+	 * all of them. The thread comes first: a gate is only ever the thread's.
+	 */
+	private promptSessionIds(context: BuzzThreadContext): string[] {
+		const ids = [context.sessionId];
+		for (const unit of context.workUnits) {
+			const sessionId = unitSessionIdFor(context.sessionId, unit.unitKey);
+			if (!ids.includes(sessionId)) ids.push(sessionId);
+		}
+		return ids;
+	}
+
+	/** The one open prompt of a thread, whichever of its sessions holds it. */
+	private openPromptFor(
+		context: BuzzThreadContext,
+	): PersistedBuzzThread["openPrompt"] {
+		for (const sessionId of this.promptSessionIds(context)) {
+			const prompt = this.deps.approvals.openPromptFor(sessionId);
+			if (prompt) return prompt;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Offer a threaded reply to the thread's open prompt, and to each of its
+	 * units'. Before a thread exists there is still a prompt to answer — the
+	 * repository question is registered under the session id a thread will later
+	 * take — so the thread's own id is always tried.
+	 */
+	private resolveByReply(
+		sessionId: string,
+		text: string,
+		actorPubkey: string,
+	): boolean {
+		const context = this.threads.get(sessionId);
+		const candidates = context ? this.promptSessionIds(context) : [sessionId];
+		for (const candidate of candidates) {
+			if (this.deps.approvals.resolveByReply(candidate, text, actorPubkey)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * Repository ids, most recently worked on first.
 	 *
 	 * Derived from the threads rather than tracked alongside them: a list kept in
@@ -463,9 +564,7 @@ export class BuzzSessionCoordinator {
 		// A reply in a thread whose session is waiting on an answer *is* the
 		// answer. Routing it to a new turn instead would leave the runner
 		// blocked on a question the human has already answered.
-		if (
-			this.deps.approvals.resolveByReply(sessionId, prompt, event.authorPubkey)
-		) {
+		if (this.resolveByReply(sessionId, prompt, event.authorPubkey)) {
 			logger.info(`Buzz reply answered the open prompt for ${sessionId}`);
 			return;
 		}
@@ -605,24 +704,10 @@ export class BuzzSessionCoordinator {
 		context: BuzzThreadContext,
 		prompt: string,
 	): Promise<void> {
-		context.lastUsedAt = Date.now();
-
-		const agentSessionId = await this.deps.sessionOrchestrator.startBuzzSession(
-			{
-				repository: context.repository,
-				workspace: context.workspace,
-				sessionId: context.sessionId,
-				sessionKey: context.sessionKey,
-				threadRootId: context.threadRootId,
-				branchName: context.branchName,
-				title: context.title,
-				taskInstructions: `${scopePreamble(context.repository)}\n\n${prompt}`,
-				activitySink: this.deps.getActivitySinkForChannel(context.channelId),
-				phase: context.phase,
-				...(context.agentSessionId
-					? { resumeSessionId: context.agentSessionId }
-					: {}),
-			},
+		const agentSessionId = await this.runUnitTurn(
+			context,
+			this.threadExecution(context),
+			prompt,
 		);
 
 		if (agentSessionId) {
@@ -631,6 +716,196 @@ export class BuzzSessionCoordinator {
 
 		if (context.phase === "triage") {
 			await this.offerGate(context);
+		}
+	}
+
+	/**
+	 * Run one turn under a work unit's identity, in the thread's phase.
+	 *
+	 * The single call site of `startBuzzSession`, and the seam where the two
+	 * levels of identity meet: branch, worktree, key and session come from the
+	 * unit, while the thread root, the channel sink and the phase come from the
+	 * thread. Passing the thread root is what keeps every unit posting into the
+	 * one conversation — the session takes it as its `externalSessionId` and
+	 * `BuzzActivitySink` replies to it — and passing the thread's phase is what
+	 * keeps the gate fail-closed for units: a unit that somehow starts before a
+	 * human opened the gate gets the read-only tool set, because a unit has no
+	 * phase of its own to be promoted.
+	 *
+	 * @returns the agent-side session id of the finished run, for resuming it.
+	 */
+	private async runUnitTurn(
+		context: BuzzThreadContext,
+		execution: BuzzUnitExecution,
+		prompt: string,
+	): Promise<string | null> {
+		context.lastUsedAt = Date.now();
+
+		return await this.deps.sessionOrchestrator.startBuzzSession({
+			repository: context.repository,
+			workspace: execution.workspace,
+			sessionId: execution.sessionId,
+			sessionKey: execution.unitKey,
+			threadRootId: context.threadRootId,
+			branchName: execution.branchName,
+			title: execution.title,
+			taskInstructions: `${scopePreamble(context.repository)}\n\n${prompt}`,
+			activitySink: this.deps.getActivitySinkForChannel(context.channelId),
+			phase: context.phase,
+			...(execution.agentSessionId
+				? { resumeSessionId: execution.agentSessionId }
+				: {}),
+		});
+	}
+
+	/**
+	 * The thread's own execution identity: its key, its branch, its worktree and
+	 * its session.
+	 *
+	 * This is the first work unit whether or not a record for it exists yet — a
+	 * thread opened before the program model, or one whose plan has not been
+	 * committed, runs here — which is why {@link createWorkUnit} hands the first
+	 * unit exactly these values instead of minting new ones.
+	 */
+	private threadExecution(context: BuzzThreadContext): BuzzUnitExecution {
+		return {
+			sessionId: context.sessionId,
+			unitKey: context.sessionKey,
+			branchName: context.branchName,
+			title: context.title,
+			workspace: context.workspace,
+			...(context.agentSessionId
+				? { agentSessionId: context.agentSessionId }
+				: {}),
+		};
+	}
+
+	private unitExecution(
+		context: BuzzThreadContext,
+		unit: PersistedBuzzWorkUnit,
+	): BuzzUnitExecution {
+		return {
+			sessionId: unitSessionIdFor(context.sessionId, unit.unitKey),
+			unitKey: unit.unitKey,
+			branchName: unit.branchName,
+			title: unit.title,
+			workspace: unit.workspace,
+			...(unit.agentSessionId ? { agentSessionId: unit.agentSessionId } : {}),
+		};
+	}
+
+	/**
+	 * Mint a work unit of a thread's program: its key, its branch and the
+	 * worktree that branch lives in.
+	 *
+	 * The first unit of a thread mints nothing. It takes the thread's key, branch
+	 * and worktree as they are, so a thread that has already been worked on keeps
+	 * the branch a human is looking at and the worktree its files sit in; only
+	 * the second unit onward gets a `-u<n>` identity and a worktree of its own.
+	 *
+	 * Idempotent on `unitId`: committing a plan performs a series of non-atomic
+	 * writes, so a retry after a partial failure has to find the units it already
+	 * minted rather than mint a second branch for each of them. Position comes
+	 * from how many units the program already has — they are appended in plan
+	 * order and never removed — and the record is saved as soon as it exists,
+	 * because from here on a worktree on disk belongs to it.
+	 *
+	 * @returns the unit, or null when the thread is unknown or its worktree could
+	 * not be created — the same shape of failure as opening a thread.
+	 */
+	async createWorkUnit(
+		sessionId: string,
+		request: BuzzWorkUnitRequest,
+	): Promise<PersistedBuzzWorkUnit | null> {
+		const context = this.threads.get(sessionId);
+		if (!context) {
+			this.deps.logger.warn(
+				`Cannot create work unit ${request.unitId}: no Buzz thread ${sessionId}`,
+			);
+			return null;
+		}
+
+		const existing = context.workUnits.find(
+			(unit) => unit.unitId === request.unitId,
+		);
+		if (existing) return existing;
+
+		const index = context.workUnits.length + FIRST_UNIT_INDEX;
+		const unitKey = unitKeyFor(context.sessionKey, index);
+		const first = index === FIRST_UNIT_INDEX;
+		const branchName = first
+			? context.branchName
+			: unitBranchNameFor(unitKey, request.title);
+		const workspace = first
+			? context.workspace
+			: await this.deps.sessionOrchestrator.createBuzzWorkspace(
+					context.repository,
+					unitKey,
+					branchName,
+					request.title,
+				);
+
+		if (!workspace) {
+			this.deps.logger.error(
+				`Could not create a workspace for Buzz work unit ${unitKey}`,
+			);
+			return null;
+		}
+
+		const unit: PersistedBuzzWorkUnit = {
+			unitId: request.unitId,
+			unitKey,
+			title: request.title,
+			branchName,
+			workspace,
+			blockedBy: request.blockedBy ?? [],
+			state: "planned",
+		};
+		context.workUnits.push(unit);
+		await this.deps.saveState();
+		return unit;
+	}
+
+	/**
+	 * Run one turn for a work unit.
+	 *
+	 * The entry point execution goes through once a thread has a program: it is
+	 * the unit, not the thread, that owns the branch being written to. Whether a
+	 * unit is *allowed* to start — what it waits for, and what happens when it
+	 * fails — belongs to the program advance and is not decided here.
+	 *
+	 * The caller owns the queue. Like {@link applyGateDecision}, this is meant to
+	 * be invoked from inside a queued task for the thread, so enqueueing here
+	 * would wait on the task that called it.
+	 */
+	async startWorkUnit(
+		sessionId: string,
+		unitId: string,
+		prompt: string,
+	): Promise<void> {
+		const context = this.threads.get(sessionId);
+		const unit = context?.workUnits.find(
+			(candidate) => candidate.unitId === unitId,
+		);
+		if (!context || !unit) {
+			this.deps.logger.warn(
+				`Cannot start work unit ${unitId}: no such unit in Buzz thread ${sessionId}`,
+			);
+			return;
+		}
+
+		const agentSessionId = await this.runUnitTurn(
+			context,
+			this.unitExecution(context, unit),
+			prompt,
+		);
+
+		if (agentSessionId) {
+			unit.agentSessionId = agentSessionId;
+			// The run's own saves happen before this is known, and nothing else
+			// writes a unit's agent session: without a save here a restart drops
+			// the conversation the next turn of this unit would have resumed.
+			await this.deps.saveState();
 		}
 	}
 
@@ -1170,14 +1445,4 @@ function hydratePhase(persisted: string): BuzzSessionPhase {
 function firstLine(text: string): string {
 	const line = text.split("\n", 1)[0]?.trim() ?? "";
 	return line.length > 80 ? `${line.slice(0, 77)}...` : line || "Buzz thread";
-}
-
-function slugify(text: string): string {
-	return (
-		text
-			.toLowerCase()
-			.replace(/[^a-z0-9]+/g, "-")
-			.replace(/^-+|-+$/g, "")
-			.slice(0, 30) || "thread"
-	);
 }
