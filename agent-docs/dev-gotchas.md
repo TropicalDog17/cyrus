@@ -686,10 +686,10 @@ One more ordering rule inside `offerGate` and `chooseRepository`: **register the
 prompt before seeding its reactions.** Seeding is two to four `buzz reactions
 add` subprocesses plus relay round trips, and the message — "React to choose" —
 is already on every client. A reaction that lands before `approvals.register`
-resolves nothing and is logged at debug, and on the webhook ingress that is
-terminal: the relay refuses an identical kind-7 with
-`ReactionEventInsertOutcome::Duplicate` so re-pressing emits nothing, and a
-remove-then-re-add carries a delivery id `seenDeliveries` is already holding.
+resolves nothing and is logged at debug — and it is never offered again, because
+`BuzzPollingSource` remembers every `<event>:<emoji>:<pubkey>` it has dispatched.
+Re-pressing does not help either: the relay refuses an identical kind-7 with
+`ReactionEventInsertOutcome::Duplicate`, so no new event exists to re-read.
 Enforced by `BuzzSessionCoordinator.test.ts`, *"releases a gate answered while
 its reactions are still being seeded"*.
 

@@ -1150,10 +1150,11 @@ export class BuzzSessionCoordinator {
 		// it is posted, while seeding is two `buzz reactions add` subprocesses and
 		// two relay round trips — a second or so in which a human clicking ▶️ is
 		// doing exactly what they were told. A reaction that arrives before the
-		// prompt is registered resolves nothing, and on the webhook ingress it also
-		// burns its delivery id in `seenDeliveries`, so removing and re-adding the
-		// reaction is suppressed too and the gate cannot be released for the life
-		// of the process. Registering first makes the window not exist.
+		// prompt is registered resolves nothing, and it is not re-offered: the
+		// reconciler remembers every `<event>:<emoji>:<pubkey>` it has dispatched,
+		// so that reaction is never delivered again and the gate stays parked with
+		// the human's own ▶️ next to it. Registering first makes the window not
+		// exist.
 		this.armGate(context, {
 			eventId,
 			channelId: context.channelId,
@@ -1227,8 +1228,7 @@ export class BuzzSessionCoordinator {
 		// ingress, so a gate re-armed on boot with an empty reaction cache finds
 		// the ▶️ a human pressed during the deploy — and a second pass here would
 		// start a second implementation turn against the same branch. Logged, not
-		// posted:
-		// the human did nothing wrong and the thread is already moving.
+		// posted: the human did nothing wrong and the thread is already moving.
 		if (context.phase !== "triage") {
 			this.deps.logger.info(
 				`Ignoring a gate decision for ${context.sessionKey}: the thread is already in the ${context.phase} phase`,
