@@ -11,24 +11,18 @@ const IDENTITY_TRIGGER = {
 	channel_id: "{{trigger.channel_id}}",
 	author: "{{trigger.author}}",
 	timestamp: "{{trigger.timestamp}}",
-	emoji: "{{trigger.emoji}}",
 };
 
 describe("buzz-workflow definitions", () => {
-	// buzz-workflow's `TriggerDef` is a serde internally-tagged enum on `on:`,
-	// so one file declares exactly one trigger. Reactions therefore need a file
-	// of their own, and installing only one of the pair looks from the channel
-	// like the agent ignoring a reaction.
-	it("ships one workflow file per trigger Cyrus routes", () => {
-		expect(readdirSync(WORKFLOWS_DIR).sort()).toEqual([
-			"cyrus-reaction.yaml",
-			"cyrus-trigger.yaml",
-		]);
+	// One file, one trigger, and `message_posted` is the only one Cyrus wants
+	// delivered. A reaction workflow would carry `{{trigger.author}}`, which
+	// buzz-workflow reads from an unsigned `actor` tag — so shipping one would
+	// hand any channel member a way to name an allowlisted pubkey as the reactor
+	// and release an execution gate. Reactions come from the relay instead.
+	it("ships exactly one workflow, for message_posted", () => {
+		expect(readdirSync(WORKFLOWS_DIR).sort()).toEqual(["cyrus-trigger.yaml"]);
 
-		expect([
-			readWorkflow("cyrus-trigger.yaml").trigger,
-			readWorkflow("cyrus-reaction.yaml").trigger,
-		]).toEqual(["message_posted", "reaction_added"]);
+		expect(readWorkflow("cyrus-trigger.yaml").trigger).toBe("message_posted");
 	});
 
 	it("declares an id-shaped message_posted body", () => {
@@ -41,27 +35,12 @@ describe("buzz-workflow definitions", () => {
 		});
 	});
 
-	it("declares an id-shaped reaction_added body carrying the emoji", () => {
-		expect(renderWorkflowBody("cyrus-reaction.yaml", IDENTITY_TRIGGER)).toEqual(
-			{
-				type: "reaction_added",
-				message_id: "{{trigger.message_id}}",
-				channel_id: "{{trigger.channel_id}}",
-				author: "{{trigger.author}}",
-				timestamp: "{{trigger.timestamp}}",
-				emoji: "{{trigger.emoji}}",
-			},
-		);
-	});
-
 	// `{{trigger.text}}` is a chat message substituted raw into JSON: the body
 	// stops parsing the first time somebody types a quote or a newline. The
-	// header comments warn about it by name, so only the bodies are checked.
-	it("templates no free text into either body", () => {
-		for (const fileName of ["cyrus-trigger.yaml", "cyrus-reaction.yaml"]) {
-			expect(readWorkflow(fileName).bodyTemplate).not.toContain(
-				"{{trigger.text}}",
-			);
-		}
+	// header comment warns about it by name, so only the body is checked.
+	it("templates no free text into the body", () => {
+		expect(readWorkflow("cyrus-trigger.yaml").bodyTemplate).not.toContain(
+			"{{trigger.text}}",
+		);
 	});
 });

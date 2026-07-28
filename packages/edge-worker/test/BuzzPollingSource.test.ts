@@ -390,6 +390,56 @@ describe("BuzzPollingSource", () => {
 		});
 	});
 
+	// A webhook deployment runs this source purely to reconcile reactions: the
+	// workflow carries messages fine and cannot carry a reaction at all, because
+	// buzz-workflow's `author` for a kind-7 is an unauthenticated `actor` tag and
+	// a failed POST is never retried. Re-reading the relay's own reaction set is
+	// both authoritative and self-healing; re-reading its messages would
+	// duplicate every one the webhook already delivered.
+	describe("reactions-only mode", () => {
+		it("reads reactions, and neither messages nor the channel list", async () => {
+			catchAll = true;
+			approvals.register({
+				eventId: GATE_ID,
+				channelId: CHANNEL_ID,
+				sessionId: "buzz-session",
+				kind: "gate",
+				options: [{ emoji: "▶️", value: "implement", label: "implement" }],
+			});
+			getReactions.mockResolvedValue([
+				{ emoji: "▶️", count: 1, pubkeys: [ALLOWED] },
+			]);
+
+			await new BuzzPollingSource({
+				logger,
+				client: {
+					getMessages,
+					getReactions,
+					listChannels,
+				} as unknown as BuzzCliClient,
+				approvals,
+				getChannelIds: () => [],
+				isCatchAllRouted: () => catchAll,
+				getAllowedPubkeys: () => allowed,
+				getSelfPubkey: () => SELF,
+				onEvent,
+				intervalMs: 5000,
+				reactionsOnly: true,
+			}).tick();
+
+			expect(getMessages).not.toHaveBeenCalled();
+			expect(listChannels).not.toHaveBeenCalled();
+			expect(emitted()).toEqual([
+				expect.objectContaining({
+					eventType: "reaction_added",
+					messageId: GATE_ID,
+					emoji: "▶️",
+					authorPubkey: ALLOWED,
+				}),
+			]);
+		});
+	});
+
 	// A slow relay must not stack concurrent cycles that each re-read the same
 	// window and double-dispatch it.
 	it("does not run overlapping ticks", async () => {

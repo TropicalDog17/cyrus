@@ -20,9 +20,10 @@ export type BuzzEventType = "message_posted" | "reaction_added";
  * a unix timestamp — all of which are JSON-safe by construction — and the
  * message text is resolved out-of-band from the relay by event id.
  *
- * The canonical workflow definitions that produce this body ship alongside this
- * package in `workflows/` — one file per trigger, because buzz-workflow lets a
- * workflow declare exactly one.
+ * The canonical workflow definition that produces this body ships alongside this
+ * package in `workflows/cyrus-trigger.yaml`. It declares `message_posted` and
+ * nothing else: a `reaction_added` body is refused by the transport, because
+ * buzz-workflow's `author` for a reaction is an unauthenticated `actor` tag.
  */
 export interface BuzzWorkflowWebhookBody {
 	/** Trigger kind, written literally in the workflow YAML (not templated). */

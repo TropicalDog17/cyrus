@@ -74,8 +74,15 @@ whose failure mode is the bug it would fix); and a WIP cap of 3 across threads, 
   thread, and the prompt-text link fails silently: units left non-terminal, `Done`
   reachable only by name.
 
-  > **Amended by PR 16:** a second workflow file (`cyrus-reaction.yaml`) delivers
-  > `reaction_added`, so webhook ingress can release a gate; both files must be installed.
+  > **Amended by PR 16:** reaction delivery is no longer tied to the ingress, and the
+  > shipped reaction workflow is withdrawn. buzz-workflow reads a kind-7's author from an
+  > unsigned `actor` tag, so a reaction POST names whichever pubkey the caller chose —
+  > releasing an execution gate on an unauthenticated identity — and it has no `call_webhook`
+  > retry while the relay refuses a re-sent identical kind-7, so one lost POST wedges a gate.
+  > The relay's reaction set is authoritative and re-read whole, so `BuzzPollingSource` now
+  > reconciles reactions under **both** ingresses and the transport refuses `reaction_added`
+  > outright. Webhook ingress can release a gate; the at-least-once property the boot re-arm
+  > depends on holds either way.
 - Also corrected from 0013: authz is not "a pubkey allowlist enforced in the transport
   through the existing `UserAccessControl` seam" but two independent plain allowlists,
   one per ingress, neither touching that seam; nor is Linear ingress demotable.

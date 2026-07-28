@@ -362,27 +362,45 @@ Two related traps in the same executor:
 - `call_webhook` sets **no** `Content-Type` unless you list it under `headers:`,
   and sends no body at all when `body:` is omitted.
 
-## One buzz-workflow file declares exactly one trigger
+## A Buzz reaction can never arrive over the webhook
 
 `TriggerDef` in `crates/buzz-workflow/src/schema.rs` is a serde
-**internally-tagged** enum on `on:`, so a workflow carries a single trigger
-event — there is no list, and adding a second `on:` key silently loses one.
-Messages and reactions therefore need **two** files, which is why
+**internally-tagged** enum on `on:`, so a workflow carries one trigger event and
+reactions would need a file of their own. Do not write one.
 `packages/buzz-event-transport/workflows/` ships `cyrus-trigger.yaml`
-(`message_posted`) and `cyrus-reaction.yaml` (`reaction_added`).
+(`message_posted`) and nothing else, and `BuzzEventTransport` refuses a
+`reaction_added` body with 202 and a one-shot warning.
 
-The failure this causes is quiet. Under `ingress: "webhook"`, a channel with
-only `cyrus-trigger.yaml` installed delivers messages perfectly and drops every
-reaction, so an execution gate can never be released and the symptom reads as
-"the agent ignores my ▶️" rather than as a missing workflow. Nothing on either
-side logs it: the reaction simply never becomes an HTTP request.
+Two independent reasons, both in upstream Buzz and neither fixable from here.
 
-**Rule:** install both files on every channel, and treat the pair as one unit
-when editing — the URL and the `Authorization` secret have to be set twice.
-`reaction_added` is also the one trigger whose body interpolates a non-id-shaped
-value (`{{trigger.emoji}}`), so the no-JSON-escaping trap above applies to it:
-a reaction whose content holds a `"` or a `\` yields invalid JSON and is dropped
-with a 400. Cyrus's own gate and option emojis are JSON-safe by construction.
+**The reactor is unauthenticated.** `build_trigger_context`
+(`crates/buzz-workflow/src/lib.rs`) sets `author` to the content of any tag named
+`actor`, falling back to `event.pubkey`, and checks no signature — unlike the
+relay's own `effective_message_author`, which honours `actor` only when
+`event.pubkey == relay_pubkey`. So a channel member who is *not* in
+`buzz.allowedPubkeys` can sign a ▶️ tagged `["actor", <an allowlisted pubkey>]`,
+the POST arrives with that pubkey as `author`, the allowlist passes, and the
+execution gate hands them write tools on Cyrus's branch. The allowlist is the
+only control there is, and for reactions it is caller-controlled.
+
+**The delivery is at-most-once and unrepeatable.** There is no retry for
+`call_webhook` anywhere in `crates/buzz-workflow`, and the relay short-circuits an
+already-active reaction with `ReactionEventInsertOutcome::Duplicate` *before*
+`dispatch_persistent_event` — so a POST lost to a deploy restart or a tunnel 502
+is gone, and pressing ▶️ again emits nothing at all. The gate then parks forever
+with the human's own ▶️ visible next to it. The boot re-arm in
+`BuzzSessionCoordinator.resumePrompt` and the phase guard in `applyGateDecision`
+are both written against at-least-once delivery, which only the relay read
+provides.
+
+**Rule:** reactions come from `buzz reactions get` — the relay's current set,
+keyed by the real reactor and re-read whole every tick, which makes it both
+authoritative and self-healing. `BuzzPollingSource` runs on the webhook ingress
+too (`reactionsOnly`) for exactly this, scoped to the event ids an open prompt is
+waiting on. The cost of the fix is latency: a ▶️ takes up to
+`pollIntervalSeconds`. Enforced by `workflows.test.ts` (*"ships exactly one
+workflow"*), `BuzzEventTransport.test.ts` (*"refuses a reaction, whoever it
+claims to be from"*) and `EdgeWorker.buzz-wiring.test.ts`.
 
 ## Buzz: the binary is `buzz`, not `buzz-cli`
 

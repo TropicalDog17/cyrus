@@ -666,11 +666,11 @@ opt-in: without a `buzz` block Cyrus never touches it.
 - `allowedPubkeys` is an allowlist, and an empty or omitted one **denies
   everyone** — the webhook endpoint is publicly reachable by design.
 - `ingress` defaults to `"poll"`, which needs no inbound exposure. `"webhook"`
-  is lower latency but requires a genuinely public address, and requires
-  installing **both** workflow files from
-  `packages/buzz-event-transport/workflows/` on each channel: a buzz-workflow
-  declares exactly one trigger, so messages and reactions live in separate
-  files, and installing only the first means reactions never arrive.
+  is lower latency for messages but requires a genuinely public address, and
+  requires installing `cyrus-trigger.yaml` from
+  `packages/buzz-event-transport/workflows/` on each channel. Reactions never
+  come over the webhook: their author is unauthenticated there, so Cyrus reads
+  them from the relay on either ingress, on the `pollIntervalSeconds` timer.
 - Secrets are **not** in this file. `BUZZ_PRIVATE_KEY`, the optional
   `BUZZ_AUTH_TAG`, and `CYRUS_BUZZ_WEBHOOK_SECRET` (webhook ingress only) go in
   `~/.cyrus/.env`.

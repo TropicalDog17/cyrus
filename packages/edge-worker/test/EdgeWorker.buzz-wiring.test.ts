@@ -59,6 +59,7 @@ const { composeEdgeWorker } = await import("../src/EdgeWorker.js");
 const { BuzzLinearProjection } = await import(
 	"../src/buzz/BuzzLinearProjection.js"
 );
+const { BuzzPollingSource } = await import("../src/buzz/BuzzPollingSource.js");
 
 const CHANNEL_ID = "6f1a2b3c-0000-4000-8000-000000000001";
 const THREAD_ROOT = "d".repeat(64);
@@ -200,6 +201,37 @@ describe("EdgeWorker Buzz wiring", () => {
 		);
 
 		expect(vi.mocked(logger.warn).mock.calls).toEqual([]);
+	});
+
+	// A reaction cannot be delivered by webhook: buzz-workflow's `author` for a
+	// kind-7 is an unauthenticated `actor` tag, so a reaction endpoint would let
+	// any channel member name an allowlisted pubkey and release an execution
+	// gate — and with no retry on `call_webhook`, and a relay that refuses a
+	// re-sent identical kind-7, one lost POST would wedge that gate forever. So a
+	// webhook deployment reconciles reactions from the relay as well.
+	it("reconciles reactions from the relay under the webhook ingress", () => {
+		process.env.CYRUS_BUZZ_WEBHOOK_SECRET = "shared-secret";
+		try {
+			const webhookConfig = config([repository("repo-1", "cyrus", ["DEV"])]);
+			// biome-ignore lint/style/noNonNullAssertion: the fixture always sets it
+			webhookConfig.buzz!.ingress = "webhook";
+
+			registerBuzz(webhookConfig, logger);
+		} finally {
+			delete process.env.CYRUS_BUZZ_WEBHOOK_SECRET;
+		}
+
+		const source = vi.mocked(BuzzPollingSource);
+		expect(source).toHaveBeenCalledTimes(1);
+		const deps = source.mock.calls[0]?.[0];
+		expect({
+			reactionsOnly: deps?.reactionsOnly,
+			// Reaction reconciliation is scoped by open prompt, not by channel, so
+			// nothing here re-reads a message the webhook already delivered.
+			channelIds: deps?.getChannelIds(),
+			catchAll: deps?.isCatchAllRouted(),
+		}).toEqual({ reactionsOnly: true, channelIds: [], catchAll: false });
+		expect(source.mock.results[0]?.value.start).toHaveBeenCalledTimes(1);
 	});
 
 	// The projection's `buildThreadUrl` was optional and supplied by nothing, so

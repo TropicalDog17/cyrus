@@ -155,7 +155,7 @@ only over a tailnet or not at all. Nothing else to install — skip to step 4.
 
 Reactions are polled only on messages Cyrus is currently waiting on (an open
 gate or question), so the cost is proportional to open prompts rather than to
-channel volume.
+channel volume. This part runs under **both** ingresses — see below.
 
 ### `webhook`
 
@@ -173,18 +173,25 @@ docker exec <relay-container> getent hosts <your-cyrus-host>
 If that prints a `100.64–100.127` address, use `poll`.
 
 Ingress is a `buzz-workflow` that POSTs to Cyrus. Start from the canonical
-definitions, which are kept in lockstep with the parser. There are **two, and
-both must be installed on every channel**: a buzz-workflow declares exactly one
-trigger, so messages and reactions cannot share a file. With only
-`cyrus-trigger.yaml` installed, Cyrus never sees a reaction and an execution
-gate can never be released — the agent appears to ignore your ▶️.
+definition, which is kept in lockstep with the parser. There is exactly **one**,
+and it carries messages only.
 
 ```bash
 cd packages/buzz-event-transport/workflows
-# edit both files: set the URL and the Authorization secret
+# edit the file: set the URL and the Authorization secret
 buzz workflows create --channel <CHANNEL_UUID> --yaml - < cyrus-trigger.yaml
-buzz workflows create --channel <CHANNEL_UUID> --yaml - < cyrus-reaction.yaml
 ```
+
+**Reactions do not come over the webhook, on any ingress.** buzz-workflow takes
+a reaction's author from an `actor` tag on the event without checking a
+signature, so a reaction POST names whichever pubkey the sender chose — and an
+execution gate is exactly the thing that must not be releasable by an
+unauthenticated pubkey. It also has no retry, and the relay refuses a re-sent
+identical reaction, so one lost POST would wedge a gate for good. Cyrus reads
+reactions from the relay instead, on both ingresses, scoped to the messages it
+is waiting on. Cyrus refuses a `reaction_added` delivery with 202 and says so
+once in the log; if you installed a reaction workflow from an earlier revision,
+delete it with `buzz workflows list` / `buzz workflows delete`.
 
 Constraints buzz-workflow imposes on the target: it must be **public HTTPS**,
 redirects are not followed, and the request times out at 10 s. Cyrus answers
@@ -253,7 +260,8 @@ anything that matters: a Linear outage must not stall or fail a Buzz session.
 | Messages accepted but nothing happens | Author's pubkey is not in `allowedPubkeys` (the endpoint answers 202 and drops), or the channel has no route. |
 | Agent starts but never replies | `BUZZ_PRIVATE_KEY`'s account is not a member of the channel — check the logged relay rejection. |
 | Agent answers but never edits anything | The thread is still in triage; react ▶️ on the gate message. |
-| Messages work but reactions are ignored | Under `ingress: "webhook"`, only `cyrus-trigger.yaml` was installed — `cyrus-reaction.yaml` carries the `reaction_added` trigger and is a separate workflow. |
-| Cyrus replies to itself in a loop | `selfPubkey` is unset or wrong under `ingress: "poll"`. |
+| `Ignoring reaction_added webhook deliveries` in the log | A reaction workflow is installed on a channel. It is unnecessary and cannot be authorized — delete it; reactions are read from the relay. |
+| A ▶️ takes a few seconds to take effect | Expected. Reactions are reconciled on the poll interval (`pollIntervalSeconds`, default 5) rather than pushed. |
+| Cyrus replies to itself in a loop | `selfPubkey` is unset or wrong. |
 | No Linear issue appears | The repository has no `teamKeys`, or no `linearWorkspaceId`. Check the logged warning. |
 | Cyrus keeps asking which repository | The channel resolves to several repositories and the answer matched none of them. |

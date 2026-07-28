@@ -21,8 +21,15 @@
 # targets and does not follow redirects, so CYRUS_BASE_URL has to be the real
 # public tunnel URL.
 #
-# This file declares one trigger, and a workflow can declare only one. Reactions
-# arrive through `cyrus-reaction.yaml`; install both, or gates never release.
+# This is the only workflow Cyrus wants installed. There is deliberately no
+# reaction workflow: buzz-workflow takes `{{trigger.author}}` for a kind-7 from
+# an `actor` tag it never checks a signature on, so a reaction delivered over
+# HTTP has no authenticated reactor — and an execution gate is exactly the thing
+# that must not be releasable by a pubkey the caller chose. It also has no retry
+# for `call_webhook`, and the relay refuses a re-sent identical kind-7, so one
+# lost POST would wedge a gate for good. Cyrus reads reactions from the relay
+# instead, on both ingresses. If you installed a reaction workflow from an
+# earlier revision, delete it: `buzz workflows list` / `buzz workflows delete`.
 
 name: cyrus-trigger
 description: Forward Buzz channel activity to Cyrus

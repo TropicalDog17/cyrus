@@ -1222,10 +1222,12 @@ export class BuzzSessionCoordinator {
 		decision: BuzzGateDecision,
 	): Promise<void> {
 		// A gate only means anything while the thread is still waiting to be let
-		// out of triage. Reactions arrive at least once — a gate re-armed on boot
-		// is live again with an empty reaction cache, so the ▶️ a human pressed
-		// before the deploy re-delivers — and a second pass here would start a
-		// second implementation turn against the same branch. Logged, not posted:
+		// out of triage. Reactions arrive at least once — `BuzzPollingSource`
+		// re-reads the relay's whole reaction set for every open prompt, on every
+		// ingress, so a gate re-armed on boot with an empty reaction cache finds
+		// the ▶️ a human pressed during the deploy — and a second pass here would
+		// start a second implementation turn against the same branch. Logged, not
+		// posted:
 		// the human did nothing wrong and the thread is already moving.
 		if (context.phase !== "triage") {
 			this.deps.logger.info(
@@ -1571,10 +1573,17 @@ export class BuzzSessionCoordinator {
 	}
 
 	/**
-	 * buzz-workflow retries a `call_webhook` step that does not return 2xx
-	 * promptly, and the polling ingress re-reads an inclusive `--since` window,
-	 * so the same event can arrive twice either way. Without this, the second
-	 * delivery would start a duplicate runner against the same worktree.
+	 * The polling ingress re-reads an inclusive `--since` window, and a workflow
+	 * can be installed on a channel more than once, so the same event can arrive
+	 * twice. Without this, the second delivery would start a duplicate runner
+	 * against the same worktree.
+	 *
+	 * Suppression is one-way and in-memory on purpose. Nothing here may be the
+	 * *only* record that a human answered something: a delivery id burnt against
+	 * a prompt that was not yet armed would otherwise make the answer
+	 * unrepeatable. Reactions are therefore reconciled from the relay's whole
+	 * current set rather than delivered once — see `BuzzPollingSource` — and a
+	 * restart, which empties this, is a recovery path rather than a hazard.
 	 */
 	private isDuplicate(deliveryId: string): boolean {
 		if (this.seenDeliveries.has(deliveryId)) return true;

@@ -178,7 +178,7 @@ export class EdgeWorker extends EventEmitter {
 	private buzzSessionCoordinator: BuzzSessionCoordinator | null = null; // Buzz trigger -> session
 	private buzzCliClient: BuzzCliClient | null = null; // Shell-out wrapper over the `buzz` binary
 	private buzzActivitySinks: Map<string, IActivitySink> = new Map(); // Maps Buzz channel ID to its thread-posting sink
-	private buzzPollingSource: BuzzPollingSource | null = null; // Relay poller, for deployments with no public ingress
+	private buzzPollingSource: BuzzPollingSource | null = null; // Relay poller: whole ingress with no public endpoint, reactions only alongside the webhook
 	private buzzApprovals: BuzzApprovalRegistry | null = null; // Gate + question prompts awaiting a human
 	private buzzQuestionHandler: BuzzQuestionHandler | null = null; // AskUserQuestion, asked in a Buzz thread
 	private buzzProjection: BuzzLinearProjection | null = null; // Buzz work recorded as unassigned Linear issues
@@ -1287,6 +1287,29 @@ export class EdgeWorker extends EventEmitter {
 		});
 
 		this.buzzEventTransport.register();
+
+		// Messages arrive over HTTP; reactions cannot. buzz-workflow's `author` for
+		// a kind-7 is an unauthenticated `actor` tag, so a reaction webhook would
+		// let any channel member name an allowlisted pubkey and release an
+		// execution gate — and with no retry on `call_webhook` and a relay that
+		// refuses a re-sent identical kind-7, a single lost POST would wedge that
+		// gate forever. The relay's reaction set is authoritative and re-read
+		// whole, so it is reconciled here too. Scoped to the event ids an open
+		// prompt is waiting on, which is almost always none.
+		this.buzzPollingSource = new BuzzPollingSource({
+			logger: this.logger,
+			client: this.buzzCliClient,
+			approvals: this.buzzApprovals,
+			// Reaction reconciliation is scoped by open prompt, not by channel.
+			getChannelIds: () => [],
+			isCatchAllRouted: () => false,
+			getAllowedPubkeys: () => this.config.buzz?.allowedPubkeys ?? [],
+			getSelfPubkey: () => this.config.buzz?.selfPubkey,
+			onEvent: dispatch,
+			intervalMs: (buzz.pollIntervalSeconds ?? 5) * 1000,
+			reactionsOnly: true,
+		});
+		this.buzzPollingSource.start();
 
 		this.logger.info(
 			`Buzz event transport registered (${buzz.channels?.length ?? 0} channel route(s))`,
