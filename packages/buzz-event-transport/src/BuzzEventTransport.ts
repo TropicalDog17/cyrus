@@ -50,8 +50,11 @@ export declare interface BuzzEventTransport {
  *    permitted to spend agent sessions. Buzz channels can be open, so channel
  *    membership is not an authorization signal.
  *
- * See `workflows/cyrus-trigger.yaml` for the workflow definition that produces
- * the request body this transport parses.
+ * See `workflows/` for the workflow definitions that produce the request bodies
+ * this transport parses. There are two, because a buzz-workflow declares
+ * exactly one trigger: `cyrus-trigger.yaml` (`message_posted`) and
+ * `cyrus-reaction.yaml` (`reaction_added`). Both must be installed on a channel
+ * or reactions never arrive and an execution gate can never be released.
  *
  * Like `GitHubEventTransport`, this class satisfies `IAgentEventTransport`
  * structurally (`register` / `on` / `removeAllListeners`) but does not declare
@@ -96,7 +99,7 @@ export class BuzzEventTransport extends EventEmitter {
 
 		if (!this.config.secret) {
 			this.logger.warn(
-				"Registered POST /buzz-webhook with no secret configured — every request will be rejected. Set buzz.webhookSecret to enable it.",
+				"Registered POST /buzz-webhook with no secret configured — every request will be rejected. Set CYRUS_BUZZ_WEBHOOK_SECRET in ~/.cyrus/.env to enable it.",
 			);
 			return;
 		}

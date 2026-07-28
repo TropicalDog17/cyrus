@@ -73,6 +73,9 @@ whose failure mode is the bug it would fix); and a WIP cap of 3 across threads, 
   at-least-once. `teamKeys` becomes a hard prerequisite of any repository hosting a
   thread, and the prompt-text link fails silently: units left non-terminal, `Done`
   reachable only by name.
+
+  > **Amended by PR 16:** a second workflow file (`cyrus-reaction.yaml`) delivers
+  > `reaction_added`, so webhook ingress can release a gate; both files must be installed.
 - Also corrected from 0013: authz is not "a pubkey allowlist enforced in the transport
   through the existing `UserAccessControl` seam" but two independent plain allowlists,
   one per ingress, neither touching that seam; nor is Linear ingress demotable.

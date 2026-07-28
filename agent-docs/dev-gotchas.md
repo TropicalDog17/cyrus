@@ -362,6 +362,28 @@ Two related traps in the same executor:
 - `call_webhook` sets **no** `Content-Type` unless you list it under `headers:`,
   and sends no body at all when `body:` is omitted.
 
+## One buzz-workflow file declares exactly one trigger
+
+`TriggerDef` in `crates/buzz-workflow/src/schema.rs` is a serde
+**internally-tagged** enum on `on:`, so a workflow carries a single trigger
+event — there is no list, and adding a second `on:` key silently loses one.
+Messages and reactions therefore need **two** files, which is why
+`packages/buzz-event-transport/workflows/` ships `cyrus-trigger.yaml`
+(`message_posted`) and `cyrus-reaction.yaml` (`reaction_added`).
+
+The failure this causes is quiet. Under `ingress: "webhook"`, a channel with
+only `cyrus-trigger.yaml` installed delivers messages perfectly and drops every
+reaction, so an execution gate can never be released and the symptom reads as
+"the agent ignores my ▶️" rather than as a missing workflow. Nothing on either
+side logs it: the reaction simply never becomes an HTTP request.
+
+**Rule:** install both files on every channel, and treat the pair as one unit
+when editing — the URL and the `Authorization` secret have to be set twice.
+`reaction_added` is also the one trigger whose body interpolates a non-id-shaped
+value (`{{trigger.emoji}}`), so the no-JSON-escaping trap above applies to it:
+a reaction whose content holds a `"` or a `\` yields invalid JSON and is dropped
+with a 400. Cyrus's own gate and option emojis are JSON-safe by construction.
+
 ## Buzz: the binary is `buzz`, not `buzz-cli`
 
 The crate is `buzz-cli`; the binary it produces is `buzz`

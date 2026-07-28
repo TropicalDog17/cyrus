@@ -642,6 +642,44 @@ Defaults to `true` (on when omitted). Set `false` to opt out. The footer is also
 
 ---
 
+## Buzz
+
+Buzz is a Nostr-backed chat platform Cyrus can be talked to in directly. It is
+opt-in: without a `buzz` block Cyrus never touches it.
+
+```json
+{
+  "buzz": {
+    "cliPath": "~/buzz/target/release/buzz",
+    "relayUrl": "https://buzz.example.com",
+    "selfPubkey": "<cyrus's 64-hex nostr pubkey>",
+    "allowedPubkeys": ["<64-hex pubkey>"],
+    "ingress": "poll",
+    "pollIntervalSeconds": 5,
+    "channels": [
+      { "channelId": "<channel-uuid>", "repositoryId": "workspace-123456" }
+    ]
+  }
+}
+```
+
+- `allowedPubkeys` is an allowlist, and an empty or omitted one **denies
+  everyone** — the webhook endpoint is publicly reachable by design.
+- `ingress` defaults to `"poll"`, which needs no inbound exposure. `"webhook"`
+  is lower latency but requires a genuinely public address, and requires
+  installing **both** workflow files from
+  `packages/buzz-event-transport/workflows/` on each channel: a buzz-workflow
+  declares exactly one trigger, so messages and reactions live in separate
+  files, and installing only the first means reactions never arrive.
+- Secrets are **not** in this file. `BUZZ_PRIVATE_KEY`, the optional
+  `BUZZ_AUTH_TAG`, and `CYRUS_BUZZ_WEBHOOK_SECRET` (webhook ingress only) go in
+  `~/.cyrus/.env`.
+
+Full setup — channel routing, the execution gate, the Linear projection and
+troubleshooting — is in [docs/buzz.md](buzz.md).
+
+---
+
 ## Tool Configuration Priority
 
 When determining allowed tools, Cyrus follows this priority order:

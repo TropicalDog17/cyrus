@@ -173,12 +173,17 @@ docker exec <relay-container> getent hosts <your-cyrus-host>
 If that prints a `100.64–100.127` address, use `poll`.
 
 Ingress is a `buzz-workflow` that POSTs to Cyrus. Start from the canonical
-definition, which is kept in lockstep with the parser:
+definitions, which are kept in lockstep with the parser. There are **two, and
+both must be installed on every channel**: a buzz-workflow declares exactly one
+trigger, so messages and reactions cannot share a file. With only
+`cyrus-trigger.yaml` installed, Cyrus never sees a reaction and an execution
+gate can never be released — the agent appears to ignore your ▶️.
 
 ```bash
 cd packages/buzz-event-transport/workflows
-# edit cyrus-trigger.yaml: set the URL and the Authorization secret
+# edit both files: set the URL and the Authorization secret
 buzz workflows create --channel <CHANNEL_UUID> --yaml - < cyrus-trigger.yaml
+buzz workflows create --channel <CHANNEL_UUID> --yaml - < cyrus-reaction.yaml
 ```
 
 Constraints buzz-workflow imposes on the target: it must be **public HTTPS**,
@@ -248,6 +253,7 @@ anything that matters: a Linear outage must not stall or fail a Buzz session.
 | Messages accepted but nothing happens | Author's pubkey is not in `allowedPubkeys` (the endpoint answers 202 and drops), or the channel has no route. |
 | Agent starts but never replies | `BUZZ_PRIVATE_KEY`'s account is not a member of the channel — check the logged relay rejection. |
 | Agent answers but never edits anything | The thread is still in triage; react ▶️ on the gate message. |
+| Messages work but reactions are ignored | Under `ingress: "webhook"`, only `cyrus-trigger.yaml` was installed — `cyrus-reaction.yaml` carries the `reaction_added` trigger and is a separate workflow. |
 | Cyrus replies to itself in a loop | `selfPubkey` is unset or wrong under `ingress: "poll"`. |
 | No Linear issue appears | The repository has no `teamKeys`, or no `linearWorkspaceId`. Check the logged warning. |
 | Cyrus keeps asking which repository | The channel resolves to several repositories and the answer matched none of them. |

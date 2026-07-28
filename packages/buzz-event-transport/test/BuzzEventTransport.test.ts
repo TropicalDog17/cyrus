@@ -4,12 +4,20 @@ import type {
 	BuzzEventTransportConfig,
 	BuzzWebhookEvent,
 } from "../src/types.js";
+import { renderWorkflowBody } from "./workflow-fixtures.js";
 
 const SECRET = "buzz-shared-secret";
 const ALLOWED_PUBKEY = "a".repeat(64);
 const STRANGER_PUBKEY = "b".repeat(64);
 const MESSAGE_ID = "c".repeat(64);
 const CHANNEL_ID = "6f1a2b3c-0000-4000-8000-000000000001";
+/**
+ * The kind-7 reaction's own event id. buzz-workflow never templates it for a
+ * `reaction_added` trigger — it resolves the NIP-25 `e` tag first — and it must
+ * never reach the transport, because the open-prompt registry is keyed by the
+ * *target* message and would silently match nothing.
+ */
+const REACTION_EVENT_ID = "d".repeat(64);
 
 function createMockFastify() {
 	const routes: Record<
@@ -102,14 +110,58 @@ describe("BuzzEventTransport", () => {
 		]);
 	});
 
-	it("carries the emoji and a distinct delivery id for reactions", async () => {
-		await post(messagePostedBody({ type: "reaction_added", emoji: "▶️" }));
-
-		expect(events[0]).toMatchObject({
-			eventType: "reaction_added",
+	// Round-trips the shipped `cyrus-reaction.yaml` body: this is the only path
+	// by which a webhook ingress can release an execution gate, so the workflow
+	// template and this parser have to agree field for field.
+	it("round-trips the reaction workflow body into an event on the target message", async () => {
+		const body = renderWorkflowBody("cyrus-reaction.yaml", {
+			message_id: MESSAGE_ID,
+			channel_id: CHANNEL_ID,
+			author: ALLOWED_PUBKEY,
+			timestamp: "1753500000",
 			emoji: "▶️",
-			deliveryId: `reaction_added:${MESSAGE_ID}:▶️`,
 		});
+
+		const reply = await post(body);
+
+		expect(reply.code).toHaveBeenCalledWith(200);
+		expect(events).toEqual([
+			{
+				eventType: "reaction_added",
+				messageId: MESSAGE_ID,
+				channelId: CHANNEL_ID,
+				authorPubkey: ALLOWED_PUBKEY,
+				timestamp: "1753500000",
+				emoji: "▶️",
+				deliveryId: `reaction_added:${MESSAGE_ID}:▶️`,
+			},
+		]);
+		expect(events[0]?.messageId).not.toBe(REACTION_EVENT_ID);
+	});
+
+	// Same for the message trigger — the two bodies differ only by `emoji`, and
+	// a copy-paste slip between the files would otherwise go unnoticed.
+	it("round-trips the message workflow body into an event", async () => {
+		const body = renderWorkflowBody("cyrus-trigger.yaml", {
+			message_id: MESSAGE_ID,
+			channel_id: CHANNEL_ID,
+			author: ALLOWED_PUBKEY,
+			timestamp: "1753500000",
+		});
+
+		const reply = await post(body);
+
+		expect(reply.code).toHaveBeenCalledWith(200);
+		expect(events).toEqual([
+			{
+				eventType: "message_posted",
+				messageId: MESSAGE_ID,
+				channelId: CHANNEL_ID,
+				authorPubkey: ALLOWED_PUBKEY,
+				timestamp: "1753500000",
+				deliveryId: `message_posted:${MESSAGE_ID}:`,
+			},
+		]);
 	});
 
 	it("rejects a request with no Authorization header", async () => {

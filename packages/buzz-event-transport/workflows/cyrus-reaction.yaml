@@ -1,0 +1,54 @@
+# Canonical buzz-workflow definition that delivers reactions to Cyrus.
+#
+# Install with:
+#   buzz workflows create --channel <CHANNEL_UUID> --yaml - < cyrus-reaction.yaml
+#
+# WHY THIS IS A SEPARATE FILE
+# ---------------------------
+# buzz-workflow's `TriggerDef` is a serde internally-tagged enum on `on:`, so a
+# workflow declares exactly one trigger event. `cyrus-trigger.yaml` declares
+# `message_posted` and therefore cannot also carry `reaction_added`. Under
+# `ingress: "webhook"` both files must be installed on the channel: with only
+# the first one, a reaction never reaches Cyrus and an execution gate can never
+# be released — which looks like the agent ignoring you.
+#
+# The body follows the same id-shaped rule as `cyrus-trigger.yaml` (see its
+# header for why), with one addition. `{{trigger.emoji}}` is the reaction's
+# kind-7 content, and `resolve_template` substitutes it raw and unescaped like
+# everything else. A reaction whose content carries a `"` or a `\` therefore
+# produces invalid JSON, Fastify answers 400, and the delivery is dropped —
+# a drop, never an injection. Cyrus's own gate and option emojis
+# (▶️ 📝 1⃣ 2⃣ 3⃣ 4⃣) are JSON-safe by construction, so the hazard is confined
+# to reactions Cyrus does not act on anyway.
+#
+# For `reaction_added`, `{{trigger.message_id}}` is the *target* message
+# resolved from the NIP-25 `e` tag, not the reaction event — that target id is
+# the key Cyrus's open-prompt registry is indexed by.
+#
+# The Authorization header must match the CYRUS_BUZZ_WEBHOOK_SECRET environment
+# variable in ~/.cyrus/.env. buzz-workflow refuses non-public and non-HTTPS
+# targets and does not follow redirects, so CYRUS_BASE_URL has to be the real
+# public tunnel URL.
+
+name: cyrus-reaction
+description: Forward Buzz channel reactions to Cyrus
+
+trigger:
+  on: reaction_added
+
+steps:
+  - id: notify-cyrus
+    name: POST the reaction to Cyrus
+    action: call_webhook
+    url: https://REPLACE_WITH_CYRUS_PUBLIC_URL/buzz-webhook
+    method: POST
+    headers:
+      Content-Type: application/json
+      Authorization: Bearer REPLACE_WITH_BUZZ_WEBHOOK_SECRET
+    body: >-
+      {"type":"reaction_added",
+      "message_id":"{{trigger.message_id}}",
+      "channel_id":"{{trigger.channel_id}}",
+      "author":"{{trigger.author}}",
+      "timestamp":"{{trigger.timestamp}}",
+      "emoji":"{{trigger.emoji}}"}
