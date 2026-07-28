@@ -527,6 +527,34 @@ export class BuzzSessionCoordinator {
 			.map(([repositoryId]) => repositoryId);
 	}
 
+	/**
+	 * Candidates ordered most recently worked on first, config order behind them.
+	 *
+	 * The repository someone last worked in is overwhelmingly the one they mean
+	 * next, and only the first {@link OPTION_EMOJI}`.length` candidates get an
+	 * option at all — so this decides which repositories are offered, not just
+	 * the order they are listed in.
+	 *
+	 * The order survives a restart without being persisted separately: it is
+	 * derived from the hydrated threads' `lastUsedAt`, the same values
+	 * `buzz.repoMru` is written from. A repository whose threads were all parked
+	 * is unconfigured, so it is never a candidate here either.
+	 */
+	private mruFirst(candidates: RepositoryConfig[]): RepositoryConfig[] {
+		const mru = this.repoMru();
+		if (mru.length === 0) return candidates;
+
+		// Never Infinity: `Infinity - Infinity` is NaN, which makes the comparator
+		// incoherent and the resulting order arbitrary.
+		const rank = (repository: RepositoryConfig): number => {
+			const index = mru.indexOf(repository.id);
+			return index === -1 ? mru.length : index;
+		};
+
+		// Sort is stable, so repositories nobody has used keep their config order.
+		return [...candidates].sort((a, b) => rank(a) - rank(b));
+	}
+
 	async handleEvent(event: BuzzWebhookEvent): Promise<void> {
 		const { logger } = this.deps;
 
@@ -1307,6 +1335,9 @@ export class BuzzSessionCoordinator {
 	 * advance — is deliberately allowed to reach several repositories. Guessing
 	 * would mean creating a worktree and reading the wrong codebase, which is
 	 * slower and more confusing than a single question.
+	 *
+	 * The options are ordered most recently worked on first ({@link mruFirst}),
+	 * and the question is asked with no timeout — see the `register` call.
 	 */
 	private async chooseRepository(
 		event: BuzzWebhookEvent,
@@ -1323,7 +1354,7 @@ export class BuzzSessionCoordinator {
 		}
 		if (candidates.length === 1) return candidates[0];
 
-		const options = candidates
+		const options = this.mruFirst(candidates)
 			.slice(0, OPTION_EMOJI.length)
 			.map((repository, index) => ({
 				// biome-ignore lint/style/noNonNullAssertion: index is bounded by the slice
@@ -1362,6 +1393,11 @@ export class BuzzSessionCoordinator {
 			}
 		}
 
+		// Deliberately no `timeoutMs`: the registry arms a timer only when one is
+		// given, and a timeout here would pick a repository nobody chose — a
+		// worktree and a branch in the wrong codebase. Waiting is not silent, the
+		// question is a message sitting in the thread, and a restart while it is
+		// pending says so out loud (see `resumePrompt`).
 		const resolution = await this.deps.approvals.register({
 			eventId,
 			channelId: event.channelId,
