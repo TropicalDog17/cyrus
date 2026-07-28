@@ -1551,18 +1551,26 @@ export class EdgeWorker extends EventEmitter {
 			// them (see the "One branch cannot be in two worktrees" gotcha). Asked
 			// before the workspace is resolved, because the multi-repo path below skips
 			// `createGitHubWorkspace` and shares a tree just as readily.
+			//
+			// Every gated response is routed, review or plain @mention, because the
+			// collision is git's and does not care which webhook arrived. What the
+			// thread is *told* does differ: a review is change-request feedback that
+			// ends in a push, while a mention on a PR is usually a question — and one
+			// asked somewhere this path cannot reply to, since the Buzz sink writes to
+			// Nostr and `postGitHubReply` lives only on the `PR-<n>` path.
 			const routedIntoBuzz =
 				await this.buzzSessionCoordinator?.routePullRequestReview({
 					repositoryId: repository.id,
 					branchName: branchRef,
-					prompt: this.promptAssembler.buildBuzzPullRequestReviewPrompt({
+					prompt: this.promptAssembler.buildBuzzPullRequestPrompt({
+						kind: isPullRequestReview ? "review" : "comment",
 						repoFullName,
 						prNumber,
 						prTitle,
 						commentAuthor,
 						commentUrl,
 						branchRef,
-						reviewBody: taskInstructions,
+						body: taskInstructions,
 					}),
 				});
 			if (routedIntoBuzz) return;

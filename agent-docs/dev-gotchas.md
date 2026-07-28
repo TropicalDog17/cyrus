@@ -499,7 +499,19 @@ Both halves are load-bearing — the ask has to come before the multi-repo branc
 too, which shares a tree without calling `createGitHubWorkspace` at all — and
 the routed turn goes through `startBuzzSession` in the *thread's* phase, not
 the resume path, which would re-derive write access for a thread still in
-triage. Enforced by `EdgeWorker.buzz-pr-review.test.ts`.
+triage.
+
+Route *every* gated response, review or plain @mention: the collision is git's
+and does not care which webhook arrived. But do not describe them the same way.
+`buildBuzzPullRequestPrompt` takes a `kind`, because a `pull_request_review` is
+change-request feedback that ends in a push while an `issue_comment` mention is
+usually a question — told it is a review, the agent commits and pushes for
+someone who asked what the test coverage was. The mention case also needs the
+answer put back on the pull request explicitly (`gh pr comment`): the routed path
+never reaches `postGitHubReply`, that call lives only in
+`SessionOrchestrator.startGitHubSession`, and `BuzzActivitySink` writes to Nostr
+— so otherwise the person who asked on GitHub receives nothing at all there.
+Enforced by `EdgeWorker.buzz-pr-review.test.ts`.
 
 ## A deleted local branch sends a PR session to a tree with none of its commits
 

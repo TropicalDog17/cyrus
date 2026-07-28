@@ -104,6 +104,58 @@ Please widen the mutex to cover the setup script too.
 - Commit and push to that branch when you are done
 - Summarise what you changed; your reply goes back into this chat thread`;
 
+/**
+ * The mention turn, in full. A question is not change-request feedback, and the
+ * thread has no way to answer on GitHub by itself.
+ */
+const COMMENT_TURN = `Someone has replied to you on the pull request for the work in this thread.
+
+## Context
+- **Repository**: testorg/my-repo
+- **PR**: #42 - Serialize worktree setup
+- **Branch**: ${THREAD_BRANCH}, already checked out in the worktree you are running in
+- **From**: @asker
+- **Comment URL**: https://github.com/testorg/my-repo/pull/42#issuecomment-909
+
+## Comment
+what is the test coverage here?
+
+## Instructions
+- Answer what was asked. Change code only if the comment asks for one, and then only on \`${THREAD_BRANCH}\` — do not create another branch or worktree
+- Post your answer on the pull request with \`gh pr comment 42 --body '<your answer>'\`: they asked there, and this chat thread is not visible to them
+- Summarise what you did; your reply also goes back into this chat thread`;
+
+/** An `issue_comment` @mentioning Cyrus on the PR. */
+function mentionEvent(): Record<string, unknown> {
+	return {
+		eventType: "issue_comment",
+		deliveryId: "delivery-issue-comment-001",
+		payload: {
+			action: "created",
+			comment: {
+				id: 909,
+				body: "@cyrusagent what is the test coverage here?",
+				html_url: "https://github.com/testorg/my-repo/pull/42#issuecomment-909",
+				user: { login: "asker" },
+			},
+			issue: {
+				number: 42,
+				title: "Serialize worktree setup",
+				pull_request: {
+					url: "https://api.github.com/repos/testorg/my-repo/pulls/42",
+				},
+			},
+			repository: {
+				full_name: "testorg/my-repo",
+				name: "my-repo",
+				owner: { login: "testorg" },
+			},
+			sender: { login: "asker" },
+			installation: { id: 55555, node_id: "MDIzOk" },
+		},
+	};
+}
+
 /** A `pull_request_review` requesting changes on the given head branch. */
 function reviewEvent(headRef: string): Record<string, unknown> {
 	return {
@@ -256,6 +308,28 @@ describe("EdgeWorker routes a PR review into its Buzz thread", () => {
 		// registered, normalized (its optional path fields present as `undefined`).
 		expect(repository).toEqual(REPOSITORY);
 		expect(activitySink).toBeInstanceOf(BuzzActivitySink);
+	});
+
+	// An @mention on the PR is routed for the same reason a review is — the
+	// worktree collision is git's and does not care which webhook arrived — but
+	// it is not change-request feedback. Presented as one, a question gets
+	// answered with a commit and a push nobody asked for. And the answer has to
+	// be put back on the pull request explicitly: `BuzzActivitySink` writes to
+	// Nostr, and `postGitHubReply` lives only on the `PR-<n>` path, so without
+	// that instruction the person who asked never hears anything.
+	it("routes an @mention on the PR as a question, not as review feedback", async () => {
+		worker.fetchPRBranchRefs = vi
+			.fn()
+			.mockResolvedValue({ headRef: THREAD_BRANCH, baseRef: "main" });
+
+		await worker.handleGitHubWebhook(mentionEvent());
+
+		expect(createGitHubWorkspace.mock.calls).toEqual([]);
+		expect(startGitHubSession.mock.calls).toEqual([]);
+		expect(startBuzzSession).toHaveBeenCalledTimes(1);
+		expect(startBuzzSession.mock.calls[0][0].taskInstructions).toBe(
+			`${CYRUS_SCOPE}\n\n${COMMENT_TURN}`,
+		);
 	});
 
 	it("leaves a PR on any other branch to the PR path", async () => {
