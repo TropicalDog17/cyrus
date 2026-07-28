@@ -213,8 +213,7 @@ describe("EdgeWorker Buzz wiring", () => {
 		process.env.CYRUS_BUZZ_WEBHOOK_SECRET = "shared-secret";
 		try {
 			const webhookConfig = config([repository("repo-1", "cyrus", ["DEV"])]);
-			// biome-ignore lint/style/noNonNullAssertion: the fixture always sets it
-			webhookConfig.buzz!.ingress = "webhook";
+			Object.assign(webhookConfig.buzz ?? {}, { ingress: "webhook" });
 
 			registerBuzz(webhookConfig, logger);
 		} finally {
