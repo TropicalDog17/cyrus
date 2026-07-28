@@ -13,6 +13,7 @@ import type {
 	SkillsPluginResolver,
 } from "../SkillsPluginResolver.js";
 import type {
+	BuzzPullRequestPromptInput,
 	GitHubChangeRequestSystemPromptInput,
 	GitHubSystemPromptInput,
 	IssueContextResult,
@@ -490,5 +491,79 @@ ${reviewBody}
 - **Review URL**: ${commentUrl}
 
 ${taskSection}`;
+	}
+
+	/**
+	 * Build the turn a Buzz thread runs when someone responds on a pull request
+	 * opened from one of its branches.
+	 *
+	 * Unlike {@link buildGitHubChangeRequestSystemPrompt} this is the message
+	 * itself, not a system prompt: a Buzz turn is started without one, so
+	 * everything the run needs is here. It addresses a conversation that already
+	 * knows the work — the branch is the one the thread has been writing to and
+	 * the worktree is the one it has been running in, which is why the response is
+	 * routed here instead of into a session of its own.
+	 *
+	 * Both kinds of response are routed, because the hazard being avoided is
+	 * git's: a `PR-<n>` session for a branch a thread already holds silently
+	 * shares its worktree. But they are not the same turn. A review requests
+	 * changes and ends in a push. A comment that merely @mentions Cyrus is
+	 * usually a question, and it arrived somewhere this thread cannot answer —
+	 * `BuzzActivitySink` writes to Nostr, and the routed path never reaches
+	 * `postGitHubReply` — so the answer has to be put back on the pull request
+	 * explicitly or the person who asked never receives one.
+	 */
+	buildBuzzPullRequestPrompt(input: BuzzPullRequestPromptInput): string {
+		const {
+			kind,
+			repoFullName,
+			prNumber,
+			prTitle,
+			commentAuthor,
+			commentUrl,
+			branchRef,
+			body,
+		} = input;
+
+		const context = [
+			"## Context",
+			`- **Repository**: ${repoFullName}`,
+			`- **PR**: #${prNumber} - ${prTitle || "Untitled"}`,
+			`- **Branch**: ${branchRef}, already checked out in the worktree you are running in`,
+		].join("\n");
+
+		if (kind === "comment") {
+			return `Someone has replied to you on the pull request for the work in this thread.
+
+${context}
+- **From**: @${commentAuthor}
+- **Comment URL**: ${commentUrl}
+
+## Comment
+${body.trim() || "The comment had no text beyond the mention."}
+
+## Instructions
+- Answer what was asked. Change code only if the comment asks for one, and then only on \`${branchRef}\` — do not create another branch or worktree
+- Post your answer on the pull request with \`gh pr comment ${prNumber} --body '<your answer>'\`: they asked there, and this chat thread is not visible to them
+- Summarise what you did; your reply also goes back into this chat thread`;
+		}
+
+		const feedback =
+			body.trim() ||
+			`The reviewer left no summary. Read the review comments with \`gh api repos/${repoFullName}/pulls/${prNumber}/reviews\`.`;
+
+		return `A reviewer has responded to the pull request for the work in this thread.
+
+${context}
+- **Reviewer**: @${commentAuthor}
+- **Review URL**: ${commentUrl}
+
+## Reviewer feedback
+${feedback}
+
+## Instructions
+- Address the feedback on \`${branchRef}\` — do not create another branch or worktree
+- Commit and push to that branch when you are done
+- Summarise what you changed; your reply goes back into this chat thread`;
 	}
 }

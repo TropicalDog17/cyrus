@@ -169,3 +169,25 @@ export interface GitHubChangeRequestSystemPromptInput {
 	branchRef: string;
 	reviewBody: string;
 }
+
+/**
+ * Input for the turn a Buzz thread runs when someone responds on a pull request
+ * opened from one of its branches.
+ */
+export interface BuzzPullRequestPromptInput {
+	/**
+	 * What arrived. A `pull_request_review` is change-request feedback and ends
+	 * in a commit; an `issue_comment` that @mentions Cyrus is usually a question,
+	 * and answering it with "commit and push" would be a fabrication. The two
+	 * also differ in where the answer has to go — see the prompt.
+	 */
+	kind: "review" | "comment";
+	repoFullName: string;
+	prNumber: number | null;
+	prTitle: string | null;
+	commentAuthor: string;
+	commentUrl: string;
+	branchRef: string;
+	/** The review body, or the comment text with the mention already stripped. */
+	body: string;
+}

@@ -25,6 +25,15 @@ export interface BuzzPollingSourceDeps {
 	getSelfPubkey(): string | undefined;
 	onEvent(event: BuzzWebhookEvent): void;
 	intervalMs: number;
+	/**
+	 * Poll reactions only, leaving messages to the webhook transport.
+	 *
+	 * The webhook ingress carries messages perfectly well and cannot carry
+	 * reactions at all, so a webhook deployment runs this source purely to
+	 * reconcile what humans have reacted with. It costs one relay round trip per
+	 * *open prompt* per tick, which is almost always none.
+	 */
+	reactionsOnly?: boolean;
 }
 
 /** Poll no faster than this — each tick is one relay round trip per channel. */
@@ -77,6 +86,20 @@ const MAX_SEEN_REACTIONS = 500;
  *
  * Both paths emit the same {@link BuzzWebhookEvent}, so everything downstream —
  * dedupe, routing, the gate — is identical regardless of how the event arrived.
+ *
+ * REACTIONS ARE ALWAYS POLLED
+ * ---------------------------
+ * `buzz.ingress` chooses how *messages* arrive; reactions arrive here either
+ * way. A reaction cannot be delivered by webhook at all — buzz-workflow's
+ * `author` for a kind-7 comes from an unauthenticated `actor` tag, so an
+ * execution gate would be releasable by whichever pubkey the caller named — and
+ * it could not be relied on if it were: there is no retry for `call_webhook`,
+ * and the relay refuses a re-sent identical kind-7 as a duplicate, so one lost
+ * POST wedges a gate forever. `reactions get` returns the relay's *current* set,
+ * keyed by the real reactor, which makes re-reading it both authoritative and
+ * self-healing: the ▶️ a human pressed during a deploy is simply found on the
+ * next tick. A webhook deployment therefore also runs this source, with
+ * {@link BuzzPollingSourceDeps.reactionsOnly}.
  */
 export class BuzzPollingSource {
 	private readonly deps: BuzzPollingSourceDeps;
@@ -110,7 +133,9 @@ export class BuzzPollingSource {
 		this.timer.unref?.();
 
 		this.deps.logger.info(
-			`Buzz polling ingress started (every ${this.intervalMs}ms, ${this.deps.getChannelIds().length} channel(s))`,
+			this.deps.reactionsOnly
+				? `Buzz reaction reconciler started (every ${this.intervalMs}ms)`
+				: `Buzz polling ingress started (every ${this.intervalMs}ms, ${this.deps.getChannelIds().length} channel(s))`,
 		);
 	}
 
@@ -131,8 +156,10 @@ export class BuzzPollingSource {
 		if (this.ticking) return;
 		this.ticking = true;
 		try {
-			await this.discoverChannels();
-			await this.pollMessages();
+			if (!this.deps.reactionsOnly) {
+				await this.discoverChannels();
+				await this.pollMessages();
+			}
 			await this.pollReactions();
 		} catch (error) {
 			this.deps.logger.error(

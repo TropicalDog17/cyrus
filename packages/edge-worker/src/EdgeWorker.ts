@@ -178,7 +178,7 @@ export class EdgeWorker extends EventEmitter {
 	private buzzSessionCoordinator: BuzzSessionCoordinator | null = null; // Buzz trigger -> session
 	private buzzCliClient: BuzzCliClient | null = null; // Shell-out wrapper over the `buzz` binary
 	private buzzActivitySinks: Map<string, IActivitySink> = new Map(); // Maps Buzz channel ID to its thread-posting sink
-	private buzzPollingSource: BuzzPollingSource | null = null; // Relay poller, for deployments with no public ingress
+	private buzzPollingSource: BuzzPollingSource | null = null; // Relay poller: whole ingress with no public endpoint, reactions only alongside the webhook
 	private buzzApprovals: BuzzApprovalRegistry | null = null; // Gate + question prompts awaiting a human
 	private buzzQuestionHandler: BuzzQuestionHandler | null = null; // AskUserQuestion, asked in a Buzz thread
 	private buzzProjection: BuzzLinearProjection | null = null; // Buzz work recorded as unassigned Linear issues
@@ -1208,6 +1208,7 @@ export class EdgeWorker extends EventEmitter {
 			approvals: this.buzzApprovals,
 			getChannelRoutes: () => this.config.buzz?.channels ?? [],
 			getSelfPubkey: () => this.config.buzz?.selfPubkey,
+			getAllowedPubkeys: () => this.config.buzz?.allowedPubkeys ?? [],
 			getRepositoryById: (repositoryId) => this.repositories.get(repositoryId),
 			saveState: () => this.savePersistedState(),
 			getActivitySinkForChannel: (channelId) =>
@@ -1287,6 +1288,29 @@ export class EdgeWorker extends EventEmitter {
 		});
 
 		this.buzzEventTransport.register();
+
+		// Messages arrive over HTTP; reactions cannot. buzz-workflow's `author` for
+		// a kind-7 is an unauthenticated `actor` tag, so a reaction webhook would
+		// let any channel member name an allowlisted pubkey and release an
+		// execution gate — and with no retry on `call_webhook` and a relay that
+		// refuses a re-sent identical kind-7, a single lost POST would wedge that
+		// gate forever. The relay's reaction set is authoritative and re-read
+		// whole, so it is reconciled here too. Scoped to the event ids an open
+		// prompt is waiting on, which is almost always none.
+		this.buzzPollingSource = new BuzzPollingSource({
+			logger: this.logger,
+			client: this.buzzCliClient,
+			approvals: this.buzzApprovals,
+			// Reaction reconciliation is scoped by open prompt, not by channel.
+			getChannelIds: () => [],
+			isCatchAllRouted: () => false,
+			getAllowedPubkeys: () => this.config.buzz?.allowedPubkeys ?? [],
+			getSelfPubkey: () => this.config.buzz?.selfPubkey,
+			onEvent: dispatch,
+			intervalMs: (buzz.pollIntervalSeconds ?? 5) * 1000,
+			reactionsOnly: true,
+		});
+		this.buzzPollingSource.start();
 
 		this.logger.info(
 			`Buzz event transport registered (${buzz.channels?.length ?? 0} channel route(s))`,
@@ -1519,6 +1543,39 @@ export class EdgeWorker extends EventEmitter {
 					"A reviewer has requested changes on this PR. Read the review comments to understand what needs to be changed."
 				: stripMention(commentBody, mentionHandle);
 
+			const commentUrl = extractCommentUrl(event);
+
+			// A pull request on a branch a Buzz thread holds belongs to that thread,
+			// not to a `PR-<n>` session of its own. Git will not check one branch out
+			// twice, and Cyrus does not fail on that — it hands the second session the
+			// first's worktree, so two agents edit the same files with nothing between
+			// them (see the "One branch cannot be in two worktrees" gotcha). Asked
+			// before the workspace is resolved, because the multi-repo path below skips
+			// `createGitHubWorkspace` and shares a tree just as readily.
+			//
+			// Every gated response is routed, review or plain @mention, because the
+			// collision is git's and does not care which webhook arrived. What the
+			// thread is *told* does differ: a review is change-request feedback that
+			// ends in a push, while a mention on a PR is usually a question — and one
+			// asked somewhere this path cannot reply to, since the Buzz sink writes to
+			// Nostr and `postGitHubReply` lives only on the `PR-<n>` path.
+			const routedIntoBuzz =
+				await this.buzzSessionCoordinator?.routePullRequestReview({
+					repositoryId: repository.id,
+					branchName: branchRef,
+					prompt: this.promptAssembler.buildBuzzPullRequestPrompt({
+						kind: isPullRequestReview ? "review" : "comment",
+						repoFullName,
+						prNumber,
+						prTitle,
+						commentAuthor,
+						commentUrl,
+						branchRef,
+						body: taskInstructions,
+					}),
+				});
+			if (routedIntoBuzz) return;
+
 			// Check for an existing multi-repo session that includes this repository.
 			// If found, use its sub-worktree instead of creating a new workspace.
 			let workspace: { path: string; isGitWorktree: boolean } | null = null;
@@ -1563,7 +1620,6 @@ export class EdgeWorker extends EventEmitter {
 			this.logger.info(`GitHub workspace created at: ${workspace.path}`);
 
 			// Build the system prompt for this GitHub PR session
-			const commentUrl = extractCommentUrl(event);
 			const systemPrompt = isPullRequestReview
 				? this.promptAssembler.buildGitHubChangeRequestSystemPrompt({
 						repoFullName,

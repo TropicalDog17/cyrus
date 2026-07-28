@@ -5,7 +5,6 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import type {
 	BuzzEventTransportConfig,
 	BuzzEventTransportEvents,
-	BuzzEventType,
 	BuzzWebhookEvent,
 	BuzzWorkflowWebhookBody,
 } from "./types.js";
@@ -13,12 +12,14 @@ import type {
 /** 64 lowercase hex characters — a Nostr event id or pubkey. */
 const HEX_64 = /^[0-9a-f]{64}$/;
 
-/**
- * Upper bound on a reaction emoji. Buzz reactions are either a literal emoji
- * character or a `:shortcode:`; anything longer is malformed input, not a
- * reaction we should act on.
- */
-const MAX_EMOJI_LENGTH = 64;
+/** True when a request body claims to be a reaction, however malformed. */
+function isReactionBody(body: unknown): boolean {
+	return (
+		typeof body === "object" &&
+		body !== null &&
+		(body as BuzzWorkflowWebhookBody).type === "reaction_added"
+	);
+}
 
 export declare interface BuzzEventTransport {
 	on<K extends keyof BuzzEventTransportEvents>(
@@ -50,8 +51,11 @@ export declare interface BuzzEventTransport {
  *    permitted to spend agent sessions. Buzz channels can be open, so channel
  *    membership is not an authorization signal.
  *
- * See `workflows/cyrus-trigger.yaml` for the workflow definition that produces
- * the request body this transport parses.
+ * See `workflows/` for the workflow definition that produces the request bodies
+ * this transport parses. There is exactly one — `cyrus-trigger.yaml`, carrying
+ * `message_posted`. Reactions are deliberately **not** accepted over HTTP (see
+ * {@link refuseReaction}); they are reconciled from the relay on both ingresses
+ * by `BuzzPollingSource.pollReactions`.
  *
  * Like `GitHubEventTransport`, this class satisfies `IAgentEventTransport`
  * structurally (`register` / `on` / `removeAllListeners`) but does not declare
@@ -65,6 +69,8 @@ export class BuzzEventTransport extends EventEmitter {
 	private readonly config: BuzzEventTransportConfig;
 	private readonly logger: ILogger;
 	private readonly allowedPubkeys: ReadonlySet<string>;
+	/** Whether the "you installed a reaction workflow" warning has been said. */
+	private warnedAboutReactions = false;
 
 	constructor(config: BuzzEventTransportConfig, logger?: ILogger) {
 		super();
@@ -96,7 +102,7 @@ export class BuzzEventTransport extends EventEmitter {
 
 		if (!this.config.secret) {
 			this.logger.warn(
-				"Registered POST /buzz-webhook with no secret configured — every request will be rejected. Set buzz.webhookSecret to enable it.",
+				"Registered POST /buzz-webhook with no secret configured — every request will be rejected. Set CYRUS_BUZZ_WEBHOOK_SECRET in ~/.cyrus/.env to enable it.",
 			);
 			return;
 		}
@@ -111,6 +117,15 @@ export class BuzzEventTransport extends EventEmitter {
 		reply: FastifyReply,
 	): Promise<void> {
 		if (!this.authorizeRequest(request, reply)) {
+			return;
+		}
+
+		if (isReactionBody(request.body)) {
+			this.refuseReaction();
+			// 202: the workflow is misconfigured, not broken, and a non-2xx would
+			// only fill the relay's delivery log with failures nobody can fix from
+			// that end.
+			reply.code(202).send({ success: true, ignored: true });
 			return;
 		}
 
@@ -137,6 +152,39 @@ export class BuzzEventTransport extends EventEmitter {
 
 		this.emit("event", parsed);
 		reply.code(200).send({ success: true });
+	}
+
+	/**
+	 * Refuse a `reaction_added` delivery, loudly the first time.
+	 *
+	 * A reaction over HTTP carries no *authenticated* author, so nothing here can
+	 * authorize it. buzz-workflow's `build_trigger_context` reads
+	 * `{{trigger.author}}` from an `actor` tag on the kind-7 and only falls back to
+	 * `event.pubkey`; unlike the relay's own `effective_message_author` it never
+	 * requires the event to be relay-signed first. Anyone who can post in the
+	 * channel can therefore name an allowlisted pubkey as the reactor — and the
+	 * allowlist is the only thing between a stranger and an execution gate that
+	 * hands out write tools on Cyrus's branch.
+	 *
+	 * It is undeliverable as well as unauthenticated: buzz-workflow has no retry
+	 * for `call_webhook`, and the relay short-circuits a re-sent identical kind-7
+	 * as a duplicate before dispatch, so a single failed POST — a deploy restart,
+	 * a tunnel 502 — wedges that gate permanently.
+	 *
+	 * Both are properties of the transport rather than of a misconfiguration, so
+	 * reactions are reconciled from the relay's own reaction rows instead, which
+	 * are keyed by the real reactor and re-read in full every tick.
+	 * `BuzzPollingSource` does that on the webhook ingress too, for exactly this.
+	 */
+	private refuseReaction(): void {
+		if (this.warnedAboutReactions) {
+			this.logger.debug("Ignoring a Buzz reaction_added webhook delivery");
+			return;
+		}
+		this.warnedAboutReactions = true;
+		this.logger.warn(
+			"Ignoring reaction_added webhook deliveries: a reaction's author cannot be authenticated over HTTP. Reactions are read from the relay instead, on every ingress — delete the reaction workflow from your Buzz channels (`buzz workflows list` / `buzz workflows delete`).",
+		);
 	}
 
 	/**
@@ -185,7 +233,7 @@ export class BuzzEventTransport extends EventEmitter {
 		const raw = body as BuzzWorkflowWebhookBody;
 
 		const eventType = raw.type;
-		if (eventType !== "message_posted" && eventType !== "reaction_added") {
+		if (eventType !== "message_posted") {
 			this.logger.debug(`Ignoring unsupported Buzz trigger type: ${eventType}`);
 			return null;
 		}
@@ -211,20 +259,13 @@ export class BuzzEventTransport extends EventEmitter {
 			return null;
 		}
 
-		const emoji = raw.emoji?.trim();
-		if (emoji && emoji.length > MAX_EMOJI_LENGTH) {
-			this.logger.debug("Buzz webhook emoji exceeds maximum length");
-			return null;
-		}
-
 		return {
-			eventType: eventType as BuzzEventType,
+			eventType,
 			messageId,
 			channelId,
 			authorPubkey,
 			timestamp,
-			...(emoji ? { emoji } : {}),
-			deliveryId: `${eventType}:${messageId}:${emoji ?? ""}`,
+			deliveryId: `${eventType}:${messageId}:`,
 		};
 	}
 }

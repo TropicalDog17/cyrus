@@ -362,6 +362,67 @@ Two related traps in the same executor:
 - `call_webhook` sets **no** `Content-Type` unless you list it under `headers:`,
   and sends no body at all when `body:` is omitted.
 
+## `{{trigger.author}}` is a claim, not an identity
+
+`build_trigger_context` (`crates/buzz-workflow/src/lib.rs`) takes `author` from
+an **`actor` tag on the event**, falling back to `event.pubkey` only when no
+such tag exists — with no guard on who signed the event. Any channel member can
+publish a message or reaction tagged `["actor", "<an allowlisted pubkey>"]` and
+be delivered to the webhook as that human.
+
+The relay does **not** make this mistake: its own `effective_message_author`
+(`buzz-relay/src/handlers/ingest.rs`) honours `actor` only on events the relay
+itself signed, and attributes everything else to the signing key. So the relay's
+record is the authority and a delivery is only ever a hint about it.
+
+**Rule:** never let `authorPubkey` off a webhook body be the last word on
+authorization. `BuzzSessionCoordinator.handleEvent` re-checks the allowlist
+against `message.pubkey` from the relay record it already fetches, and reactions
+are not accepted over HTTP at all — they are reconciled from the relay on every
+ingress. The transport's own allowlist check stays as a cheap pre-filter, but it
+is not the boundary. Enforced by *"refuses a delivery whose claimed author the
+relay does not confirm"* in `BuzzSessionCoordinator.test.ts`.
+
+## A Buzz reaction can never arrive over the webhook
+
+`TriggerDef` in `crates/buzz-workflow/src/schema.rs` is a serde
+**internally-tagged** enum on `on:`, so a workflow carries one trigger event and
+reactions would need a file of their own. Do not write one.
+`packages/buzz-event-transport/workflows/` ships `cyrus-trigger.yaml`
+(`message_posted`) and nothing else, and `BuzzEventTransport` refuses a
+`reaction_added` body with 202 and a one-shot warning.
+
+Two independent reasons, both in upstream Buzz and neither fixable from here.
+
+**The reactor is unauthenticated.** `build_trigger_context`
+(`crates/buzz-workflow/src/lib.rs`) sets `author` to the content of any tag named
+`actor`, falling back to `event.pubkey`, and checks no signature — unlike the
+relay's own `effective_message_author`, which honours `actor` only when
+`event.pubkey == relay_pubkey`. So a channel member who is *not* in
+`buzz.allowedPubkeys` can sign a ▶️ tagged `["actor", <an allowlisted pubkey>]`,
+the POST arrives with that pubkey as `author`, the allowlist passes, and the
+execution gate hands them write tools on Cyrus's branch. The allowlist is the
+only control there is, and for reactions it is caller-controlled.
+
+**The delivery is at-most-once and unrepeatable.** There is no retry for
+`call_webhook` anywhere in `crates/buzz-workflow`, and the relay short-circuits an
+already-active reaction with `ReactionEventInsertOutcome::Duplicate` *before*
+`dispatch_persistent_event` — so a POST lost to a deploy restart or a tunnel 502
+is gone, and pressing ▶️ again emits nothing at all. The gate then parks forever
+with the human's own ▶️ visible next to it. The boot re-arm in
+`BuzzSessionCoordinator.resumePrompt` and the phase guard in `applyGateDecision`
+are both written against at-least-once delivery, which only the relay read
+provides.
+
+**Rule:** reactions come from `buzz reactions get` — the relay's current set,
+keyed by the real reactor and re-read whole every tick, which makes it both
+authoritative and self-healing. `BuzzPollingSource` runs on the webhook ingress
+too (`reactionsOnly`) for exactly this, scoped to the event ids an open prompt is
+waiting on. The cost of the fix is latency: a ▶️ takes up to
+`pollIntervalSeconds`. Enforced by `workflows.test.ts` (*"ships exactly one
+workflow"*), `BuzzEventTransport.test.ts` (*"refuses a reaction, whoever it
+claims to be from"*) and `EdgeWorker.buzz-wiring.test.ts`.
+
 ## Buzz: the binary is `buzz`, not `buzz-cli`
 
 The crate is `buzz-cli`; the binary it produces is `buzz`
@@ -452,7 +513,137 @@ own work.
 
 **Rule:** do not mint a second session for a branch some session already
 holds — route PR review back into the originating session — and never infer a
-fresh workspace from having asked for one.
+fresh workspace from having asked for one. For Buzz the routing exists:
+`handleGitHubWebhook` asks `BuzzSessionCoordinator.routePullRequestReview`
+before it resolves any workspace, and returns when a thread takes the review.
+Both halves are load-bearing — the ask has to come before the multi-repo branch
+too, which shares a tree without calling `createGitHubWorkspace` at all — and
+the routed turn goes through `startBuzzSession` in the *thread's* phase, not
+the resume path, which would re-derive write access for a thread still in
+triage.
+
+Route *every* gated response, review or plain @mention: the collision is git's
+and does not care which webhook arrived. But do not describe them the same way.
+`buildBuzzPullRequestPrompt` takes a `kind`, because a `pull_request_review` is
+change-request feedback that ends in a push while an `issue_comment` mention is
+usually a question — told it is a review, the agent commits and pushes for
+someone who asked what the test coverage was. The mention case also needs the
+answer put back on the pull request explicitly (`gh pr comment`): the routed path
+never reaches `postGitHubReply`, that call lives only in
+`SessionOrchestrator.startGitHubSession`, and `BuzzActivitySink` writes to Nostr
+— so otherwise the person who asked on GitHub receives nothing at all there.
+Enforced by `EdgeWorker.buzz-pr-review.test.ts`.
+
+## A deleted local branch sends a PR session to a tree with none of its commits
+
+The branch check in `GitService.provisionSingleRepoWorktree` is
+`git rev-parse --verify "<branch>"`, which only sees **local** refs. Delete the
+local branch after pushing — routine tidying, and what a worktree cleanup
+does — and the check misses while the PR's branch is alive on the remote:
+`createBranch` stays true, and the worktree is created from the resolved *base*
+branch. Nothing fails. An agent then reviews a PR in a tree that contains none
+of the PR's commits, reads code that does not match the diff it was sent, and
+"fixes" the review against `main`.
+
+This is the same trace as the entry above and does not share its remedy:
+sharing a worktree needs a branch that exists locally, so a deleted ref skips
+straight past it into a fresh, wrong tree.
+
+**Rule:** when a session must land on an *existing* branch, verify the remote
+ref too (`git ls-remote --heads origin <branch>` / `origin/<branch>`) before
+concluding the branch is new — a local miss is not evidence that a branch does
+not exist.
+
+## A Buzz thread's first work unit has no `-u1` — that absence is the migration
+
+`buzz-unit-identity.ts` mints `BUZZ-xxxxxx-u<n>` for every work unit *except*
+the first, which keeps the thread's own `BUZZ-xxxxxx` key, its branch, its
+worktree and its session id. That asymmetry looks like an oversight and is the
+opposite: it is what lets a thread already live on disk gain a work unit
+without renaming anything. Regularising it to `-u1` compiles, passes a casual
+read, and then provisions a second worktree for a branch a human has checked
+out, strands the first, and splits the thread's agent conversation in two — all
+silently, because `PersistedBuzzThread` has no version to disagree about and
+`unitSessionIdFor` would simply resolve to a session nobody has been talking
+to.
+
+The suffix is also the only encoding of a unit's position: `unitSessionIdFor`
+appends it and `threadSessionIdOf` strips it, so a unit key must never be
+edited by hand or derived from anything but `unitKeyFor`.
+
+Identity includes the *conversation*, which is the half a reviewer's eye slides
+over: `createWorkUnit` copies `agentSessionId` onto the first unit exactly as
+`synthesizeLegacyUnit` does, because `unitExecution` resumes `unit.agentSessionId`
+and nothing else. Mint unit 1 without it and its first turn — the one the gate
+just authorized to write code — starts a *fresh* transcript on the thread's own
+session id, with no memory of the triage exchange it is implementing, after
+which the thread and its own unit alternate between two transcripts over one
+branch. A test whose mock returns one agent id per session cannot see this;
+give each run a distinct id or the assertion is vacuous.
+
+**Rule:** never give the first unit a suffix, and never key a unit's session on
+its index in `workUnits` instead of on its key. Enforced by
+`BuzzSessionCoordinator.units.test.ts`, *"runs the first unit on the identity
+the single-unit path already produced"* and *"runs the first unit as a
+continuation of the thread's own conversation"*.
+
+## A Buzz thread older than work units is re-derived, never migrated
+
+Every thread persisted before the two-tier model carries `workUnits: []` and a
+`program` issue that *is* its single piece of work.
+`BuzzSessionCoordinator.synthesizeLegacyUnit` re-derives that unit — on hydrate
+and again on the unit path — instead of migrating the state file, and
+`PersistedBuzzThread` has no version to hang a migration on anyway.
+
+Three things about it are load-bearing. Its `unitId` is the thread's **session
+id**: changing that mints a second unit for the same branch on the next hydrate,
+because idempotence is decided by `workUnits.length`, not by matching a plan.
+Synthesis is gated on `phase === "execute"` — the gate's *outcome* — and not on
+`program`, because both gate answers project a program issue and only ▶️ promotes
+the thread: a thread the human declined with 📝 persists as `program` +
+`phase: "triage"` and a `program` check cannot tell the two apart. And once a
+legacy unit exists the thread's own branch is taken, so the first plan slice of
+that thread mints `-u2` — `createWorkUnit` derives position from
+`workUnits.length`, which only holds while units are append-only and in plan
+order.
+
+Two things follow from the gate condition, and both are why it is not merely a
+tidier predicate. A declined thread that gained a unit would hand the dependency
+advance runnable, unblocked work somebody explicitly refused, and it would eat
+the unsuffixed first-unit slot so the thread's first *real* slice minted a `-u2`
+branch and worktree, orphaning the ones on disk. And a synthesized unit's `state`
+must be derived from something that can no longer change: `execute` is terminal,
+so the unit is always `finished`. Derive it from a phase still in flight and the
+next `saveState` — `applyGateDecision` saves before it runs the turn — writes a
+snapshot to disk that permanently contradicts the thread it came from, with
+`workUnits.length > 0` guaranteeing nothing ever re-derives it.
+
+**Rule:** never delete, reorder or re-key a persisted work unit, and never make
+synthesis conditional on anything a *newer* build writes — a thread that stops
+running because it predates a refactor fails silently, mid-conversation.
+Enforced by `BuzzSessionCoordinator.legacy-unit.test.ts`.
+
+## Setup scripts hold a process-global, non-reentrant lock
+
+Every setup script `GitService` runs — the per-repo `cyrus-setup.sh` and both
+standalone global-script call sites (0-repo plain workspace, multi-repo parent
+directory) — executes inside `withSetupScriptLock`. The protected resource is
+outside the process: user setup scripts `pnpm install` into the shared pnpm
+global virtual store, and two of those at once corrupt it. So the lock is
+module-level, not per-`GitService` and not per-repository; making it an
+instance field silently restores the corruption for the case that actually
+happens (two issues provisioning at once).
+
+The lock is **not reentrant**. Acquiring it inside `runSetupScript` or
+`runRepoSetupScript` — the obvious "safer, closer to the syscall" move —
+deadlocks the whole process the first time a worktree is created, because
+`runWorktreeSetup` already holds it. Acquire around whole setup phases only.
+Anything under the lock must also release on the throwing path: a user setup
+script failing is routine, and a mutex that never unlocks after one is worse
+than no mutex.
+
+The cost is intended: concurrent worktree provisioning now waits out the other
+worktree's setup script, minutes on a slow `pnpm install`.
 
 ## Buzz thread state is restored late, and a parked gate saves itself
 
@@ -498,6 +689,30 @@ A thread whose repository is not in the config is *parked*, not dropped:
 `serialize()` writes parked records back verbatim. `isActive: false` and a
 CYHOST push that transiently omits a repository are both reversible, and this
 record is the only place the thread's phase, program issue and worktree exist.
+
+The repository question is the one prompt none of that reaches, and the code
+comment there says so rather than claiming otherwise. `chooseRepository` is
+awaited *before* `startThread` — the repository is what the thread is waiting
+for — while `serialize` builds `openPrompt` by walking `threads` /
+`parkedThreads`. So a pending repository question exists in no state file, no
+boot can announce it, and a restart drops it silently, including the case where
+the human had already reacted: the answer is on the relay with nothing registered
+to receive it. Recovery is the human saying the message again. Do not close the
+gap with a `timeoutMs` — a default here provisions a worktree and a branch in a
+repository nobody chose, which is worse than a repeated question. Pinned by
+`BuzzSessionCoordinator.test.ts`, *"persists nothing while the repository
+question is pending"*.
+
+One more ordering rule inside `offerGate` and `chooseRepository`: **register the
+prompt before seeding its reactions.** Seeding is two to four `buzz reactions
+add` subprocesses plus relay round trips, and the message — "React to choose" —
+is already on every client. A reaction that lands before `approvals.register`
+resolves nothing and is logged at debug — and it is never offered again, because
+`BuzzPollingSource` remembers every `<event>:<emoji>:<pubkey>` it has dispatched.
+Re-pressing does not help either: the relay refuses an identical kind-7 with
+`ReactionEventInsertOutcome::Duplicate`, so no new event exists to re-read.
+Enforced by `BuzzSessionCoordinator.test.ts`, *"releases a gate answered while
+its reactions are still being seeded"*.
 
 **Rule:** state owned by a component built in `initializeComponents` is
 restored where that component is constructed, not in `restoreMappings`. And

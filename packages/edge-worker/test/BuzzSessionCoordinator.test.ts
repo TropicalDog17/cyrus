@@ -1,5 +1,9 @@
 import type { BuzzWebhookEvent } from "cyrus-buzz-event-transport";
-import type { ILogger, RepositoryConfig } from "cyrus-core";
+import type {
+	ILogger,
+	PersistedBuzzThread,
+	RepositoryConfig,
+} from "cyrus-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionManager } from "../src/AgentSessionManager.js";
 import { BuzzApprovalRegistry } from "../src/buzz/BuzzApprovalRegistry.js";
@@ -42,6 +46,15 @@ const OTHER_REPOSITORY = {
 	baseBranch: "master",
 	workspaceBaseDir: "/worktrees",
 	projectKeys: ["Honey Automation"],
+} as RepositoryConfig;
+
+const THIRD_REPOSITORY = {
+	id: "repo-3",
+	name: "honeycomb",
+	repositoryPath: "/repos/honeycomb",
+	baseBranch: "main",
+	workspaceBaseDir: "/worktrees",
+	projectKeys: ["Honeycomb"],
 } as RepositoryConfig;
 
 /**
@@ -150,6 +163,7 @@ describe("BuzzSessionCoordinator", () => {
 	let routes: { channelId: string; repositoryId: string }[];
 	let repositories: Record<string, RepositoryConfig | undefined>;
 	let selfPubkey: string | undefined;
+	let allowedPubkeys: string[];
 
 	beforeEach(() => {
 		getEvent = vi.fn().mockResolvedValue(record());
@@ -176,6 +190,7 @@ describe("BuzzSessionCoordinator", () => {
 		routes = [{ channelId: CHANNEL_ID, repositoryId: "repo-1" }];
 		repositories = { "repo-1": REPOSITORY, "repo-2": OTHER_REPOSITORY };
 		selfPubkey = SELF;
+		allowedPubkeys = [AUTHOR];
 
 		coordinator = new BuzzSessionCoordinator({
 			logger,
@@ -194,6 +209,7 @@ describe("BuzzSessionCoordinator", () => {
 			approvals,
 			getChannelRoutes: () => routes,
 			getSelfPubkey: () => selfPubkey,
+			getAllowedPubkeys: () => allowedPubkeys,
 			getRepositoryById: (id) => repositories[id],
 			saveState: vi.fn().mockResolvedValue(undefined),
 			getActivitySinkForChannel: () => ({}) as IActivitySink,
@@ -220,6 +236,36 @@ describe("BuzzSessionCoordinator", () => {
 				taskInstructions: `${CYRUS_SCOPE}\n\nPlease look at the flaky worktree test`,
 			}),
 		);
+	});
+
+	// The delivery's author is `{{trigger.author}}`, which buzz-workflow reads from
+	// an `actor` tag on the event with no guard on who signed it — so a channel
+	// member can be delivered as somebody else. The relay does not make that
+	// mistake, so the record it returns is the one that decides.
+	it("refuses a delivery whose claimed author the relay does not confirm", async () => {
+		const impostor = "7".repeat(64);
+		getEvent.mockResolvedValue(record({ pubkey: impostor }));
+
+		await coordinator.handleEvent(event({ authorPubkey: AUTHOR }));
+		await settle();
+
+		expect(startBuzzSession).not.toHaveBeenCalled();
+		expect(sendMessage).not.toHaveBeenCalled();
+		expect(vi.mocked(logger.warn).mock.calls).toEqual([
+			[
+				`Dropping Buzz message ${ROOT_ID}: relay attributes it to ${impostor}, which is not allowlisted (delivery claimed ${AUTHOR})`,
+			],
+		]);
+	});
+
+	// Same shape, opposite outcome: the allowlist is about the human, not about
+	// which ingress delivered them, so a confirmed author still runs.
+	it("accepts a delivery the relay confirms", async () => {
+		getEvent.mockResolvedValue(record({ pubkey: AUTHOR.toUpperCase() }));
+
+		await coordinator.handleEvent(event());
+
+		expect(startBuzzSession).toHaveBeenCalledTimes(1);
 	});
 
 	// A channel route binds a thread to one repository, but the session still
@@ -326,6 +372,34 @@ describe("BuzzSessionCoordinator", () => {
 			eventId: GATE_ID,
 			emoji: "📝",
 		});
+	});
+
+	// The gate message says "React to choose" and reaches every client the moment
+	// it is posted, while seeding it is two `buzz reactions add` subprocesses and
+	// two relay round trips. A human who taps ▶️ inside that window is doing
+	// exactly what they were told, and the answer must not depend on how long the
+	// seeding took: on the webhook ingress the delivery is unrepeatable — the
+	// relay refuses an identical kind-7 as a duplicate, and the re-add of one the
+	// human removed carries a delivery id `seenDeliveries` already holds.
+	it("releases a gate answered while its reactions are still being seeded", async () => {
+		addReaction.mockImplementationOnce(async () => {
+			await coordinator.handleEvent(
+				event({
+					eventType: "reaction_added",
+					messageId: GATE_ID,
+					emoji: "▶️",
+					deliveryId: `reaction_added:${GATE_ID}:▶️:${AUTHOR}`,
+				}),
+			);
+		});
+
+		await coordinator.handleEvent(event());
+
+		await vi.waitFor(() =>
+			expect(startBuzzSession).toHaveBeenCalledWith(
+				expect.objectContaining({ phase: "execute" }),
+			),
+		);
 	});
 
 	it("promotes the thread to the execute phase when a human reacts ▶️", async () => {
@@ -666,6 +740,233 @@ describe("BuzzSessionCoordinator", () => {
 		expect(startBuzzSession).toHaveBeenCalledWith(
 			expect.objectContaining({ repository: OTHER_REPOSITORY }),
 		);
+	});
+
+	// A characterization test, not an aspiration. Every other Buzz prompt is
+	// persisted and dealt with on boot — a gate is re-armed, a question is
+	// announced as lost. The repository question cannot be: it is registered
+	// before `startThread`, because the repository is what the thread is waiting
+	// for, and `serialize` builds `openPrompt` from the threads it has. So a
+	// restart here drops the question with no message in the thread, and the
+	// human's recovery is to say it again. If this ever starts failing, somebody
+	// has closed the gap — update the comment in `chooseRepository` and the
+	// gotcha that both state it.
+	it("persists nothing while the repository question is pending", async () => {
+		routes = [
+			{
+				channelId: CHANNEL_ID,
+				repositoryIds: ["repo-1", "repo-2"],
+			} as (typeof routes)[number],
+		];
+
+		const handled = coordinator.handleEvent(event());
+		await vi.waitFor(() =>
+			expect(approvals.hasPendingPrompt(`buzz-${ROOT_ID}`)).toBe(true),
+		);
+
+		expect(coordinator.serialize()).toEqual({ threads: {}, repoMru: [] });
+
+		approvals.resolveByReaction(GATE_ID, "1⃣", AUTHOR);
+		await handled;
+	});
+
+	// Same window as the gate's, and the same rule: the question is readable and
+	// answerable before Cyrus has finished seeding its own options.
+	it("takes a repository answer given while its options are still being seeded", async () => {
+		routes = [
+			{
+				channelId: CHANNEL_ID,
+				repositoryIds: ["repo-1", "repo-2"],
+			} as (typeof routes)[number],
+		];
+		addReaction.mockImplementationOnce(async () => {
+			await coordinator.handleEvent(
+				event({
+					eventType: "reaction_added",
+					messageId: GATE_ID,
+					emoji: "2⃣",
+					deliveryId: `reaction_added:${GATE_ID}:2⃣:${AUTHOR}`,
+				}),
+			);
+		});
+
+		await coordinator.handleEvent(event());
+
+		expect(startBuzzSession).toHaveBeenCalledWith(
+			expect.objectContaining({ repository: OTHER_REPOSITORY }),
+		);
+	});
+
+	// Only the first four candidates get an option at all, so the order decides
+	// which repositories are offered — not just how they are listed.
+	describe("ordering the repository question", () => {
+		/** A finished thread on `repositoryId`, as the state file holds it. */
+		function pastThread(
+			threadRootId: string,
+			repositoryId: string,
+			lastUsedAt: number,
+		): PersistedBuzzThread {
+			return {
+				channelId: OTHER_CHANNEL,
+				threadRootId,
+				sessionKey: `BUZZ-${threadRootId.slice(0, 6)}`,
+				title: "an earlier conversation",
+				repositoryId,
+				branchName: `buzz/${threadRootId.slice(0, 6)}`,
+				workspace: {
+					path: `/worktrees/BUZZ-${threadRootId.slice(0, 6)}`,
+					isGitWorktree: true,
+				},
+				phase: "execute",
+				openingMessage: "an earlier conversation",
+				lastUsedAt,
+				workUnits: [],
+			};
+		}
+
+		beforeEach(() => {
+			repositories = {
+				"repo-1": REPOSITORY,
+				"repo-2": OTHER_REPOSITORY,
+				"repo-3": THIRD_REPOSITORY,
+			};
+			routes = [
+				{
+					channelId: CHANNEL_ID,
+					repositoryIds: ["repo-1", "repo-2", "repo-3"],
+				} as (typeof routes)[number],
+			];
+		});
+
+		/**
+		 * Run the ambiguous message far enough to park on the question. The
+		 * in-flight handling is handed back wrapped, so awaiting this helper does
+		 * not also await the answer nobody has given yet.
+		 */
+		async function ask(): Promise<{ handled: Promise<void> }> {
+			const handled = coordinator.handleEvent(event());
+			await vi.waitFor(() =>
+				expect(approvals.hasPendingPrompt(`buzz-${ROOT_ID}`)).toBe(true),
+			);
+			return { handled };
+		}
+
+		it("offers the repository worked on most recently first", async () => {
+			const register = vi.spyOn(approvals, "register");
+			await coordinator.hydrate({
+				threads: {
+					[`buzz-${"a".repeat(64)}`]: pastThread("a".repeat(64), "repo-2", 200),
+					[`buzz-${"b".repeat(64)}`]: pastThread("b".repeat(64), "repo-3", 300),
+				},
+				repoMru: ["repo-3", "repo-2"],
+			});
+
+			const { handled } = await ask();
+
+			expect(register.mock.calls[0]?.[0].options).toEqual([
+				{ emoji: "1⃣", value: "repo-3", label: "honeycomb" },
+				{ emoji: "2⃣", value: "repo-2", label: "honey-automation" },
+				{ emoji: "3⃣", value: "repo-1", label: "cyrus" },
+			]);
+			expect(sendMessage.mock.calls[0]?.[0].content).toBe(
+				[
+					"❓ **Which repository should I work in?**",
+					"",
+					"1⃣ honeycomb",
+					"2⃣ honey-automation",
+					"3⃣ cyrus",
+					"",
+					"_React to choose, or reply with the repository name._",
+				].join("\n"),
+			);
+
+			approvals.resolveByReaction(GATE_ID, "1⃣", AUTHOR);
+			await handled;
+
+			expect(startBuzzSession).toHaveBeenCalledWith(
+				expect.objectContaining({ repository: THIRD_REPOSITORY }),
+			);
+		});
+
+		it("keeps config order when no thread has run yet", async () => {
+			const register = vi.spyOn(approvals, "register");
+
+			const { handled } = await ask();
+
+			expect(register.mock.calls[0]?.[0].options).toEqual([
+				{ emoji: "1⃣", value: "repo-1", label: "cyrus" },
+				{ emoji: "2⃣", value: "repo-2", label: "honey-automation" },
+				{ emoji: "3⃣", value: "repo-3", label: "honeycomb" },
+			]);
+
+			approvals.resolveByReaction(GATE_ID, "1⃣", AUTHOR);
+			await handled;
+
+			expect(startBuzzSession).toHaveBeenCalledWith(
+				expect.objectContaining({ repository: REPOSITORY }),
+			);
+		});
+
+		// A repository nobody has used yet sorts behind the ones that have, and
+		// among themselves those keep the order the config lists them in.
+		it("keeps config order among repositories with no history", async () => {
+			const register = vi.spyOn(approvals, "register");
+			await coordinator.hydrate({
+				threads: {
+					[`buzz-${"a".repeat(64)}`]: pastThread("a".repeat(64), "repo-3", 100),
+				},
+				repoMru: ["repo-3"],
+			});
+
+			const { handled } = await ask();
+
+			expect(register.mock.calls[0]?.[0].options).toEqual([
+				{ emoji: "1⃣", value: "repo-3", label: "honeycomb" },
+				{ emoji: "2⃣", value: "repo-1", label: "cyrus" },
+				{ emoji: "3⃣", value: "repo-2", label: "honey-automation" },
+			]);
+
+			approvals.resolveByReaction(GATE_ID, "2⃣", AUTHOR);
+			await handled;
+
+			expect(startBuzzSession).toHaveBeenCalledWith(
+				expect.objectContaining({ repository: REPOSITORY }),
+			);
+		});
+
+		// Settled: the registry arms a timer only when `timeoutMs` is given, and a
+		// timeout here would pick a repository nobody chose — a worktree and a
+		// branch in the wrong codebase. The question is a visible message, so
+		// waiting on it is not silent. This pins the absence of the key so a later
+		// "helpful" default fails the build instead of shipping.
+		it("registers the question with no timeout at all", async () => {
+			const register = vi.spyOn(approvals, "register");
+
+			const { handled } = await ask();
+
+			const params = register.mock.calls[0]?.[0];
+			expect(Object.keys(params ?? {})).toEqual([
+				"eventId",
+				"channelId",
+				"sessionId",
+				"kind",
+				"options",
+			]);
+			expect(params).toStrictEqual({
+				eventId: GATE_ID,
+				channelId: CHANNEL_ID,
+				sessionId: `buzz-${ROOT_ID}`,
+				kind: "question",
+				options: [
+					{ emoji: "1⃣", value: "repo-1", label: "cyrus" },
+					{ emoji: "2⃣", value: "repo-2", label: "honey-automation" },
+					{ emoji: "3⃣", value: "repo-3", label: "honeycomb" },
+				],
+			});
+
+			approvals.resolveByReaction(GATE_ID, "1⃣", AUTHOR);
+			await handled;
+		});
 	});
 
 	it("does not ask when a channel maps to exactly one repository", async () => {
