@@ -1145,13 +1145,22 @@ export class BuzzSessionCoordinator {
 		}
 		if (!eventId) return;
 
-		await this.seedGateReactions(eventId);
-
+		// Armed before the reactions are seeded, and the order is load-bearing.
+		// The message says "React to choose" and reaches every client the moment
+		// it is posted, while seeding is two `buzz reactions add` subprocesses and
+		// two relay round trips — a second or so in which a human clicking ▶️ is
+		// doing exactly what they were told. A reaction that arrives before the
+		// prompt is registered resolves nothing, and on the webhook ingress it also
+		// burns its delivery id in `seenDeliveries`, so removing and re-adding the
+		// reaction is suppressed too and the gate cannot be released for the life
+		// of the process. Registering first makes the window not exist.
 		this.armGate(context, {
 			eventId,
 			channelId: context.channelId,
 			options: GATE_OPTIONS,
 		});
+
+		await this.seedGateReactions(eventId);
 
 		// A parked thread is the one state nothing else writes: the turn that
 		// offered this gate has already saved at both ends, and the next turn only
@@ -1491,6 +1500,22 @@ export class BuzzSessionCoordinator {
 		}
 		if (!eventId) return undefined;
 
+		// Registered before the options are seeded, for the reason `offerGate`
+		// spells out: the question is visible to humans the moment it is posted,
+		// and a reaction that lands while the seeding round trips are in flight
+		// would resolve nothing and, on the webhook ingress, be unrepeatable.
+		//
+		// Deliberately no `timeoutMs`: the registry arms a timer only when one is
+		// given, and a timeout here would pick a repository nobody chose — a
+		// worktree and a branch in the wrong codebase.
+		const pending = this.deps.approvals.register({
+			eventId,
+			channelId: event.channelId,
+			sessionId,
+			kind: "question",
+			options,
+		});
+
 		for (const option of options) {
 			try {
 				await this.deps.client.addReaction({ eventId, emoji: option.emoji });
@@ -1499,18 +1524,7 @@ export class BuzzSessionCoordinator {
 			}
 		}
 
-		// Deliberately no `timeoutMs`: the registry arms a timer only when one is
-		// given, and a timeout here would pick a repository nobody chose — a
-		// worktree and a branch in the wrong codebase. Waiting is not silent, the
-		// question is a message sitting in the thread, and a restart while it is
-		// pending says so out loud (see `resumePrompt`).
-		const resolution = await this.deps.approvals.register({
-			eventId,
-			channelId: event.channelId,
-			sessionId,
-			kind: "question",
-			options,
-		});
+		const resolution = await pending;
 
 		if (resolution.via === "timeout") return undefined;
 

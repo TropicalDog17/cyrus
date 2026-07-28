@@ -639,6 +639,17 @@ A thread whose repository is not in the config is *parked*, not dropped:
 CYHOST push that transiently omits a repository are both reversible, and this
 record is the only place the thread's phase, program issue and worktree exist.
 
+One more ordering rule inside `offerGate` and `chooseRepository`: **register the
+prompt before seeding its reactions.** Seeding is two to four `buzz reactions
+add` subprocesses plus relay round trips, and the message — "React to choose" —
+is already on every client. A reaction that lands before `approvals.register`
+resolves nothing and is logged at debug, and on the webhook ingress that is
+terminal: the relay refuses an identical kind-7 with
+`ReactionEventInsertOutcome::Duplicate` so re-pressing emits nothing, and a
+remove-then-re-add carries a delivery id `seenDeliveries` is already holding.
+Enforced by `BuzzSessionCoordinator.test.ts`, *"releases a gate answered while
+its reactions are still being seeded"*.
+
 **Rule:** state owned by a component built in `initializeComponents` is
 restored where that component is constructed, not in `restoreMappings`. And
 whenever a Buzz thread parks on — or un-parks from — something a human answers

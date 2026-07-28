@@ -341,6 +341,34 @@ describe("BuzzSessionCoordinator", () => {
 		});
 	});
 
+	// The gate message says "React to choose" and reaches every client the moment
+	// it is posted, while seeding it is two `buzz reactions add` subprocesses and
+	// two relay round trips. A human who taps ▶️ inside that window is doing
+	// exactly what they were told, and the answer must not depend on how long the
+	// seeding took: on the webhook ingress the delivery is unrepeatable — the
+	// relay refuses an identical kind-7 as a duplicate, and the re-add of one the
+	// human removed carries a delivery id `seenDeliveries` already holds.
+	it("releases a gate answered while its reactions are still being seeded", async () => {
+		addReaction.mockImplementationOnce(async () => {
+			await coordinator.handleEvent(
+				event({
+					eventType: "reaction_added",
+					messageId: GATE_ID,
+					emoji: "▶️",
+					deliveryId: `reaction_added:${GATE_ID}:▶️:${AUTHOR}`,
+				}),
+			);
+		});
+
+		await coordinator.handleEvent(event());
+
+		await vi.waitFor(() =>
+			expect(startBuzzSession).toHaveBeenCalledWith(
+				expect.objectContaining({ phase: "execute" }),
+			),
+		);
+	});
+
 	it("promotes the thread to the execute phase when a human reacts ▶️", async () => {
 		await coordinator.handleEvent(event());
 		startBuzzSession.mockClear();
@@ -675,6 +703,33 @@ describe("BuzzSessionCoordinator", () => {
 
 		approvals.resolveByReaction(GATE_ID, "2⃣", AUTHOR);
 		await handled;
+
+		expect(startBuzzSession).toHaveBeenCalledWith(
+			expect.objectContaining({ repository: OTHER_REPOSITORY }),
+		);
+	});
+
+	// Same window as the gate's, and the same rule: the question is readable and
+	// answerable before Cyrus has finished seeding its own options.
+	it("takes a repository answer given while its options are still being seeded", async () => {
+		routes = [
+			{
+				channelId: CHANNEL_ID,
+				repositoryIds: ["repo-1", "repo-2"],
+			} as (typeof routes)[number],
+		];
+		addReaction.mockImplementationOnce(async () => {
+			await coordinator.handleEvent(
+				event({
+					eventType: "reaction_added",
+					messageId: GATE_ID,
+					emoji: "2⃣",
+					deliveryId: `reaction_added:${GATE_ID}:2⃣:${AUTHOR}`,
+				}),
+			);
+		});
+
+		await coordinator.handleEvent(event());
 
 		expect(startBuzzSession).toHaveBeenCalledWith(
 			expect.objectContaining({ repository: OTHER_REPOSITORY }),
