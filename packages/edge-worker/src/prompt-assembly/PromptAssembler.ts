@@ -13,6 +13,7 @@ import type {
 	SkillsPluginResolver,
 } from "../SkillsPluginResolver.js";
 import type {
+	BuzzPullRequestReviewPromptInput,
 	GitHubChangeRequestSystemPromptInput,
 	GitHubSystemPromptInput,
 	IssueContextResult,
@@ -490,5 +491,51 @@ ${reviewBody}
 - **Review URL**: ${commentUrl}
 
 ${taskSection}`;
+	}
+
+	/**
+	 * Build the turn a Buzz thread runs when a pull request on one of its
+	 * branches is reviewed.
+	 *
+	 * Unlike {@link buildGitHubChangeRequestSystemPrompt} this is the message
+	 * itself, not a system prompt: a Buzz turn is started without one, so
+	 * everything the run needs is here. It addresses a conversation that already
+	 * knows the work — the branch is the one the thread has been writing to and
+	 * the worktree is the one it has been running in, which is why the review is
+	 * routed here instead of into a session of its own.
+	 */
+	buildBuzzPullRequestReviewPrompt(
+		input: BuzzPullRequestReviewPromptInput,
+	): string {
+		const {
+			repoFullName,
+			prNumber,
+			prTitle,
+			commentAuthor,
+			commentUrl,
+			branchRef,
+			reviewBody,
+		} = input;
+
+		const feedback =
+			reviewBody.trim() ||
+			`The reviewer left no summary. Read the review comments with \`gh api repos/${repoFullName}/pulls/${prNumber}/reviews\`.`;
+
+		return `A reviewer has responded to the pull request for the work in this thread.
+
+## Context
+- **Repository**: ${repoFullName}
+- **PR**: #${prNumber} - ${prTitle || "Untitled"}
+- **Branch**: ${branchRef}, already checked out in the worktree you are running in
+- **Reviewer**: @${commentAuthor}
+- **Review URL**: ${commentUrl}
+
+## Reviewer feedback
+${feedback}
+
+## Instructions
+- Address the feedback on \`${branchRef}\` — do not create another branch or worktree
+- Commit and push to that branch when you are done
+- Summarise what you changed; your reply goes back into this chat thread`;
 	}
 }

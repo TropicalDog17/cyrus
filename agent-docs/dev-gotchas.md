@@ -474,7 +474,34 @@ own work.
 
 **Rule:** do not mint a second session for a branch some session already
 holds — route PR review back into the originating session — and never infer a
-fresh workspace from having asked for one.
+fresh workspace from having asked for one. For Buzz the routing exists:
+`handleGitHubWebhook` asks `BuzzSessionCoordinator.routePullRequestReview`
+before it resolves any workspace, and returns when a thread takes the review.
+Both halves are load-bearing — the ask has to come before the multi-repo branch
+too, which shares a tree without calling `createGitHubWorkspace` at all — and
+the routed turn goes through `startBuzzSession` in the *thread's* phase, not
+the resume path, which would re-derive write access for a thread still in
+triage. Enforced by `EdgeWorker.buzz-pr-review.test.ts`.
+
+## A deleted local branch sends a PR session to a tree with none of its commits
+
+The branch check in `GitService.provisionSingleRepoWorktree` is
+`git rev-parse --verify "<branch>"`, which only sees **local** refs. Delete the
+local branch after pushing — routine tidying, and what a worktree cleanup
+does — and the check misses while the PR's branch is alive on the remote:
+`createBranch` stays true, and the worktree is created from the resolved *base*
+branch. Nothing fails. An agent then reviews a PR in a tree that contains none
+of the PR's commits, reads code that does not match the diff it was sent, and
+"fixes" the review against `main`.
+
+This is the same trace as the entry above and does not share its remedy:
+sharing a worktree needs a branch that exists locally, so a deleted ref skips
+straight past it into a fresh, wrong tree.
+
+**Rule:** when a session must land on an *existing* branch, verify the remote
+ref too (`git ls-remote --heads origin <branch>` / `origin/<branch>`) before
+concluding the branch is new — a local miss is not evidence that a branch does
+not exist.
 
 ## A Buzz thread's first work unit has no `-u1` — that absence is the migration
 

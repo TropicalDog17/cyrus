@@ -187,6 +187,16 @@ interface BuzzUnitExecution {
 	agentSessionId?: string;
 }
 
+/** A pull request review, for whichever Buzz thread owns the PR's branch. */
+export interface BuzzPullRequestReview {
+	/** Repository the pull request is in — branch names are unique only there. */
+	repositoryId: string;
+	/** The pull request's head branch. */
+	branchName: string;
+	/** The turn to run, already carrying the PR and review context. */
+	prompt: string;
+}
+
 /** A work unit as the planner describes it, before it has an identity. */
 export interface BuzzWorkUnitRequest {
 	/** Stable idempotency key, carried over from the plan slice. */
@@ -1011,6 +1021,74 @@ export class BuzzSessionCoordinator {
 			// the conversation the next turn of this unit would have resumed.
 			await this.deps.saveState();
 		}
+	}
+
+	/**
+	 * Hand a pull request review to the Buzz thread whose branch the PR is on,
+	 * rather than letting a session of its own be opened for it.
+	 *
+	 * A `PR-<n>` session for a branch a Buzz thread already holds does not get a
+	 * worktree of its own: `GitService` finds the branch checked out elsewhere
+	 * and hands back *that* tree, so two agents edit the same files with nothing
+	 * between them and no error anywhere — see the "One branch cannot be in two
+	 * worktrees" gotcha, whose rule this satisfies. Routing the review to the
+	 * thread that owns the branch makes the collision impossible rather than
+	 * merely unlikely, and it is also where the human is: the review lands in the
+	 * conversation the work came from instead of a session nobody is reading.
+	 *
+	 * The turn goes through the unit's own path — `startBuzzSession` — and not
+	 * the generic resume path, for the same reason a follow-up message does:
+	 * resuming re-derives the tool set from the repository config, which would
+	 * hand a thread still in triage write access because somebody opened a PR.
+	 *
+	 * @returns true when a thread took the review; false when no Buzz thread
+	 * holds the branch and the caller's own pull-request path applies.
+	 */
+	async routePullRequestReview(
+		review: BuzzPullRequestReview,
+	): Promise<boolean> {
+		const owner = this.findBranchOwner(review.repositoryId, review.branchName);
+		if (!owner) return false;
+
+		const { context, unit } = owner;
+		this.deps.logger.info(
+			`Routing the review of branch ${review.branchName} into Buzz thread ${context.sessionKey}`,
+		);
+
+		await this.enqueue(context.sessionId, () =>
+			unit
+				? this.startWorkUnit(context.sessionId, unit.unitId, review.prompt)
+				: this.runTurn(context, review.prompt),
+		);
+		return true;
+	}
+
+	/**
+	 * The thread that holds a branch, and the work unit of it that owns the
+	 * branch when a record for one exists.
+	 *
+	 * A thread's own branch is matched as well as its units', and the fallback is
+	 * not redundant: a repository the projection cannot reach gets no program
+	 * issue, so its thread has no unit to synthesize from and still holds a
+	 * branch and a worktree. The collision this lookup exists to prevent is git's
+	 * and does not care whether a unit record was ever minted.
+	 */
+	private findBranchOwner(
+		repositoryId: string,
+		branchName: string,
+	): { context: BuzzThreadContext; unit?: PersistedBuzzWorkUnit } | null {
+		for (const context of this.threads.values()) {
+			if (context.repository.id !== repositoryId) continue;
+			// A thread that predates work units owns its branch through the unit it
+			// already is, so derive that before deciding it has none.
+			this.synthesizeLegacyUnit(context);
+			const unit = context.workUnits.find(
+				(candidate) => candidate.branchName === branchName,
+			);
+			if (unit) return { context, unit };
+			if (context.branchName === branchName) return { context };
+		}
+		return null;
 	}
 
 	/**

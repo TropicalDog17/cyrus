@@ -1519,6 +1519,31 @@ export class EdgeWorker extends EventEmitter {
 					"A reviewer has requested changes on this PR. Read the review comments to understand what needs to be changed."
 				: stripMention(commentBody, mentionHandle);
 
+			const commentUrl = extractCommentUrl(event);
+
+			// A pull request on a branch a Buzz thread holds belongs to that thread,
+			// not to a `PR-<n>` session of its own. Git will not check one branch out
+			// twice, and Cyrus does not fail on that — it hands the second session the
+			// first's worktree, so two agents edit the same files with nothing between
+			// them (see the "One branch cannot be in two worktrees" gotcha). Asked
+			// before the workspace is resolved, because the multi-repo path below skips
+			// `createGitHubWorkspace` and shares a tree just as readily.
+			const routedIntoBuzz =
+				await this.buzzSessionCoordinator?.routePullRequestReview({
+					repositoryId: repository.id,
+					branchName: branchRef,
+					prompt: this.promptAssembler.buildBuzzPullRequestReviewPrompt({
+						repoFullName,
+						prNumber,
+						prTitle,
+						commentAuthor,
+						commentUrl,
+						branchRef,
+						reviewBody: taskInstructions,
+					}),
+				});
+			if (routedIntoBuzz) return;
+
 			// Check for an existing multi-repo session that includes this repository.
 			// If found, use its sub-worktree instead of creating a new workspace.
 			let workspace: { path: string; isGitWorktree: boolean } | null = null;
@@ -1563,7 +1588,6 @@ export class EdgeWorker extends EventEmitter {
 			this.logger.info(`GitHub workspace created at: ${workspace.path}`);
 
 			// Build the system prompt for this GitHub PR session
-			const commentUrl = extractCommentUrl(event);
 			const systemPrompt = isPullRequestReview
 				? this.promptAssembler.buildGitHubChangeRequestSystemPrompt({
 						repoFullName,

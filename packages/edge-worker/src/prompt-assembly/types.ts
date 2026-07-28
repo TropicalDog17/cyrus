@@ -169,3 +169,17 @@ export interface GitHubChangeRequestSystemPromptInput {
 	branchRef: string;
 	reviewBody: string;
 }
+
+/**
+ * Input for the turn a Buzz thread runs when a pull request opened from one of
+ * its branches is reviewed.
+ */
+export interface BuzzPullRequestReviewPromptInput {
+	repoFullName: string;
+	prNumber: number | null;
+	prTitle: string | null;
+	commentAuthor: string;
+	commentUrl: string;
+	branchRef: string;
+	reviewBody: string;
+}
