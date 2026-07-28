@@ -616,6 +616,27 @@ export interface IssueCreateInput {
 }
 
 /**
+ * Relation kinds a tracker write may declare between two issues.
+ *
+ * Deliberately the same three the agent-facing `linear_set_issue_relation`
+ * tool already accepts, so the repository has one relation vocabulary rather
+ * than two that drift.
+ */
+export type IssueRelationKind = "blocks" | "duplicate" | "related";
+
+/**
+ * Issue relation creation parameters.
+ */
+export interface IssueRelationCreateInput {
+	/** Issue the relation is declared from (for `blocks`, the blocker) */
+	issueId: string;
+	/** Issue on the other side of the relation (for `blocks`, the blocked one) */
+	relatedIssueId: string;
+	/** Kind of relation to declare */
+	type: IssueRelationKind;
+}
+
+/**
  * Issue update parameters.
  */
 export interface IssueUpdateInput {

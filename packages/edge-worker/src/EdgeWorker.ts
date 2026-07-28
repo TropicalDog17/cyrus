@@ -97,7 +97,11 @@ import {
 } from "./activity/index.js";
 import { BuzzApprovalRegistry } from "./buzz/BuzzApprovalRegistry.js";
 import { BuzzCliClient } from "./buzz/BuzzCliClient.js";
-import { BuzzLinearProjection } from "./buzz/BuzzLinearProjection.js";
+import {
+	BuzzLinearProjection,
+	buzzThreadDeepLink,
+	projectionTeamKey,
+} from "./buzz/BuzzLinearProjection.js";
 import { BuzzPollingSource } from "./buzz/BuzzPollingSource.js";
 import { BuzzQuestionHandler } from "./buzz/BuzzQuestionHandler.js";
 import {
@@ -178,6 +182,7 @@ export class EdgeWorker extends EventEmitter {
 	private buzzApprovals: BuzzApprovalRegistry | null = null; // Gate + question prompts awaiting a human
 	private buzzQuestionHandler: BuzzQuestionHandler | null = null; // AskUserQuestion, asked in a Buzz thread
 	private buzzProjection: BuzzLinearProjection | null = null; // Buzz work recorded as unassigned Linear issues
+	private persistedBuzzState: SerializableEdgeWorkerState["buzz"]; // Buzz threads read from disk, parked until the coordinator exists
 	private gitHubCommentService!: GitHubCommentService; // Service for posting comments back to GitHub PRs
 	private cliRPCServer: CLIRPCServer | null = null; // CLI RPC server for CLI platform mode
 	private configUpdater: ConfigUpdater | null = null; // Single config updater for configuration updates
@@ -1184,12 +1189,15 @@ export class EdgeWorker extends EventEmitter {
 
 		this.buzzApprovals = new BuzzApprovalRegistry(this.logger);
 
+		this.warnUnprojectableBuzzRepositories();
+
 		this.buzzProjection = new BuzzLinearProjection({
 			logger: this.logger,
 			getIssueTracker: (repository) =>
 				repository.linearWorkspaceId
 					? (this.issueTrackers.get(repository.linearWorkspaceId) ?? null)
 					: null,
+			buildThreadUrl: buzzThreadDeepLink,
 		});
 
 		this.buzzSessionCoordinator = new BuzzSessionCoordinator({
@@ -1201,10 +1209,19 @@ export class EdgeWorker extends EventEmitter {
 			getChannelRoutes: () => this.config.buzz?.channels ?? [],
 			getSelfPubkey: () => this.config.buzz?.selfPubkey,
 			getRepositoryById: (repositoryId) => this.repositories.get(repositoryId),
+			saveState: () => this.savePersistedState(),
 			getActivitySinkForChannel: (channelId) =>
 				this.getBuzzActivitySinkForChannel(channelId),
 			projection: this.buzzProjection,
 		});
+
+		// Threads read from disk at boot. `hydrate` puts every thread back in the
+		// coordinator synchronously and only then awaits the relay work a lost
+		// prompt needs, so by the time this returns — well before either ingress
+		// starts below — no event can reach a thread that has not been given its
+		// phase back. Do not turn that into a bare `await`: a relay that is slow
+		// or down would then hold up the whole worker's startup.
+		this.hydrateBuzzThreads();
 
 		this.buzzQuestionHandler = new BuzzQuestionHandler({
 			logger: this.logger,
@@ -1275,6 +1292,42 @@ export class EdgeWorker extends EventEmitter {
 			`Buzz event transport registered (${buzz.channels?.length ?? 0} channel route(s))`,
 		);
 		this.logger.info("Webhook endpoint: POST /buzz-webhook");
+	}
+
+	/**
+	 * Name, at startup, the repositories a Buzz route can reach but the Linear
+	 * projection cannot write to.
+	 *
+	 * The team a projected issue lands in is the repository's first usable
+	 * `teamKeys` entry, so a routed repository without one produces no issue at
+	 * all — and the only
+	 * evidence today is a warning at the moment a human answers a gate, hours
+	 * after the config was deployed. Checking the routes up front turns
+	 * "projection is configured" from something an operator asserts into
+	 * something the process states.
+	 */
+	private warnUnprojectableBuzzRepositories(): void {
+		const routedIds = new Set(
+			(this.config.buzz?.channels ?? []).flatMap((route) => [
+				...(route.repositoryId ? [route.repositoryId] : []),
+				...(route.repositoryIds ?? []),
+			]),
+		);
+
+		// An id matching no repository is a different fault, and the coordinator
+		// already names it when a message actually arrives on that route.
+		const unprojectable = Array.from(routedIds).flatMap((id) => {
+			const repository = this.repositories.get(id);
+			return repository && !projectionTeamKey(repository)
+				? [repository.name]
+				: [];
+		});
+
+		if (unprojectable.length === 0) return;
+
+		this.logger.warn(
+			`Buzz routes reach ${unprojectable.length} repositor${unprojectable.length === 1 ? "y" : "ies"} with no teamKeys, so their threads will not be projected into Linear: ${unprojectable.join(", ")}`,
+		);
 	}
 
 	/**
@@ -4485,11 +4538,20 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 			this.repositoryRouter.getIssueRepositoryCache().entries(),
 		);
 
+		// Buzz thread state comes from the coordinator when Buzz is configured.
+		// When it is not, the state read at boot is written back untouched: a
+		// deployment that disables Buzz for one restart must not be how a thread's
+		// phase, program issue and worktree are lost.
+		const buzz = this.buzzSessionCoordinator
+			? this.buzzSessionCoordinator.serialize()
+			: this.persistedBuzzState;
+
 		return {
 			agentSessions: serializedState.sessions,
 			agentSessionEntries: serializedState.entries,
 			childToParentAgentSession,
 			issueRepositoryCache,
+			...(buzz ? { buzz } : {}),
 		};
 	}
 
@@ -4561,6 +4623,36 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 				`Restored ${cache.size} issue-to-repository cache mappings`,
 			);
 		}
+
+		// Buzz threads. Parked rather than applied here: start() loads persisted
+		// state well before initializeComponents() builds the coordinator, so
+		// hydrating at this point would silently do nothing.
+		this.persistedBuzzState = state.buzz;
+		this.hydrateBuzzThreads();
+	}
+
+	/**
+	 * Hand parked Buzz thread state to the coordinator, once there is one.
+	 *
+	 * Called from both ends of the ordering problem — after state is read and
+	 * after the coordinator is built — because either can happen first, and only
+	 * the later of the two can do the work.
+	 */
+	private hydrateBuzzThreads(): void {
+		const coordinator = this.buzzSessionCoordinator;
+		if (!coordinator || !this.persistedBuzzState) return;
+
+		// Deliberately not awaited: hydration posts into the threads whose
+		// questions were lost, so it can block on — or fail against — a relay
+		// that is down, and that must not take startup with it. Safe only because
+		// `hydrate` restores every thread before its first await; see the note on
+		// that method before changing either side.
+		coordinator.hydrate(this.persistedBuzzState).catch((error) => {
+			this.logger.error(
+				"Failed to restore Buzz thread state",
+				error instanceof Error ? error : new Error(String(error)),
+			);
+		});
 	}
 
 	/**

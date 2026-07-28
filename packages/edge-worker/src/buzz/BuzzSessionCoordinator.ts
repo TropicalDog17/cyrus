@@ -1,12 +1,22 @@
 import type { BuzzWebhookEvent } from "cyrus-buzz-event-transport";
-import type { BuzzChannelRoute, ILogger, RepositoryConfig } from "cyrus-core";
+import type {
+	BuzzChannelRoute,
+	ILogger,
+	PersistedBuzzThread,
+	PersistedBuzzWorkUnit,
+	RepositoryConfig,
+	SerializableEdgeWorkerState,
+} from "cyrus-core";
 import type { AgentSessionManager } from "../AgentSessionManager.js";
 import type {
 	BuzzSessionPhase,
 	SessionOrchestrator,
 } from "../SessionOrchestrator.js";
 import type { IActivitySink } from "../sinks/IActivitySink.js";
-import type { BuzzApprovalRegistry } from "./BuzzApprovalRegistry.js";
+import type {
+	BuzzApprovalRegistry,
+	BuzzPromptOption,
+} from "./BuzzApprovalRegistry.js";
 import type { BuzzCliClient, BuzzEventRecord } from "./BuzzCliClient.js";
 import type { BuzzThreadRef } from "./BuzzQuestionHandler.js";
 
@@ -38,6 +48,11 @@ export interface BuzzSessionCoordinatorDeps {
 	 */
 	getSelfPubkey(): string | undefined;
 	getRepositoryById(repositoryId: string): RepositoryConfig | undefined;
+	/**
+	 * Write EdgeWorker state to disk. A turn saves at both ends on its own; this
+	 * is for the gate, which is armed after the turn that offered it returned.
+	 */
+	saveState(): Promise<void>;
 	/** Sink bound to a channel; one per channel, created lazily by EdgeWorker. */
 	getActivitySinkForChannel(channelId: string): IActivitySink;
 	/**
@@ -59,6 +74,29 @@ export interface BuzzProjectionHooks {
 	note(sessionId: string, body: string): Promise<void>;
 	/** Move a tracked thread's issue to a workflow state by name. */
 	setState(sessionId: string, stateName: string): Promise<void>;
+	/** The issue projected for a thread, if any — read to persist it. */
+	get(sessionId: string): BuzzProjectedProgram | undefined;
+	/**
+	 * Why this repository cannot be projected, or null when it can. Asked so the
+	 * thread is told something true: `track` returns null for reasons with
+	 * different remedies, and only the projection knows which applies.
+	 */
+	unprojectableReason(
+		repository: RepositoryConfig,
+	): "no-tracker" | "no-team-keys" | null;
+	/** Re-seed a hydrated thread's projection so no second issue is created. */
+	restore(
+		sessionId: string,
+		program: BuzzProjectedProgram,
+		repository: RepositoryConfig,
+	): void;
+}
+
+/** A thread's projected program issue, as persisted and rehydrated. */
+export interface BuzzProjectedProgram {
+	issueId: string;
+	identifier: string;
+	url: string;
 }
 
 /**
@@ -73,6 +111,16 @@ const MAX_SEEN_DELIVERIES = 500;
 
 const GATE_IMPLEMENT_EMOJI = "▶️";
 const GATE_TRACK_EMOJI = "📝";
+
+/**
+ * The gate's reactable options. A module constant because a re-armed gate must
+ * offer exactly what the posted message says it offers, and the message it
+ * belongs to was written by an earlier process.
+ */
+const GATE_OPTIONS: BuzzPromptOption[] = [
+	{ emoji: GATE_IMPLEMENT_EMOJI, value: "implement", label: "implement" },
+	{ emoji: GATE_TRACK_EMOJI, value: "track", label: "track" },
+];
 
 /** Channel id that matches any channel without a route of its own. */
 export const CATCH_ALL_CHANNEL = "*";
@@ -97,7 +145,24 @@ interface BuzzThreadContext {
 	openingMessage: string;
 	/** Latest response Cyrus posted, used as the projected issue's summary. */
 	lastResponse?: string;
+	/** Epoch ms of the thread's last turn, which orders {@link repoMru}. */
+	lastUsedAt: number;
+	/** The thread's program issue, once the gate projected one. */
+	program?: BuzzProjectedProgram;
+	/**
+	 * The program's work units and the plan they came from.
+	 *
+	 * Carried verbatim through hydrate and serialize even though nothing writes
+	 * them yet: a boot that dropped them would erase a plan the operator had
+	 * already approved, and a record that only survives one restart is worse than
+	 * none.
+	 */
+	workUnits: PersistedBuzzWorkUnit[];
+	plan?: PersistedBuzzThread["plan"];
 }
+
+/** Buzz thread state as persisted, the argument {@link hydrate} takes. */
+type PersistedBuzzState = NonNullable<SerializableEdgeWorkerState["buzz"]>;
 
 /**
  * Turns a Buzz trigger into a Cyrus session, and mediates the execution gate.
@@ -128,11 +193,26 @@ interface BuzzThreadContext {
  *
  * The gate is enforced by the tool set, not by prompt wording — see
  * {@link SessionOrchestrator.startBuzzSession}.
+ *
+ * SURVIVING A RESTART
+ * -------------------
+ * A Buzz thread's identity is synthesized rather than read back from an issue
+ * tracker, so nothing outside the state file can reconstruct it: without
+ * {@link serialize} and {@link hydrate} a deploy loses the thread's phase, its
+ * program issue and the worktree its branch lives in. Hydration is deliberately
+ * lossy in one direction only — an unrecognized phase reverts to `triage` and a
+ * lost question is announced — because redoing a round trip is recoverable and a
+ * thread nothing can advance is not.
  */
 export class BuzzSessionCoordinator {
 	private readonly deps: BuzzSessionCoordinatorDeps;
 	private readonly seenDeliveries = new Set<string>();
 	private readonly threads = new Map<string, BuzzThreadContext>();
+	/**
+	 * Persisted threads hydration could not restore, kept verbatim so the next
+	 * save writes them back rather than erasing them. See {@link serialize}.
+	 */
+	private readonly parkedThreads = new Map<string, PersistedBuzzThread>();
 	/** Per-session serialization, so a burst of messages cannot race. */
 	private readonly queues = new Map<string, Promise<void>>();
 
@@ -148,6 +228,201 @@ export class BuzzSessionCoordinator {
 			channelId: context.channelId,
 			threadRootId: context.threadRootId,
 		};
+	}
+
+	/**
+	 * Buzz thread state for the EdgeWorker state file.
+	 *
+	 * The per-session queues are deliberately absent — a promise chain is not
+	 * state — and so is the delivery cache: forgetting which deliveries were seen
+	 * makes a restart re-read its polling window, which is the at-least-once path
+	 * the gate's phase guard already has to survive.
+	 *
+	 * An open prompt is read back from the approval registry rather than tracked
+	 * here, so persistence cannot disagree with the registry about what is live.
+	 *
+	 * Threads hydration could not restore are written back untouched, ahead of
+	 * the live ones so a restored thread always wins its key. A repository can be
+	 * absent for a restart and back for the next one — `isActive: false`, a
+	 * CYHOST config push that transiently omits it — and this record is the only
+	 * place a thread's phase, program issue and worktree exist. Dropping it would
+	 * make a one-restart config change permanently destructive, which is the same
+	 * reason `EdgeWorker.serializeMappings` writes parked state back when Buzz
+	 * itself is unconfigured.
+	 */
+	serialize(): PersistedBuzzState {
+		const threads: Record<string, PersistedBuzzThread> = {};
+
+		for (const [sessionId, parked] of this.parkedThreads) {
+			threads[sessionId] = parked;
+		}
+
+		for (const [sessionId, context] of this.threads) {
+			const openPrompt = this.deps.approvals.openPromptFor(sessionId);
+			threads[sessionId] = {
+				channelId: context.channelId,
+				threadRootId: context.threadRootId,
+				sessionKey: context.sessionKey,
+				title: context.title,
+				repositoryId: context.repository.id,
+				branchName: context.branchName,
+				// Field by field: whatever else a provisioned workspace carries, the
+				// record is the contract a hydrated turn runs against.
+				workspace: {
+					path: context.workspace.path,
+					isGitWorktree: context.workspace.isGitWorktree,
+				},
+				phase: context.phase,
+				openingMessage: context.openingMessage,
+				...(context.lastResponse !== undefined
+					? { lastResponse: context.lastResponse }
+					: {}),
+				...(context.agentSessionId
+					? { agentSessionId: context.agentSessionId }
+					: {}),
+				lastUsedAt: context.lastUsedAt,
+				...(context.program ? { program: context.program } : {}),
+				workUnits: context.workUnits,
+				...(context.plan ? { plan: context.plan } : {}),
+				...(openPrompt ? { openPrompt } : {}),
+			};
+		}
+
+		return { threads, repoMru: this.repoMru() };
+	}
+
+	/**
+	 * Restore threads from the state file, and deal with whatever each one was
+	 * waiting on.
+	 *
+	 * Every thread is put back in the map *before this function awaits anything*,
+	 * so a caller that does not await it still gets a fully restored coordinator
+	 * the moment it returns control. That ordering is load-bearing: resuming a
+	 * lost question posts to the relay, which can block for the CLI's 30s
+	 * timeout, and in that window the polling ingress is already running. A
+	 * message for a not-yet-restored thread would be read as a brand new one —
+	 * second worktree, second branch, thread reset to triage — and a save
+	 * triggered by any other session would serialize the half-empty map over the
+	 * threads still waiting to be restored.
+	 *
+	 * A thread whose repository is not currently configured is parked rather than
+	 * restored: there is no worktree to run a turn in, but see {@link serialize} —
+	 * it is not erased either.
+	 */
+	async hydrate(state: SerializableEdgeWorkerState["buzz"]): Promise<void> {
+		// A pre-v5 state file is migrated to a present-but-empty container, so a
+		// missing `buzz` and an empty one mean the same thing.
+		const persisted = Object.entries(state?.threads ?? {});
+		if (persisted.length === 0) return;
+
+		const resumable: Array<
+			[BuzzThreadContext, PersistedBuzzThread["openPrompt"]]
+		> = [];
+		let restored = 0;
+		for (const [sessionId, thread] of persisted) {
+			const repository = this.deps.getRepositoryById(thread.repositoryId);
+			if (!repository) {
+				this.deps.logger.warn(
+					`Parking Buzz thread ${thread.sessionKey}: repository "${thread.repositoryId}" is not configured`,
+				);
+				this.parkedThreads.set(sessionId, thread);
+				continue;
+			}
+
+			const context: BuzzThreadContext = {
+				sessionId,
+				channelId: thread.channelId,
+				threadRootId: thread.threadRootId,
+				sessionKey: thread.sessionKey,
+				branchName: thread.branchName,
+				title: thread.title,
+				repository,
+				workspace: thread.workspace,
+				phase: hydratePhase(thread.phase),
+				openingMessage: thread.openingMessage,
+				...(thread.lastResponse !== undefined
+					? { lastResponse: thread.lastResponse }
+					: {}),
+				...(thread.agentSessionId
+					? { agentSessionId: thread.agentSessionId }
+					: {}),
+				lastUsedAt: thread.lastUsedAt,
+				...(thread.program ? { program: thread.program } : {}),
+				workUnits: thread.workUnits,
+				...(thread.plan ? { plan: thread.plan } : {}),
+			};
+			this.threads.set(sessionId, context);
+			this.parkedThreads.delete(sessionId);
+			restored++;
+
+			if (thread.program) {
+				this.deps.projection?.restore(sessionId, thread.program, repository);
+			}
+
+			if (thread.openPrompt) {
+				resumable.push([context, thread.openPrompt]);
+			}
+		}
+
+		this.deps.logger.info(`Restored ${restored} Buzz thread(s)`);
+
+		// Only now, with the map complete, is it safe to await the relay.
+		for (const [context, openPrompt] of resumable) {
+			await this.resumePrompt(context, openPrompt);
+		}
+	}
+
+	/**
+	 * Deal with the prompt a hydrated thread was parked on.
+	 *
+	 * A gate is re-armed against the event id humans have already reacted to, and
+	 * not re-posted: the scrollback shows the question as asked, and asking twice
+	 * reads as Cyrus having forgotten. A question cannot be re-armed at all —
+	 * `AskUserQuestion` needs the SDK session and the blocked caller the restart
+	 * took with it — so it dies, out loud, because silence there is
+	 * indistinguishable from Cyrus ignoring an answer that was already given.
+	 * An unarmed prompt is not in the registry, so no later save carries it; the
+	 * save here is what makes that true *now* rather than at whatever unrelated
+	 * event happens to write state next. Two restarts with nothing in between
+	 * would otherwise post the same apology twice.
+	 */
+	private async resumePrompt(
+		context: BuzzThreadContext,
+		openPrompt: PersistedBuzzThread["openPrompt"],
+	): Promise<void> {
+		if (!openPrompt) return;
+
+		if (openPrompt.kind === "gate") {
+			this.armGate(context, openPrompt);
+			return;
+		}
+
+		await this.say(
+			context,
+			"⚠️ I restarted while waiting on your answer, so the question above is lost. Say what you'd like again and I'll pick it up from there.",
+		);
+		await this.deps.saveState();
+	}
+
+	/**
+	 * Repository ids, most recently worked on first.
+	 *
+	 * Derived from the threads rather than tracked alongside them: a list kept in
+	 * parallel can disagree with the threads it summarizes, and `lastUsedAt`
+	 * already carries everything the order needs.
+	 */
+	private repoMru(): string[] {
+		const newest = new Map<string, number>();
+		for (const context of this.threads.values()) {
+			const previous = newest.get(context.repository.id) ?? 0;
+			if (context.lastUsedAt > previous) {
+				newest.set(context.repository.id, context.lastUsedAt);
+			}
+		}
+
+		return [...newest.entries()]
+			.sort(([, a], [, b]) => b - a)
+			.map(([repositoryId]) => repositoryId);
 	}
 
 	async handleEvent(event: BuzzWebhookEvent): Promise<void> {
@@ -307,8 +582,12 @@ export class BuzzSessionCoordinator {
 			workspace,
 			phase: "triage",
 			openingMessage: prompt,
+			lastUsedAt: Date.now(),
+			workUnits: [],
 		};
 		this.threads.set(sessionId, context);
+		// A live thread supersedes any parked record under the same key.
+		this.parkedThreads.delete(sessionId);
 
 		await this.runTurn(context, prompt);
 	}
@@ -326,6 +605,8 @@ export class BuzzSessionCoordinator {
 		context: BuzzThreadContext,
 		prompt: string,
 	): Promise<void> {
+		context.lastUsedAt = Date.now();
+
 		const agentSessionId = await this.deps.sessionOrchestrator.startBuzzSession(
 			{
 				repository: context.repository,
@@ -381,19 +662,36 @@ export class BuzzSessionCoordinator {
 
 		await this.seedGateReactions(eventId);
 
-		const pending = this.deps.approvals.register({
+		this.armGate(context, {
 			eventId,
 			channelId: context.channelId,
+			options: GATE_OPTIONS,
+		});
+
+		// A parked thread is the one state nothing else writes: the turn that
+		// offered this gate has already saved at both ends, and the next turn only
+		// happens once the gate resolves. Without a save here the gate exists in
+		// memory only, and a boot would have nothing to re-arm from.
+		await this.deps.saveState();
+	}
+
+	/**
+	 * Wait for a gate's answer and act on it.
+	 *
+	 * Split out of {@link offerGate} because a boot re-arms a gate whose message
+	 * was posted by an earlier process: registering the prompt without this wait
+	 * would leave a gate that records reactions and does nothing with them.
+	 */
+	private armGate(
+		context: BuzzThreadContext,
+		prompt: { eventId: string; channelId: string; options: BuzzPromptOption[] },
+	): void {
+		const pending = this.deps.approvals.register({
+			eventId: prompt.eventId,
+			channelId: prompt.channelId,
 			sessionId: context.sessionId,
 			kind: "gate",
-			options: [
-				{
-					emoji: GATE_IMPLEMENT_EMOJI,
-					value: "implement",
-					label: "implement",
-				},
-				{ emoji: GATE_TRACK_EMOJI, value: "track", label: "track" },
-			],
+			options: prompt.options,
 		});
 
 		// Deliberately not awaited inside the queued turn. A gate can stay open
@@ -429,6 +727,19 @@ export class BuzzSessionCoordinator {
 		context: BuzzThreadContext,
 		decision: BuzzGateDecision,
 	): Promise<void> {
+		// A gate only means anything while the thread is still waiting to be let
+		// out of triage. Reactions arrive at least once — a gate re-armed on boot
+		// is live again with an empty reaction cache, so the ▶️ a human pressed
+		// before the deploy re-delivers — and a second pass here would start a
+		// second implementation turn against the same branch. Logged, not posted:
+		// the human did nothing wrong and the thread is already moving.
+		if (context.phase !== "triage") {
+			this.deps.logger.info(
+				`Ignoring a gate decision for ${context.sessionKey}: the thread is already in the ${context.phase} phase`,
+			);
+			return;
+		}
+
 		const identifier = await this.deps.projection?.track({
 			sessionId: context.sessionId,
 			sessionKey: context.sessionKey,
@@ -438,6 +749,51 @@ export class BuzzSessionCoordinator {
 			summary: context.openingMessage,
 			repository: context.repository,
 		});
+
+		// A repository with no `teamKeys` cannot be projected at all, and the
+		// projection has no way to say so — it writes to Linear or nowhere. Left
+		// to a log line, a whole program silently does not exist while the human
+		// carries on believing it does. Ask the projection *why* rather than
+		// re-deciding it here: a Linear outage also returns null and telling
+		// somebody to fix their config over a 503 would be a lie, and so would
+		// naming `teamKeys` as the remedy on a deployment that has no Linear
+		// tracker at all — where setting them changes nothing.
+		if (
+			!identifier &&
+			this.deps.projection?.unprojectableReason(context.repository) ===
+				"no-team-keys"
+		) {
+			await this.say(
+				context,
+				`⚠️ I can't record this in Linear: the \`${context.repository.name}\` repository has no \`teamKeys\` configured.`,
+			);
+		}
+
+		// Keep the issue itself, not just its key: a restart that could not find
+		// the program issue would project a second one for the same thread.
+		const projected = this.deps.projection?.get(context.sessionId);
+		if (projected) {
+			context.program = {
+				issueId: projected.issueId,
+				identifier: projected.identifier,
+				url: projected.url,
+			};
+		}
+
+		if (decision === "implement") {
+			context.phase = "execute";
+		}
+
+		// Answering the gate is the transition the state file most needs and is
+		// least likely to get: the gate parked, so its record on disk still says
+		// the gate is open and carries no program issue. `track` returns from
+		// here without ever running a turn, and `implement` only saves inside
+		// `runTurn`, after several awaited relay and Linear round trips. Without
+		// a save right here, a restart in between re-arms an answered gate, the
+		// reaction the human already pressed re-delivers, and the projection —
+		// with no persisted program to restore — creates a *second* program issue
+		// for the same thread. Saving before either branch closes both windows.
+		await this.deps.saveState();
 
 		if (decision === "track") {
 			this.deps.logger.info(
@@ -455,7 +811,6 @@ export class BuzzSessionCoordinator {
 		this.deps.logger.info(
 			`Buzz thread ${context.sessionKey} approved for implementation`,
 		);
-		context.phase = "execute";
 
 		if (identifier) {
 			await this.say(context, `▶️ On it — tracking as **${identifier}**.`);
@@ -795,6 +1150,21 @@ function scopePreamble(repository: RepositoryConfig): string {
 
 	lines.push("</session_scope>");
 	return lines.join("\n");
+}
+
+/**
+ * Narrow a persisted phase, reverting anything that is not `execute` back to
+ * `triage`.
+ *
+ * Total over the string on purpose, so it is already correct for phases that do
+ * not exist yet: `runTurn` re-offers the gate only from `triage`, so a thread
+ * hydrated into a phase this build cannot advance would have no open prompt,
+ * nothing to re-offer one, and no path back — a permanently dead thread. The
+ * worst this costs is repeating a round trip the human has already been through,
+ * and it holds for a phase written by a newer build too.
+ */
+function hydratePhase(persisted: string): BuzzSessionPhase {
+	return persisted === "execute" ? "execute" : "triage";
 }
 
 function firstLine(text: string): string {

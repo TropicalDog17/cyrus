@@ -86,6 +86,21 @@ export interface CLIIssueData {
 }
 
 /**
+ * Internal storage for a CLI IssueRelation.
+ */
+export interface CLIIssueRelationData {
+	id: string;
+	type: string;
+	createdAt: Date;
+	updatedAt: Date;
+	archivedAt?: Date;
+
+	// Relationship IDs
+	issueId: string;
+	relatedIssueId: string;
+}
+
+/**
  * Internal storage for a CLI Comment.
  */
 export interface CLICommentData {
@@ -247,10 +262,19 @@ export interface CLIAgentActivityData {
 
 /**
  * Create a CLI Issue object compatible with our Pick-based Issue type.
+ *
+ * `inverseRelations` is a resolver, not an array, because on Linear
+ * `Issue.inverseRelations()` is a query answered when it is called. Snapshotting
+ * it at construction time makes a relation written after the handle was obtained
+ * invisible through that handle — which is how the one production consumer,
+ * `GitService.fetchBlockingIssues`, always holds it: the issue was fetched at the
+ * start of the session, long before anything in that session declared a `blocks`
+ * relation.
  */
 export function createCLIIssue(
 	data: CLIIssueData,
 	resolvedLabels?: CLILabelData[],
+	inverseRelations?: () => IssueRelation[],
 ): Issue {
 	// Create a partial object with all the required properties
 	const issue = {
@@ -382,7 +406,7 @@ export function createCLIIssue(
 				"id"
 			>,
 		): Promise<Connection<IssueRelation>> {
-			return Promise.resolve({ nodes: [] });
+			return Promise.resolve({ nodes: inverseRelations?.() ?? [] });
 		},
 		update(
 			_input?: LinearSDK.LinearDocument.IssueUpdateInput,
@@ -397,6 +421,34 @@ export function createCLIIssue(
 
 	// Return directly - structurally compatible with our Pick-based Issue type
 	return issue;
+}
+
+/**
+ * Create a CLI IssueRelation object compatible with our Pick-based IssueRelation type.
+ *
+ * Both sides resolve lazily through `resolveIssue`: building them eagerly would
+ * recurse forever, since each side's issue carries the relations pointing at it.
+ */
+export function createCLIIssueRelation(
+	data: CLIIssueRelationData,
+	resolveIssue: (issueId: string) => Promise<Issue>,
+): IssueRelation {
+	const relation = {
+		id: data.id,
+		type: data.type,
+		createdAt: data.createdAt,
+		updatedAt: data.updatedAt,
+		archivedAt: data.archivedAt,
+
+		get issue() {
+			return resolveIssue(data.issueId);
+		},
+		get relatedIssue() {
+			return resolveIssue(data.relatedIssueId);
+		},
+	};
+
+	return relation;
 }
 
 /**

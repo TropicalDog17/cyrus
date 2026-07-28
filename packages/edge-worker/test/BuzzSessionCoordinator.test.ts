@@ -141,6 +141,9 @@ describe("BuzzSessionCoordinator", () => {
 	let track: ReturnType<typeof vi.fn>;
 	let note: ReturnType<typeof vi.fn>;
 	let setState: ReturnType<typeof vi.fn>;
+	let getProjected: ReturnType<typeof vi.fn>;
+	let restoreProjection: ReturnType<typeof vi.fn>;
+	let unprojectableReason: ReturnType<typeof vi.fn>;
 	let approvals: BuzzApprovalRegistry;
 	let logger: ILogger;
 	let coordinator: BuzzSessionCoordinator;
@@ -161,6 +164,13 @@ describe("BuzzSessionCoordinator", () => {
 		track = vi.fn().mockResolvedValue("DEV-42");
 		note = vi.fn().mockResolvedValue(undefined);
 		setState = vi.fn().mockResolvedValue(undefined);
+		getProjected = vi.fn().mockReturnValue({
+			issueId: "issue-42",
+			identifier: "DEV-42",
+			url: "https://linear.app/team/issue/DEV-42",
+		});
+		restoreProjection = vi.fn();
+		unprojectableReason = vi.fn().mockReturnValue(null);
 		logger = createLogger();
 		approvals = new BuzzApprovalRegistry(logger);
 		routes = [{ channelId: CHANNEL_ID, repositoryId: "repo-1" }];
@@ -185,8 +195,16 @@ describe("BuzzSessionCoordinator", () => {
 			getChannelRoutes: () => routes,
 			getSelfPubkey: () => selfPubkey,
 			getRepositoryById: (id) => repositories[id],
+			saveState: vi.fn().mockResolvedValue(undefined),
 			getActivitySinkForChannel: () => ({}) as IActivitySink,
-			projection: { track, note, setState },
+			projection: {
+				track,
+				note,
+				setState,
+				get: getProjected,
+				restore: restoreProjection,
+				unprojectableReason,
+			},
 		});
 	});
 
@@ -384,6 +402,94 @@ describe("BuzzSessionCoordinator", () => {
 			"In Progress",
 			"In Review",
 		]);
+	});
+
+	// A repository with no `teamKeys` projects nothing, and the projection has
+	// no way to say so. Silence there means a human watches a gate release and
+	// assumes a program issue exists somewhere.
+	it("says which repository cannot be projected when it has no teamKeys", async () => {
+		repositories = {
+			"repo-1": { ...REPOSITORY, teamKeys: [] } as RepositoryConfig,
+		};
+		track.mockResolvedValue(null);
+		getProjected.mockReturnValue(undefined);
+		unprojectableReason.mockReturnValue("no-team-keys");
+
+		await coordinator.handleEvent(event());
+		sendMessage.mockClear();
+
+		await coordinator.handleEvent(
+			event({
+				eventType: "reaction_added",
+				messageId: GATE_ID,
+				emoji: "▶️",
+				deliveryId: `reaction_added:${GATE_ID}:▶️:${AUTHOR}`,
+			}),
+		);
+		await settle();
+
+		expect(sendMessage.mock.calls.map((call) => call[0].content)).toEqual([
+			"⚠️ I can't record this in Linear: the `cyrus` repository has no `teamKeys` configured.",
+		]);
+		// The work still runs; only its shadow is missing.
+		expect(startBuzzSession).toHaveBeenLastCalledWith(
+			expect.objectContaining({ phase: "execute" }),
+		);
+		expect(setState).not.toHaveBeenCalled();
+		expect(note).not.toHaveBeenCalled();
+	});
+
+	// A Linear outage also returns null. Telling somebody to fix their config
+	// over a 503 sends them looking for a problem they do not have.
+	it("stays quiet when the projection fails for any other reason", async () => {
+		track.mockResolvedValue(null);
+		getProjected.mockReturnValue(undefined);
+
+		await coordinator.handleEvent(event());
+		sendMessage.mockClear();
+
+		await coordinator.handleEvent(
+			event({
+				eventType: "reaction_added",
+				messageId: GATE_ID,
+				emoji: "▶️",
+				deliveryId: `reaction_added:${GATE_ID}:▶️:${AUTHOR}`,
+			}),
+		);
+		await settle();
+
+		expect(sendMessage.mock.calls.map((call) => call[0].content)).toEqual([]);
+	});
+
+	// A workspace with no Linear tracker also has no `teamKeys`, so a check that
+	// only looks at the config would tell this deployment to set them — a remedy
+	// that would change nothing. Only the projection knows which reason applies.
+	it("stays quiet when the workspace has no Linear tracker at all", async () => {
+		repositories = {
+			"repo-1": { ...REPOSITORY, teamKeys: [] } as RepositoryConfig,
+		};
+		track.mockResolvedValue(null);
+		getProjected.mockReturnValue(undefined);
+		unprojectableReason.mockReturnValue("no-tracker");
+
+		await coordinator.handleEvent(event());
+		sendMessage.mockClear();
+
+		await coordinator.handleEvent(
+			event({
+				eventType: "reaction_added",
+				messageId: GATE_ID,
+				emoji: "▶️",
+				deliveryId: `reaction_added:${GATE_ID}:▶️:${AUTHOR}`,
+			}),
+		);
+		await settle();
+
+		expect(sendMessage.mock.calls.map((call) => call[0].content)).toEqual([]);
+		// The work still runs — a missing tracker is not a reason to refuse it.
+		expect(startBuzzSession).toHaveBeenLastCalledWith(
+			expect.objectContaining({ phase: "execute" }),
+		);
 	});
 
 	it("carries the thread's final response into the projected issue", async () => {

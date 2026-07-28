@@ -374,6 +374,138 @@ Credentials are environment-only (`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`,
 `BUZZ_AUTH_TAG`) — the keypair *is* the identity, there is no token or config
 file. Message bodies go on **stdin** (`--content -`), never argv.
 
+## Buzz Linear projections are created unassigned, and must stay that way
+
+`BuzzLinearProjection.track()` calls `createIssue` with no `assigneeId`. That
+is not an omission waiting to be tidied up: assignment and @mention are the
+only two things that make Linear open an agent session, and Linear ingress
+stays enabled alongside Buzz, so an assigned projection would immediately
+trigger a *second* Cyrus session. Not on the same branch — a Linear-origin
+session derives `DEV-nnn-<slug>` in `<base>/DEV-nnn/` while the Buzz one holds
+`BUZZ-xxxxxx-<slug>` — which is worse: two worktrees doing the same work, both
+able to open a PR. No config flag demotes Linear ingress, so the missing
+`assigneeId` is the only thing standing between the projection and a
+self-trigger loop.
+
+**Rule:** never add `assigneeId` to anything the Buzz projection writes, and
+never put an @mention of Cyrus in a projected description or comment body. If
+a projection must be assigned, assign a human, and check first that the Linear
+webhook path cannot read that write as a delegation.
+
+Enforced by `BuzzLinearProjection.test.ts`, *"creates the issue unassigned"*,
+which asserts the whole key set of the `createIssue` input rather than
+`assigneeId === undefined` — the latter passes for an explicitly-undefined key,
+which is one careless `?? assignee` away from a real id.
+
+**Second rule, for the same class of silence:** never re-decide "is this
+repository projectable?" at a call site. `teamKeys` is `z.array(z.string())`
+with no `.min(1)`, so `[""]` is a config a human can write, and a site testing
+`teamKeys?.length` calls it projectable while `track()` refuses it — the warning
+goes quiet on exactly the config that needed it. Ask `projectionTeamKey()` for
+the team, or `unprojectableReason()` for the reason. The reason matters too: a
+workspace with no issue tracker at all also has no `teamKeys`, and telling that
+operator to set them names a remedy that would change nothing.
+
+## The Buzz tool set, not the prompt, is the execution gate
+
+The Buzz start path in `SessionOrchestrator` chooses `allowedTools` from the
+thread's `BuzzSessionPhase`: the read-only preset
+(`READONLY_DEFAULT_ALLOWED_TOOLS` plus `AskUserQuestion`, which the preset
+omits and triage cannot work without) or the repository's full set. That
+selection is the gate — a triage run that decides to "just fix it" still
+cannot reach `Edit`, `Write` or general `Bash` — so the prompt is a courtesy
+and the tool set is the enforcement.
+
+The trap is which way the condition is written. `BuzzSessionPhase` is a
+two-member union (`triage | execute`), so testing for `triage` and falling
+through to the full set was equivalent *only while that stayed true*: a third
+phase — a plan phase, a review phase — would land in the fall-through branch
+and be handed write access silently, with no test failing, which is precisely
+the defeat the gate exists to prevent. The condition is therefore positive on
+`execute` and the read-only preset is the fall-through, so anything that is not
+`execute` is read-only by construction.
+
+**Rule:** keep the test positive on `execute`. Never rewrite it as a negative
+test against the phases that happen to exist, and when widening
+`BuzzSessionPhase` (`SessionOrchestrator.ts`) or `BuzzThreadContext.phase`
+(`BuzzSessionCoordinator.ts`), leave
+`SessionOrchestrator.buzz-tools.test.ts` — which drives a phase value the union
+does not admit and expects the read-only set — passing rather than adapting it.
+Its sentinel is `__not_a_phase__` for that reason: a realistic name (`planning`,
+`review`) becomes an admitted member the day someone adds it, and the case then
+degenerates into a duplicate of the triage one while still passing green.
+
+## One branch cannot be in two worktrees — Cyrus shares one instead of failing
+
+`GitService.provisionSingleRepoWorktree` checks, when the branch already
+exists, whether it is checked out somewhere else (`findWorktreeByBranch`) and
+if so **returns that other worktree** — "Branch … is already checked out in
+worktree at …, reusing existing worktree" — with no `setupPath`, so setup
+scripts do not re-run either. Git would reject a second `worktree add` for one
+branch; Cyrus never sees that error because it hands back the first tree.
+
+For Buzz this is load-bearing. A Buzz session holds its work unit's branch in
+its own worktree, so a `PR-<n>` session for the same branch does not get a
+tree of its own: it gets the Buzz session's, and two sessions then edit the
+same files with no lock. Nothing errors; it looks like an agent undoing its
+own work.
+
+**Rule:** do not mint a second session for a branch some session already
+holds — route PR review back into the originating session — and never infer a
+fresh workspace from having asked for one.
+
+## Buzz thread state is restored late, and a parked gate saves itself
+
+Two invariants that both fail silently, in opposite directions.
+
+`start()` calls `loadPersistedState()` long before `initializeComponents()`
+builds the Buzz coordinator, so `restoreMappings` cannot hand it anything: it
+parks `state.buzz` in `persistedBuzzState` and `registerBuzzEventTransport`
+drains it through `hydrateBuzzThreads()`. Hydrating inside `restoreMappings`
+compiles, runs, logs nothing and restores nothing. The same field is why
+`serializeMappings` writes the parked state back when Buzz is unconfigured —
+one restart with `buzz` removed from config must not erase every thread's
+phase, program issue and worktree.
+
+The other direction is the gate. A Buzz turn saves at both ends
+(`SessionOrchestrator.startBuzzSession`), but the gate is posted and armed
+*after* that turn returns, and the thread's next turn only happens once the
+gate resolves — so nothing would ever write an open gate to disk.
+`offerGate` therefore calls `deps.saveState()` itself, and without it a boot
+finds no `openPrompt` to re-arm while the message sits in the scrollback
+collecting reactions that go nowhere.
+
+Un-parking has the same shape and is easier to miss: `applyGateDecision`
+records the projected program on the context, and on the `track` branch it then
+returns without ever running a turn. Without its own save, the only record on
+disk is still the pre-decision one — gate open, no program — so a restart
+re-arms an answered gate, the reaction the human already pressed re-delivers
+(the poller's `seenReactions` is empty after a boot) and `track()`, whose dedupe
+map is in memory, projects a *second* program issue. It saves right after the
+decision, before either branch's relay and Linear round trips.
+
+Hydration has its own ordering rule. `hydrateBuzzThreads()` does not await
+`coordinator.hydrate()` — a relay that is down would otherwise hold up the
+whole worker's startup — and the polling ingress starts a few lines later in
+the same function. What makes that safe is that `hydrate` puts *every* thread
+into its map before its first `await` (resuming a lost question posts to the
+relay, up to the CLI's 30s timeout). Move a thread's restore after that await
+and a message arriving mid-hydration misses the map: it is read as a new
+thread, cuts a second worktree, and the next save serializes the half-filled
+map over the threads still waiting to be restored.
+
+A thread whose repository is not in the config is *parked*, not dropped:
+`serialize()` writes parked records back verbatim. `isActive: false` and a
+CYHOST push that transiently omits a repository are both reversible, and this
+record is the only place the thread's phase, program issue and worktree exist.
+
+**Rule:** state owned by a component built in `initializeComponents` is
+restored where that component is constructed, not in `restoreMappings`. And
+whenever a Buzz thread parks on — or un-parks from — something a human answers
+later, save at that moment: the turn's own saves have already happened, or have
+not happened yet. Never make a persisted Buzz thread disappear because
+something it references is momentarily absent.
+
 ## `postToSink` silently drops activities without `externalSessionId`
 
 `AgentSessionManager.postToSink` returns early when
