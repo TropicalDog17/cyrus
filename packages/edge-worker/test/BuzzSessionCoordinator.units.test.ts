@@ -225,6 +225,9 @@ describe("BuzzSessionCoordinator work units", () => {
 				title: "Await cleanup in the teardown",
 				branchName: THREAD_BRANCH,
 				workspace: THREAD_WORKSPACE,
+				// Inherited along with the branch and the worktree: unit 1 is the
+				// thread, so it carries the conversation the thread already had.
+				agentSessionId: `agent-${SESSION_ID}`,
 				blockedBy: [],
 				state: "planned",
 			},
@@ -333,6 +336,39 @@ describe("BuzzSessionCoordinator work units", () => {
 		expect(unitTurn.taskInstructions).toBe(
 			`${CYRUS_SCOPE}\n\nImplement the first unit.`,
 		);
+		// Identity includes the conversation: unit 1 continues the thread's rather
+		// than starting a second transcript on the thread's own session id.
+		expect(unitTurn.resumeSessionId).toBe(`agent-${SESSION_ID}`);
+	});
+
+	// The assertion above cannot see a restarted conversation on its own: the
+	// mock mints one agent id per Cyrus session, and unit 1 shares the thread's.
+	// This one gives every run a distinct id, so the turn that is allowed to
+	// write code has to name the transcript triage actually left behind.
+	it("runs the first unit as a continuation of the thread's own conversation", async () => {
+		let run = 0;
+		startBuzzSession.mockImplementation(async () => `agent-run-${++run}`);
+
+		await openThreadAndReleaseGate();
+		await createTwoUnits();
+		const afterTriage = `agent-run-${run}`;
+
+		await coordinator.startWorkUnit(
+			SESSION_ID,
+			"unit-await-cleanup",
+			"Implement the first unit.",
+		);
+
+		expect(startBuzzSession.mock.calls.at(-1)?.[0].resumeSessionId).toBe(
+			afterTriage,
+		);
+		// And the run's own id follows back onto both records, so the human's next
+		// message in the thread resumes what the unit just ran.
+		const thread = coordinator.serialize().threads[SESSION_ID];
+		expect([
+			thread?.agentSessionId,
+			thread?.workUnits[0]?.agentSessionId,
+		]).toEqual([`agent-run-${run}`, `agent-run-${run}`]);
 	});
 
 	it("runs a later unit on its own session, key, branch and worktree", async () => {

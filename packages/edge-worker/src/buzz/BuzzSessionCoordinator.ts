@@ -915,6 +915,18 @@ export class BuzzSessionCoordinator {
 			title: request.title,
 			branchName,
 			workspace,
+			// The first unit inherits the thread's conversation along with its key,
+			// branch and worktree: it *is* the thread, and its first turn is the one
+			// that implements what the triage exchange just agreed on. Minting it
+			// without this starts a fresh transcript on the thread's own session id,
+			// so the run allowed to write code has no memory of the discussion that
+			// authorized it, and the thread and its own unit then alternate between
+			// two transcripts over one branch. `synthesizeLegacyUnit` copies it for
+			// the same reason; the two paths that both produce "unit 1 = the thread"
+			// have to agree.
+			...(first && context.agentSessionId
+				? { agentSessionId: context.agentSessionId }
+				: {}),
 			blockedBy: request.blockedBy ?? [],
 			state: "planned",
 		};

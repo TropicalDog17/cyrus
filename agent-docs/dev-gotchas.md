@@ -520,10 +520,21 @@ The suffix is also the only encoding of a unit's position: `unitSessionIdFor`
 appends it and `threadSessionIdOf` strips it, so a unit key must never be
 edited by hand or derived from anything but `unitKeyFor`.
 
+Identity includes the *conversation*, which is the half a reviewer's eye slides
+over: `createWorkUnit` copies `agentSessionId` onto the first unit exactly as
+`synthesizeLegacyUnit` does, because `unitExecution` resumes `unit.agentSessionId`
+and nothing else. Mint unit 1 without it and its first turn — the one the gate
+just authorized to write code — starts a *fresh* transcript on the thread's own
+session id, with no memory of the triage exchange it is implementing, after
+which the thread and its own unit alternate between two transcripts over one
+branch. A test whose mock returns one agent id per session cannot see this;
+give each run a distinct id or the assertion is vacuous.
+
 **Rule:** never give the first unit a suffix, and never key a unit's session on
 its index in `workUnits` instead of on its key. Enforced by
 `BuzzSessionCoordinator.units.test.ts`, *"runs the first unit on the identity
-the single-unit path already produced"*.
+the single-unit path already produced"* and *"runs the first unit as a
+continuation of the thread's own conversation"*.
 
 ## A Buzz thread older than work units is re-derived, never migrated
 
