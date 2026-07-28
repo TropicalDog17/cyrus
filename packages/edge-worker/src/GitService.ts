@@ -93,6 +93,44 @@ interface ProvisionedWorktree {
 }
 
 /**
+ * Tail of the FIFO queue of setup-script critical sections. Module-level on
+ * purpose: the resource being protected is process-external (the shared pnpm
+ * global virtual store that user setup scripts install into), so the lock has
+ * to span every {@link GitService} instance in the process, not one instance
+ * or one repository.
+ */
+let setupScriptQueueTail: Promise<void> = Promise.resolve();
+
+/**
+ * Run `critical` with exclusive access to the setup-script lock.
+ *
+ * Within a single `createGitWorktree` call setup is already sequential; the
+ * gap this closes is *across concurrent calls*, where two issues provisioning
+ * at once each run a `cyrus-setup.sh` that does `pnpm install` and corrupt the
+ * shared global store (PR #36). The cost is real: concurrent worktree
+ * provisioning now waits out the other worktree's setup script.
+ *
+ * The lock is **not reentrant** — acquiring it from inside a critical section
+ * deadlocks the process. Acquire it around whole setup phases only, never
+ * inside `runSetupScript` / `runRepoSetupScript` themselves.
+ */
+async function withSetupScriptLock<T>(critical: () => Promise<T>): Promise<T> {
+	const predecessor = setupScriptQueueTail;
+	let release!: () => void;
+	setupScriptQueueTail = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	await predecessor;
+	try {
+		return await critical();
+	} finally {
+		// Released on the throwing path too: a mutex that deadlocks when a user
+		// setup script fails is worse than no mutex at all.
+		release();
+	}
+}
+
+/**
  * Service responsible for Git worktree operations
  */
 export class GitService {
@@ -482,11 +520,13 @@ export class GitService {
 
 			// Run global setup script if configured
 			if (globalSetupScript) {
-				await this.runSetupScript(
-					globalSetupScript,
-					"global",
-					workspacePath,
-					issue,
+				await withSetupScriptLock(() =>
+					this.runSetupScript(
+						globalSetupScript,
+						"global",
+						workspacePath,
+						issue,
+					),
 				);
 			}
 
@@ -531,7 +571,9 @@ export class GitService {
 
 		// Run global setup script once in the parent directory
 		if (globalSetupScript) {
-			await this.runSetupScript(globalSetupScript, "global", parentPath, issue);
+			await withSetupScriptLock(() =>
+				this.runSetupScript(globalSetupScript, "global", parentPath, issue),
+			);
 		}
 
 		const repoPaths: Record<string, string> = {};
@@ -979,6 +1021,10 @@ export class GitService {
 	 * the per-repo setup script. Kept separate from provisioning so callers can
 	 * run setup sequentially — user setup scripts commonly `pnpm install` against
 	 * the shared global virtual store, and concurrent installs corrupt it.
+	 *
+	 * Held under {@link withSetupScriptLock} so that serialization also holds
+	 * across concurrent `createGitWorktree` calls, which the caller-side
+	 * sequencing cannot see.
 	 */
 	private async runWorktreeSetup(
 		setupPath: string,
@@ -987,18 +1033,25 @@ export class GitService {
 		globalSetupScript?: string,
 		onRepoSetupHookEvent?: RepoSetupHookEventHandler,
 	): Promise<void> {
-		// First, run the global setup script if configured
-		if (globalSetupScript) {
-			await this.runSetupScript(globalSetupScript, "global", setupPath, issue);
-		}
+		await withSetupScriptLock(async () => {
+			// First, run the global setup script if configured
+			if (globalSetupScript) {
+				await this.runSetupScript(
+					globalSetupScript,
+					"global",
+					setupPath,
+					issue,
+				);
+			}
 
-		// Then, check for repository setup scripts (cross-platform)
-		await this.runRepoSetupScript(
-			setupPath,
-			issue,
-			repositoryName,
-			onRepoSetupHookEvent,
-		);
+			// Then, check for repository setup scripts (cross-platform)
+			await this.runRepoSetupScript(
+				setupPath,
+				issue,
+				repositoryName,
+				onRepoSetupHookEvent,
+			);
+		});
 	}
 
 	/**

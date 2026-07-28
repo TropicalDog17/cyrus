@@ -454,6 +454,28 @@ own work.
 holds — route PR review back into the originating session — and never infer a
 fresh workspace from having asked for one.
 
+## Setup scripts hold a process-global, non-reentrant lock
+
+Every setup script `GitService` runs — the per-repo `cyrus-setup.sh` and both
+standalone global-script call sites (0-repo plain workspace, multi-repo parent
+directory) — executes inside `withSetupScriptLock`. The protected resource is
+outside the process: user setup scripts `pnpm install` into the shared pnpm
+global virtual store, and two of those at once corrupt it. So the lock is
+module-level, not per-`GitService` and not per-repository; making it an
+instance field silently restores the corruption for the case that actually
+happens (two issues provisioning at once).
+
+The lock is **not reentrant**. Acquiring it inside `runSetupScript` or
+`runRepoSetupScript` — the obvious "safer, closer to the syscall" move —
+deadlocks the whole process the first time a worktree is created, because
+`runWorktreeSetup` already holds it. Acquire around whole setup phases only.
+Anything under the lock must also release on the throwing path: a user setup
+script failing is routine, and a mutex that never unlocks after one is worse
+than no mutex.
+
+The cost is intended: concurrent worktree provisioning now waits out the other
+worktree's setup script, minutes on a slow `pnpm install`.
+
 ## Buzz thread state is restored late, and a parked gate saves itself
 
 Two invariants that both fail silently, in opposite directions.

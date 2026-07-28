@@ -1961,6 +1961,210 @@ describe("GitService", () => {
 		});
 	});
 
+	/**
+	 * Setup scripts must not overlap *across* concurrent createGitWorktree calls
+	 * either: a user `cyrus-setup.sh` typically runs `pnpm install` against the
+	 * shared pnpm global virtual store, and two concurrent installs corrupt it
+	 * (PR #36). The lock protecting that store is process-global, so these tests
+	 * drive two separate GitService instances — an instance-scoped or
+	 * repository-scoped lock would let them interleave.
+	 */
+	describe("setup-script serialization across concurrent createGitWorktree calls", () => {
+		const passthroughGitMock = () => {
+			mockExecSync.mockImplementation((cmd: any) => {
+				const cmdStr = String(cmd);
+				if (cmdStr === "git rev-parse --git-dir") return Buffer.from(".git\n");
+				if (cmdStr === "git worktree list --porcelain") return "";
+				if (cmdStr.includes("git rev-parse --verify"))
+					throw new Error("not found");
+				if (cmdStr.includes("git fetch origin")) return Buffer.from("");
+				if (cmdStr.includes("git ls-remote"))
+					return Buffer.from("abc123 refs/heads/main\n");
+				if (cmdStr.includes("git worktree add")) return Buffer.from("");
+				return Buffer.from("");
+			});
+		};
+
+		/**
+		 * Replace a setup step with one that logs enter/exit around a macrotask
+		 * yield. The yield is where a second, unserialized setup would slip in.
+		 */
+		const instrumentSetupStep = (
+			svc: GitService,
+			method: "runSetupScript" | "runRepoSetupScript",
+			label: string,
+			log: string[],
+			outcome: "resolves" | "throws" = "resolves",
+		) => {
+			(svc as any)[method] = vi.fn(async () => {
+				log.push(`enter:${label}`);
+				await new Promise((resolve) => setImmediate(resolve));
+				if (outcome === "throws") {
+					log.push(`throw:${label}`);
+					throw new Error(`setup script failed: ${label}`);
+				}
+				log.push(`exit:${label}`);
+			});
+		};
+
+		const makeService = () =>
+			new GitService({ cyrusHome: "/home/user/.cyrus" }, mockLogger);
+
+		it("never interleaves repo setup between two concurrently provisioned worktrees", async () => {
+			passthroughGitMock();
+			const log: string[] = [];
+			const serviceA = makeService();
+			const serviceB = makeService();
+			instrumentSetupStep(serviceA, "runRepoSetupScript", "A", log);
+			instrumentSetupStep(serviceB, "runRepoSetupScript", "B", log);
+
+			const [workspaceA, workspaceB] = await Promise.all([
+				serviceA.createGitWorktree(
+					makeIssue({
+						id: "issue-a",
+						identifier: "ENG-1",
+						branchName: "cyrustester/eng-1",
+					}),
+					[
+						makeRepository({
+							id: "repo-a",
+							name: "repo-a",
+							repositoryPath: "/home/user/repo-a",
+						}),
+					],
+				),
+				serviceB.createGitWorktree(
+					makeIssue({
+						id: "issue-b",
+						identifier: "ENG-2",
+						branchName: "cyrustester/eng-2",
+					}),
+					[
+						makeRepository({
+							id: "repo-b",
+							name: "repo-b",
+							repositoryPath: "/home/user/repo-b",
+						}),
+					],
+				),
+			]);
+
+			expect(log).toEqual(["enter:A", "exit:A", "enter:B", "exit:B"]);
+			expect(workspaceA.path).toBe("/home/user/.cyrus/worktrees/ENG-1");
+			expect(workspaceB.path).toBe("/home/user/.cyrus/worktrees/ENG-2");
+		});
+
+		it("releases the lock when a setup script throws, so the next worktree still runs setup", async () => {
+			passthroughGitMock();
+			const log: string[] = [];
+			const serviceA = makeService();
+			const serviceB = makeService();
+			instrumentSetupStep(serviceA, "runRepoSetupScript", "A", log, "throws");
+			instrumentSetupStep(serviceB, "runRepoSetupScript", "B", log);
+
+			const pendingA = serviceA.createGitWorktree(
+				makeIssue({
+					id: "issue-a",
+					identifier: "ENG-1",
+					branchName: "cyrustester/eng-1",
+				}),
+				[
+					makeRepository({
+						id: "repo-a",
+						name: "repo-a",
+						repositoryPath: "/home/user/repo-a",
+					}),
+				],
+			);
+			const pendingB = serviceB.createGitWorktree(
+				makeIssue({
+					id: "issue-b",
+					identifier: "ENG-2",
+					branchName: "cyrustester/eng-2",
+				}),
+				[
+					makeRepository({
+						id: "repo-b",
+						name: "repo-b",
+						repositoryPath: "/home/user/repo-b",
+					}),
+				],
+			);
+
+			await expect(pendingA).rejects.toThrow("setup script failed: A");
+			const workspaceB = await pendingB;
+
+			expect(log).toEqual(["enter:A", "throw:A", "enter:B", "exit:B"]);
+			expect(workspaceB.path).toBe("/home/user/.cyrus/worktrees/ENG-2");
+		});
+
+		it("serializes the standalone global setup scripts of the 0-repo and multi-repo layouts", async () => {
+			passthroughGitMock();
+			const log: string[] = [];
+			const serviceA = makeService();
+			const serviceB = makeService();
+			// Global setup script of a 0-repo plain workspace...
+			instrumentSetupStep(serviceA, "runSetupScript", "global-A", log);
+			// ...against the parent-level global setup script of a multi-repo
+			// workspace, plus that workspace's own per-repo setup scripts.
+			instrumentSetupStep(serviceB, "runSetupScript", "global-B", log);
+			(serviceB as any).runRepoSetupScript = vi.fn(
+				async (_workspacePath: string, _issue: unknown, repoName: string) => {
+					log.push(`enter:${repoName}`);
+					await new Promise((resolve) => setImmediate(resolve));
+					log.push(`exit:${repoName}`);
+				},
+			);
+
+			const [workspaceA, workspaceB] = await Promise.all([
+				serviceA.createGitWorktree(
+					makeIssue({ id: "issue-a", identifier: "ENG-1" }),
+					[],
+					{
+						globalSetupScript: "/home/user/global-setup.sh",
+						workspaceBaseDir: "/home/user/.cyrus/worktrees",
+					},
+				),
+				serviceB.createGitWorktree(
+					makeIssue({
+						id: "issue-b",
+						identifier: "ENG-2",
+						branchName: "cyrustester/eng-2",
+					}),
+					[
+						makeRepository({
+							id: "repo-b1",
+							name: "repo-b1",
+							repositoryPath: "/home/user/repo-b1",
+						}),
+						makeRepository({
+							id: "repo-b2",
+							name: "repo-b2",
+							repositoryPath: "/home/user/repo-b2",
+						}),
+					],
+					{ globalSetupScript: "/home/user/global-setup.sh" },
+				),
+			]);
+
+			expect(log).toEqual([
+				"enter:global-A",
+				"exit:global-A",
+				"enter:global-B",
+				"exit:global-B",
+				"enter:repo-b1",
+				"exit:repo-b1",
+				"enter:repo-b2",
+				"exit:repo-b2",
+			]);
+			expect(workspaceA.path).toBe("/home/user/.cyrus/worktrees/ENG-1");
+			expect(workspaceB.repoPaths).toEqual({
+				"repo-b1": "/home/user/.cyrus/worktrees/ENG-2/repo-b1",
+				"repo-b2": "/home/user/.cyrus/worktrees/ENG-2/repo-b2",
+			});
+		});
+	});
+
 	describe("determineBaseBranch", () => {
 		it("returns default base branch when no graphite label and no parent", async () => {
 			const issue = makeIssue();
