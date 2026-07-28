@@ -241,9 +241,9 @@ describe("BuzzSessionCoordinator legacy work unit", () => {
 		expect(units()).toEqual([synthesized()]);
 	});
 
-	// The thread has done the work its program describes only if the gate let it
-	// out of triage; one still parked on the gate has not started.
-	it("synthesizes a thread still in triage as a planned unit", async () => {
+	// A thread parked on its gate has not done the work its program describes, and
+	// the unsuffixed first-unit slot is exactly what its first plan slice needs.
+	it("synthesizes nothing for a thread the gate has not let out of triage", async () => {
 		await hydrate({
 			phase: "triage",
 			openPrompt: {
@@ -254,13 +254,57 @@ describe("BuzzSessionCoordinator legacy work unit", () => {
 			},
 		});
 
-		expect(units()).toEqual([synthesized({ state: "planned" })]);
+		expect(units()).toEqual([]);
+
+		// So the first slice of its plan is still the unsuffixed first unit, on the
+		// branch and in the worktree already on disk — no `-u2`, no second tree.
+		expect(
+			await coordinator.createWorkUnit(SESSION_ID, {
+				unitId: "slice-await-cleanup",
+				title: "Await cleanup in the teardown",
+			}),
+		).toEqual({
+			unitId: "slice-await-cleanup",
+			unitKey: THREAD_KEY,
+			title: "Await cleanup in the teardown",
+			branchName: THREAD_BRANCH,
+			workspace: THREAD_WORKSPACE,
+			agentSessionId: "claude-session-1",
+			blockedBy: [],
+			state: "planned",
+		});
+		expect(createBuzzWorkspace).not.toHaveBeenCalled();
+	});
+
+	// 📝 is the human saying "no code changes". It still projects a program issue,
+	// so a `program` check cannot tell it apart from an implemented thread: gating
+	// on that alone gave a declined thread a runnable, unblocked unit on the next
+	// boot — the self-promotion into code changes the gate exists to prevent.
+	it("synthesizes nothing for a thread the human declined with 📝", async () => {
+		await coordinator.handleEvent(event());
+		await coordinator.handleEvent(reaction("📝"));
+		await settle();
+
+		const persisted = coordinator.serialize();
+		const declined = persisted.threads[SESSION_ID];
+		expect([declined?.phase, declined?.program, declined?.workUnits]).toEqual([
+			"triage",
+			PROGRAM,
+			[],
+		]);
+
+		// Restart on exactly that record.
+		await coordinator.hydrate(persisted);
+
+		expect(units()).toEqual([]);
 	});
 
 	// The whole point of the first unit having no `-u1`: the ▶️ runs on the branch
 	// and worktree that are already on disk, and mints neither a second unit nor a
-	// second worktree.
-	it("runs that unit, not a second one, when the gate is released", async () => {
+	// second worktree. The record for it is derived on the next boot instead, from
+	// the phase the gate just wrote — and it describes that same identity, which is
+	// what makes running the thread and running its first unit the same act.
+	it("runs a released gate on the thread's own branch, and derives that unit on the next boot", async () => {
 		await hydrate({
 			phase: "triage",
 			openPrompt: {
@@ -296,10 +340,14 @@ describe("BuzzSessionCoordinator legacy work unit", () => {
 		});
 		expect(startBuzzSession).toHaveBeenCalledTimes(1);
 		expect(createBuzzWorkspace).not.toHaveBeenCalled();
-		// Still one unit, and it is the same record — the turn it just ran was its
-		// own, so its conversation moved with the thread's.
+		expect(units()).toEqual([]);
+
+		await coordinator.hydrate(coordinator.serialize());
+
+		// Exactly one unit, finished, on the identity the turn above ran under —
+		// and the conversation that turn produced, not the one it resumed.
 		expect(units()).toEqual([
-			synthesized({ state: "planned", agentSessionId: `agent-${SESSION_ID}` }),
+			synthesized({ agentSessionId: `agent-${SESSION_ID}` }),
 		]);
 	});
 

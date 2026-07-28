@@ -954,12 +954,28 @@ export class BuzzSessionCoordinator {
 	 * crash before the next save re-derives exactly the same one.
 	 *
 	 * Idempotent on the only rule checkable without a plan — a thread with any
-	 * unit at all has been through the planner and is left alone. A thread with no
-	 * program has no work to synthesize either: it never left triage, so its first
-	 * plan slice should still mint the unsuffixed first unit.
+	 * unit at all has been through the planner and is left alone.
+	 *
+	 * Gated on the gate's *outcome*, not on the program existing. Both answers
+	 * project a program issue and only ▶️ promotes the thread to `execute`, so a
+	 * thread the human declined with 📝 — "just track it, no code changes" —
+	 * persists as `program` + `phase: "triage"` and is indistinguishable from an
+	 * implemented one to a `program` check. Synthesizing there would hand the
+	 * dependency advance a runnable, unblocked unit for work somebody explicitly
+	 * refused, which is the self-promotion into code changes the gate exists to
+	 * prevent, and it would consume the thread's unsuffixed first-unit slot for a
+	 * branch nothing was ever written to — pushing its first real plan slice onto
+	 * a `-u2` branch and worktree of its own and orphaning the ones on disk.
+	 *
+	 * The phase is also what makes the derived `state` stable. A synthesized unit
+	 * describes work that has already run, so it is `finished`, and a thread never
+	 * leaves `execute`. Deriving the state from a phase that can still change
+	 * would freeze a snapshot into the state file the moment anything else saved,
+	 * leaving a persisted record that permanently contradicts its own thread.
 	 */
 	private synthesizeLegacyUnit(context: BuzzThreadContext): void {
 		if (context.workUnits.length > 0) return;
+		if (context.phase !== "execute") return;
 		if (!context.program || !context.branchName) return;
 
 		context.workUnits.push({
@@ -975,9 +991,9 @@ export class BuzzSessionCoordinator {
 			identifier: context.program.identifier,
 			url: context.program.url,
 			blockedBy: [],
-			// A thread already let out of triage has run the work its program
-			// describes; one still in triage has not, and the gate is what runs it.
-			state: context.phase === "execute" ? "finished" : "planned",
+			// A thread let out of triage has run the work its program describes,
+			// and that is the only kind of thread that reaches this line.
+			state: "finished",
 		});
 	}
 

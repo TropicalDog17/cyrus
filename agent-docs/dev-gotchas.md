@@ -547,11 +547,25 @@ and again on the unit path — instead of migrating the state file, and
 Three things about it are load-bearing. Its `unitId` is the thread's **session
 id**: changing that mints a second unit for the same branch on the next hydrate,
 because idempotence is decided by `workUnits.length`, not by matching a plan.
-Synthesis is gated on `program`, so a thread still in triage keeps zero units and
-its first plan slice can still be the unsuffixed first unit. And once a legacy
-unit exists the thread's own branch is taken, so the first plan slice of that
-thread mints `-u2` — `createWorkUnit` derives position from `workUnits.length`,
-which only holds while units are append-only and in plan order.
+Synthesis is gated on `phase === "execute"` — the gate's *outcome* — and not on
+`program`, because both gate answers project a program issue and only ▶️ promotes
+the thread: a thread the human declined with 📝 persists as `program` +
+`phase: "triage"` and a `program` check cannot tell the two apart. And once a
+legacy unit exists the thread's own branch is taken, so the first plan slice of
+that thread mints `-u2` — `createWorkUnit` derives position from
+`workUnits.length`, which only holds while units are append-only and in plan
+order.
+
+Two things follow from the gate condition, and both are why it is not merely a
+tidier predicate. A declined thread that gained a unit would hand the dependency
+advance runnable, unblocked work somebody explicitly refused, and it would eat
+the unsuffixed first-unit slot so the thread's first *real* slice minted a `-u2`
+branch and worktree, orphaning the ones on disk. And a synthesized unit's `state`
+must be derived from something that can no longer change: `execute` is terminal,
+so the unit is always `finished`. Derive it from a phase still in flight and the
+next `saveState` — `applyGateDecision` saves before it runs the turn — writes a
+snapshot to disk that permanently contradicts the thread it came from, with
+`workUnits.length > 0` guaranteeing nothing ever re-derives it.
 
 **Rule:** never delete, reorder or re-key a persisted work unit, and never make
 synthesis conditional on anything a *newer* build writes — a thread that stops
