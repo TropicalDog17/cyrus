@@ -669,6 +669,19 @@ A thread whose repository is not in the config is *parked*, not dropped:
 CYHOST push that transiently omits a repository are both reversible, and this
 record is the only place the thread's phase, program issue and worktree exist.
 
+The repository question is the one prompt none of that reaches, and the code
+comment there says so rather than claiming otherwise. `chooseRepository` is
+awaited *before* `startThread` — the repository is what the thread is waiting
+for — while `serialize` builds `openPrompt` by walking `threads` /
+`parkedThreads`. So a pending repository question exists in no state file, no
+boot can announce it, and a restart drops it silently, including the case where
+the human had already reacted: the answer is on the relay with nothing registered
+to receive it. Recovery is the human saying the message again. Do not close the
+gap with a `timeoutMs` — a default here provisions a worktree and a branch in a
+repository nobody chose, which is worse than a repeated question. Pinned by
+`BuzzSessionCoordinator.test.ts`, *"persists nothing while the repository
+question is pending"*.
+
 One more ordering rule inside `offerGate` and `chooseRepository`: **register the
 prompt before seeding its reactions.** Seeding is two to four `buzz reactions
 add` subprocesses plus relay round trips, and the message — "React to choose" —

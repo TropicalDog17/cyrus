@@ -1509,7 +1509,19 @@ export class BuzzSessionCoordinator {
 		//
 		// Deliberately no `timeoutMs`: the registry arms a timer only when one is
 		// given, and a timeout here would pick a repository nobody chose — a
-		// worktree and a branch in the wrong codebase.
+		// worktree and a branch in the wrong codebase. Waiting is not silent
+		// either: the question is a message sitting in the thread.
+		//
+		// One known gap, and it is *not* covered by `resumePrompt`. This prompt is
+		// registered before any thread exists — the repository is what `startThread`
+		// is still waiting for — and `serialize` builds `openPrompt` by walking
+		// `threads` / `parkedThreads`, so a pending repository question is in no
+		// state file and no boot can announce it. A restart here therefore drops
+		// the question without a word, including the case where the human had
+		// already reacted: their answer is on the relay and nothing is registered
+		// to receive it. Recovery is for the human to say the message again, which
+		// re-asks. Do not "fix" this with a timeout — a default here is a worktree
+		// in the wrong repository, which is worse than a repeated question.
 		const pending = this.deps.approvals.register({
 			eventId,
 			channelId: event.channelId,

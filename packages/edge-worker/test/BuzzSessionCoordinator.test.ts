@@ -709,6 +709,34 @@ describe("BuzzSessionCoordinator", () => {
 		);
 	});
 
+	// A characterization test, not an aspiration. Every other Buzz prompt is
+	// persisted and dealt with on boot — a gate is re-armed, a question is
+	// announced as lost. The repository question cannot be: it is registered
+	// before `startThread`, because the repository is what the thread is waiting
+	// for, and `serialize` builds `openPrompt` from the threads it has. So a
+	// restart here drops the question with no message in the thread, and the
+	// human's recovery is to say it again. If this ever starts failing, somebody
+	// has closed the gap — update the comment in `chooseRepository` and the
+	// gotcha that both state it.
+	it("persists nothing while the repository question is pending", async () => {
+		routes = [
+			{
+				channelId: CHANNEL_ID,
+				repositoryIds: ["repo-1", "repo-2"],
+			} as (typeof routes)[number],
+		];
+
+		const handled = coordinator.handleEvent(event());
+		await vi.waitFor(() =>
+			expect(approvals.hasPendingPrompt(`buzz-${ROOT_ID}`)).toBe(true),
+		);
+
+		expect(coordinator.serialize()).toEqual({ threads: {}, repoMru: [] });
+
+		approvals.resolveByReaction(GATE_ID, "1⃣", AUTHOR);
+		await handled;
+	});
+
 	// Same window as the gate's, and the same rule: the question is readable and
 	// answerable before Cyrus has finished seeding its own options.
 	it("takes a repository answer given while its options are still being seeded", async () => {
