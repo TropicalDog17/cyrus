@@ -402,6 +402,7 @@ export class BuzzSessionCoordinator {
 				workUnits: thread.workUnits,
 				...(thread.plan ? { plan: thread.plan } : {}),
 			};
+			this.synthesizeLegacyUnit(context);
 			this.threads.set(sessionId, context);
 			this.parkedThreads.delete(sessionId);
 			restored++;
@@ -712,6 +713,8 @@ export class BuzzSessionCoordinator {
 
 		if (agentSessionId) {
 			context.agentSessionId = agentSessionId;
+			const unit = this.threadUnit(context);
+			if (unit) unit.agentSessionId = agentSessionId;
 		}
 
 		if (context.phase === "triage") {
@@ -778,6 +781,22 @@ export class BuzzSessionCoordinator {
 				? { agentSessionId: context.agentSessionId }
 				: {}),
 		};
+	}
+
+	/**
+	 * The unit a thread runs its *own* turns as, when a record for it exists.
+	 *
+	 * A thread's first unit shares its key, branch, worktree and session, so the
+	 * two records describe one conversation held in two places. Either path can be
+	 * the one that ran the last turn — a message in the thread, or a program
+	 * advance — so whichever it was, the other's copy of the agent session has to
+	 * follow it, or the next turn resumes a conversation that has moved on.
+	 */
+	private threadUnit(
+		context: BuzzThreadContext,
+	): PersistedBuzzWorkUnit | undefined {
+		const first = context.workUnits[0];
+		return first?.unitKey === context.sessionKey ? first : undefined;
 	}
 
 	private unitExecution(
@@ -867,12 +886,63 @@ export class BuzzSessionCoordinator {
 	}
 
 	/**
+	 * Give a thread that predates the program model the one work unit it already
+	 * is.
+	 *
+	 * Every thread persisted before this stage carries `workUnits: []` and a
+	 * program issue that *is* its single piece of work — 0013's one issue per
+	 * thread, which 0014 supersedes for new programs without stranding the live
+	 * ones. Nothing would ever mint a unit for such a thread, so anything that
+	 * reaches it through the unit path would find a thread with a branch, a
+	 * worktree and an issue, and nothing runnable.
+	 *
+	 * The record is re-derived rather than migrated. Key, branch and worktree are
+	 * the thread's own — which is what the missing `-u1` exists for — the issue is
+	 * the program's, and the `unitId` is the thread's session id: a value every
+	 * caller already holds, and one no plan slice mints. Deliberately no save:
+	 * nothing is created on disk, the unit is a function of the thread, and a
+	 * crash before the next save re-derives exactly the same one.
+	 *
+	 * Idempotent on the only rule checkable without a plan — a thread with any
+	 * unit at all has been through the planner and is left alone. A thread with no
+	 * program has no work to synthesize either: it never left triage, so its first
+	 * plan slice should still mint the unsuffixed first unit.
+	 */
+	private synthesizeLegacyUnit(context: BuzzThreadContext): void {
+		if (context.workUnits.length > 0) return;
+		if (!context.program || !context.branchName) return;
+
+		context.workUnits.push({
+			unitId: context.sessionId,
+			unitKey: context.sessionKey,
+			title: context.title,
+			branchName: context.branchName,
+			workspace: context.workspace,
+			...(context.agentSessionId
+				? { agentSessionId: context.agentSessionId }
+				: {}),
+			issueId: context.program.issueId,
+			identifier: context.program.identifier,
+			url: context.program.url,
+			blockedBy: [],
+			// A thread already let out of triage has run the work its program
+			// describes; one still in triage has not, and the gate is what runs it.
+			state: context.phase === "execute" ? "finished" : "planned",
+		});
+	}
+
+	/**
 	 * Run one turn for a work unit.
 	 *
 	 * The entry point execution goes through once a thread has a program: it is
 	 * the unit, not the thread, that owns the branch being written to. Whether a
 	 * unit is *allowed* to start — what it waits for, and what happens when it
 	 * fails — belongs to the program advance and is not decided here.
+	 *
+	 * A thread whose program was never planned resolves its one unit here too, so
+	 * a thread that has been live since before work units existed runs as the
+	 * one-unit case instead of finding nothing to run. Its `unitId` is the
+	 * thread's own session id.
 	 *
 	 * The caller owns the queue. Like {@link applyGateDecision}, this is meant to
 	 * be invoked from inside a queued task for the thread, so enqueueing here
@@ -884,6 +954,7 @@ export class BuzzSessionCoordinator {
 		prompt: string,
 	): Promise<void> {
 		const context = this.threads.get(sessionId);
+		if (context) this.synthesizeLegacyUnit(context);
 		const unit = context?.workUnits.find(
 			(candidate) => candidate.unitId === unitId,
 		);
@@ -902,6 +973,11 @@ export class BuzzSessionCoordinator {
 
 		if (agentSessionId) {
 			unit.agentSessionId = agentSessionId;
+			// The thread's own first unit is the thread — see {@link threadUnit} —
+			// so a turn run through it is also the thread's latest conversation.
+			if (unit === this.threadUnit(context)) {
+				context.agentSessionId = agentSessionId;
+			}
 			// The run's own saves happen before this is known, and nothing else
 			// writes a unit's agent session: without a save here a restart drops
 			// the conversation the next turn of this unit would have resumed.

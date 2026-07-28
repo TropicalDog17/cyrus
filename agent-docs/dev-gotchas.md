@@ -498,6 +498,28 @@ its index in `workUnits` instead of on its key. Enforced by
 `BuzzSessionCoordinator.units.test.ts`, *"runs the first unit on the identity
 the single-unit path already produced"*.
 
+## A Buzz thread older than work units is re-derived, never migrated
+
+Every thread persisted before the two-tier model carries `workUnits: []` and a
+`program` issue that *is* its single piece of work.
+`BuzzSessionCoordinator.synthesizeLegacyUnit` re-derives that unit — on hydrate
+and again on the unit path — instead of migrating the state file, and
+`PersistedBuzzThread` has no version to hang a migration on anyway.
+
+Three things about it are load-bearing. Its `unitId` is the thread's **session
+id**: changing that mints a second unit for the same branch on the next hydrate,
+because idempotence is decided by `workUnits.length`, not by matching a plan.
+Synthesis is gated on `program`, so a thread still in triage keeps zero units and
+its first plan slice can still be the unsuffixed first unit. And once a legacy
+unit exists the thread's own branch is taken, so the first plan slice of that
+thread mints `-u2` — `createWorkUnit` derives position from `workUnits.length`,
+which only holds while units are append-only and in plan order.
+
+**Rule:** never delete, reorder or re-key a persisted work unit, and never make
+synthesis conditional on anything a *newer* build writes — a thread that stops
+running because it predates a refactor fails silently, mid-conversation.
+Enforced by `BuzzSessionCoordinator.legacy-unit.test.ts`.
+
 ## Setup scripts hold a process-global, non-reentrant lock
 
 Every setup script `GitService` runs — the per-repo `cyrus-setup.sh` and both
