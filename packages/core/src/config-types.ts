@@ -14,10 +14,6 @@ import type { Issue } from "./issue-tracker/types.js";
 
 // Re-export schemas and types from config-schemas
 export {
-	type BuzzChannelRoute,
-	BuzzChannelRouteSchema,
-	type BuzzConfig,
-	BuzzConfigSchema,
 	DEFAULT_CLAUDE_SESSION_KEEP_ALIVE_MINUTES,
 	type EdgeConfig,
 	type EdgeConfigPayload,

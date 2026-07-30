@@ -1032,59 +1032,6 @@
 			},
 			"required": ["httpProxyPort", "socksProxyPort"],
 			"additionalProperties": false
-		},
-		"buzz": {
-			"type": "object",
-			"properties": {
-				"cliPath": {
-					"type": "string"
-				},
-				"relayUrl": {
-					"type": "string"
-				},
-				"allowedPubkeys": {
-					"type": "array",
-					"items": {
-						"type": "string"
-					}
-				},
-				"channels": {
-					"type": "array",
-					"items": {
-						"type": "object",
-						"properties": {
-							"channelId": {
-								"type": "string"
-							},
-							"repositoryId": {
-								"type": "string"
-							},
-							"repositoryIds": {
-								"type": "array",
-								"items": {
-									"type": "string"
-								}
-							}
-						},
-						"required": ["channelId"],
-						"additionalProperties": false
-					}
-				},
-				"ingress": {
-					"type": "string",
-					"enum": ["poll", "webhook"]
-				},
-				"pollIntervalSeconds": {
-					"type": "integer",
-					"minimum": 2,
-					"maximum": 9007199254740991
-				},
-				"selfPubkey": {
-					"type": "string"
-				}
-			},
-			"required": ["cliPath", "relayUrl"],
-			"additionalProperties": false
 		}
 	},
 	"required": ["repositories"],

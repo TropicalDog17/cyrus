@@ -22,7 +22,6 @@ packages/claude-runner/         # Claude Code SDK wrapper
 packages/cursor-runner/         # Cursor Agent SDK wrapper
 packages/linear-event-transport/
 packages/github-event-transport/
-packages/buzz-event-transport/   # Buzz (Nostr chat) workflow-bridge ingress
 packages/mcp-tools/             # cyrus-tools MCP server
 packages/config-updater/        # CYHOST remote config
 packages/cloudflare-tunnel-client/

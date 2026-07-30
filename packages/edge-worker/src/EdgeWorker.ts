@@ -2,10 +2,6 @@ import { EventEmitter } from "node:events";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { LinearClient } from "@linear/sdk";
-import {
-	BuzzEventTransport,
-	type BuzzWebhookEvent,
-} from "cyrus-buzz-event-transport";
 import type { SessionStore } from "cyrus-claude-runner";
 import {
 	findTranscriptPath,
@@ -85,7 +81,6 @@ import { ActivityPoster } from "./ActivityPoster.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import {
 	AskUserQuestionHandler,
-	DEFAULT_QUESTION_TIMEOUT_MS,
 	questionTimeoutMsFromMinutes,
 } from "./AskUserQuestionHandler.js";
 import { AttachmentService } from "./AttachmentService.js";
@@ -95,19 +90,6 @@ import {
 	formatRepoSetupHookActivity,
 	formatRoutingThought,
 } from "./activity/index.js";
-import { BuzzApprovalRegistry } from "./buzz/BuzzApprovalRegistry.js";
-import { BuzzCliClient } from "./buzz/BuzzCliClient.js";
-import {
-	BuzzLinearProjection,
-	buzzThreadDeepLink,
-	projectionTeamKey,
-} from "./buzz/BuzzLinearProjection.js";
-import { BuzzPollingSource } from "./buzz/BuzzPollingSource.js";
-import { BuzzQuestionHandler } from "./buzz/BuzzQuestionHandler.js";
-import {
-	BuzzSessionCoordinator,
-	CATCH_ALL_CHANNEL,
-} from "./buzz/BuzzSessionCoordinator.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
 import { CyrusToolsHost } from "./CyrusToolsHost.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
@@ -132,7 +114,6 @@ import {
 	type SkillSessionContext,
 	SkillsPluginResolver,
 } from "./SkillsPluginResolver.js";
-import { BuzzActivitySink } from "./sinks/BuzzActivitySink.js";
 import type { IActivitySink } from "./sinks/IActivitySink.js";
 import { LinearActivitySink } from "./sinks/LinearActivitySink.js";
 import { NoopActivitySink } from "./sinks/NoopActivitySink.js";
@@ -174,15 +155,6 @@ export class EdgeWorker extends EventEmitter {
 	private linearEventTransport: LinearEventTransport | null = null; // Single event transport for webhook delivery
 	private gitHubEventTransport: GitHubEventTransport | null = null; // GitHub event transport for forwarded GitHub webhooks
 	private gitHubAppTokenProvider: GitHubAppTokenProvider | null = null; // Self-hosted GitHub App token minting
-	private buzzEventTransport: BuzzEventTransport | null = null; // Buzz workflow-bridge transport
-	private buzzSessionCoordinator: BuzzSessionCoordinator | null = null; // Buzz trigger -> session
-	private buzzCliClient: BuzzCliClient | null = null; // Shell-out wrapper over the `buzz` binary
-	private buzzActivitySinks: Map<string, IActivitySink> = new Map(); // Maps Buzz channel ID to its thread-posting sink
-	private buzzPollingSource: BuzzPollingSource | null = null; // Relay poller, for deployments with no public ingress
-	private buzzApprovals: BuzzApprovalRegistry | null = null; // Gate + question prompts awaiting a human
-	private buzzQuestionHandler: BuzzQuestionHandler | null = null; // AskUserQuestion, asked in a Buzz thread
-	private buzzProjection: BuzzLinearProjection | null = null; // Buzz work recorded as unassigned Linear issues
-	private persistedBuzzState: SerializableEdgeWorkerState["buzz"]; // Buzz threads read from disk, parked until the coordinator exists
 	private gitHubCommentService!: GitHubCommentService; // Service for posting comments back to GitHub PRs
 	private cliRPCServer: CLIRPCServer | null = null; // CLI RPC server for CLI platform mode
 	private configUpdater: ConfigUpdater | null = null; // Single config updater for configuration updates
@@ -994,12 +966,7 @@ export class EdgeWorker extends EventEmitter {
 		// for webhook URL verification to succeed.
 		this.registerGitHubEventTransport();
 
-		// 3. Register the Buzz event transport when Buzz is configured. Unlike
-		// GitHub this is opt-in: without a channel map and a relay identity
-		// there is nothing for the endpoint to do.
-		this.registerBuzzEventTransport();
-
-		// 4. Create and register ConfigUpdater (both platforms)
+		// 3. Create and register ConfigUpdater (both platforms)
 		this.configUpdater = new ConfigUpdater(
 			this.sharedApplicationServer.getFastifyInstance(),
 			this.cyrusHome,
@@ -1138,228 +1105,6 @@ export class EdgeWorker extends EventEmitter {
 		this.logger.info("Webhook endpoint: POST /github-webhook");
 	}
 
-	/**
-	 * Wire the Buzz conversational surface: workflow-bridge ingress, a shared
-	 * `buzz` CLI client, and the coordinator that turns a trigger into a
-	 * session.
-	 *
-	 * Opt-in, and silent when unconfigured. Secrets come from the environment
-	 * rather than `config.json` (which CYHOST may push over the wire), matching
-	 * how GitHub sources its webhook secret and App credentials.
-	 */
-	private registerBuzzEventTransport(): void {
-		const buzz = this.config.buzz;
-		if (!buzz) return;
-
-		const privateKey = process.env.BUZZ_PRIVATE_KEY;
-		if (!privateKey) {
-			this.logger.warn(
-				"Buzz is configured but BUZZ_PRIVATE_KEY is unset — Buzz is disabled",
-			);
-			return;
-		}
-
-		// Only the webhook ingress has a shared secret to check; polling reaches
-		// the relay outbound and has nothing to authenticate inbound.
-		const webhookSecret = process.env.CYRUS_BUZZ_WEBHOOK_SECRET;
-		if ((buzz.ingress ?? "poll") === "webhook" && !webhookSecret) {
-			this.logger.warn(
-				"Buzz ingress is 'webhook' but CYRUS_BUZZ_WEBHOOK_SECRET is unset — Buzz ingress is disabled",
-			);
-			return;
-		}
-
-		this.buzzCliClient = new BuzzCliClient({
-			binaryPath: buzz.cliPath,
-			relayUrl: buzz.relayUrl,
-			privateKey,
-			...(process.env.BUZZ_AUTH_TAG
-				? { authTag: process.env.BUZZ_AUTH_TAG }
-				: {}),
-		});
-
-		// Surface an unbuilt or drifted CLI at startup rather than at the first
-		// reply, when the failure would look like "the agent went quiet".
-		this.buzzCliClient.checkAvailable().catch((error) => {
-			this.logger.error(
-				"Buzz CLI check failed — Buzz replies will not be delivered",
-				error instanceof Error ? error : new Error(String(error)),
-			);
-		});
-
-		this.buzzApprovals = new BuzzApprovalRegistry(this.logger);
-
-		this.warnUnprojectableBuzzRepositories();
-
-		this.buzzProjection = new BuzzLinearProjection({
-			logger: this.logger,
-			getIssueTracker: (repository) =>
-				repository.linearWorkspaceId
-					? (this.issueTrackers.get(repository.linearWorkspaceId) ?? null)
-					: null,
-			buildThreadUrl: buzzThreadDeepLink,
-		});
-
-		this.buzzSessionCoordinator = new BuzzSessionCoordinator({
-			logger: this.logger,
-			client: this.buzzCliClient,
-			agentSessionManager: this.agentSessionManager,
-			sessionOrchestrator: this.sessionOrchestrator,
-			approvals: this.buzzApprovals,
-			getChannelRoutes: () => this.config.buzz?.channels ?? [],
-			getSelfPubkey: () => this.config.buzz?.selfPubkey,
-			getRepositoryById: (repositoryId) => this.repositories.get(repositoryId),
-			saveState: () => this.savePersistedState(),
-			getActivitySinkForChannel: (channelId) =>
-				this.getBuzzActivitySinkForChannel(channelId),
-			projection: this.buzzProjection,
-		});
-
-		// Threads read from disk at boot. `hydrate` puts every thread back in the
-		// coordinator synchronously and only then awaits the relay work a lost
-		// prompt needs, so by the time this returns — well before either ingress
-		// starts below — no event can reach a thread that has not been given its
-		// phase back. Do not turn that into a bare `await`: a relay that is slow
-		// or down would then hold up the whole worker's startup.
-		this.hydrateBuzzThreads();
-
-		this.buzzQuestionHandler = new BuzzQuestionHandler({
-			logger: this.logger,
-			client: this.buzzCliClient,
-			approvals: this.buzzApprovals,
-			getThread: (sessionId) =>
-				this.buzzSessionCoordinator?.getThread(sessionId) ?? null,
-			// Shares the Linear knob: the wait policy is about how long a human
-			// gets to answer, which does not depend on where the question is asked.
-			getTimeoutMs: () =>
-				questionTimeoutMsFromMinutes(
-					this.config.askUserQuestionTimeoutMinutes,
-				) ?? DEFAULT_QUESTION_TIMEOUT_MS,
-		});
-
-		const dispatch = (event: BuzzWebhookEvent) => {
-			this.buzzSessionCoordinator?.handleEvent(event).catch((error) => {
-				this.logger.error(
-					"Failed to handle Buzz event",
-					error instanceof Error ? error : new Error(String(error)),
-				);
-			});
-		};
-
-		if ((buzz.ingress ?? "poll") === "poll") {
-			this.buzzPollingSource = new BuzzPollingSource({
-				logger: this.logger,
-				client: this.buzzCliClient,
-				approvals: this.buzzApprovals,
-				getChannelIds: () =>
-					(this.config.buzz?.channels ?? [])
-						.map((route) => route.channelId)
-						.filter((channelId) => channelId !== CATCH_ALL_CHANNEL),
-				isCatchAllRouted: () =>
-					(this.config.buzz?.channels ?? []).some(
-						(route) => route.channelId === CATCH_ALL_CHANNEL,
-					),
-				getAllowedPubkeys: () => this.config.buzz?.allowedPubkeys ?? [],
-				getSelfPubkey: () => this.config.buzz?.selfPubkey,
-				onEvent: dispatch,
-				intervalMs: (buzz.pollIntervalSeconds ?? 5) * 1000,
-			});
-			this.buzzPollingSource.start();
-
-			this.logger.info(
-				`Buzz polling ingress active (${buzz.channels?.length ?? 0} channel route(s))`,
-			);
-			return;
-		}
-
-		this.buzzEventTransport = new BuzzEventTransport({
-			fastifyServer: this.sharedApplicationServer.getFastifyInstance(),
-			secret: webhookSecret ?? "",
-			allowedPubkeys: buzz.allowedPubkeys ?? [],
-		});
-
-		// Fire-and-forget, like the GitHub dispatch: a slow session start must
-		// not hold the workflow's HTTP request open (it times out at 10s).
-		this.buzzEventTransport.on("event", dispatch);
-
-		this.buzzEventTransport.on("error", (error: Error) => {
-			this.handleError(error);
-		});
-
-		this.buzzEventTransport.register();
-
-		this.logger.info(
-			`Buzz event transport registered (${buzz.channels?.length ?? 0} channel route(s))`,
-		);
-		this.logger.info("Webhook endpoint: POST /buzz-webhook");
-	}
-
-	/**
-	 * Name, at startup, the repositories a Buzz route can reach but the Linear
-	 * projection cannot write to.
-	 *
-	 * The team a projected issue lands in is the repository's first usable
-	 * `teamKeys` entry, so a routed repository without one produces no issue at
-	 * all — and the only
-	 * evidence today is a warning at the moment a human answers a gate, hours
-	 * after the config was deployed. Checking the routes up front turns
-	 * "projection is configured" from something an operator asserts into
-	 * something the process states.
-	 */
-	private warnUnprojectableBuzzRepositories(): void {
-		const routedIds = new Set(
-			(this.config.buzz?.channels ?? []).flatMap((route) => [
-				...(route.repositoryId ? [route.repositoryId] : []),
-				...(route.repositoryIds ?? []),
-			]),
-		);
-
-		// An id matching no repository is a different fault, and the coordinator
-		// already names it when a message actually arrives on that route.
-		const unprojectable = Array.from(routedIds).flatMap((id) => {
-			const repository = this.repositories.get(id);
-			return repository && !projectionTeamKey(repository)
-				? [repository.name]
-				: [];
-		});
-
-		if (unprojectable.length === 0) return;
-
-		this.logger.warn(
-			`Buzz routes reach ${unprojectable.length} repositor${unprojectable.length === 1 ? "y" : "ies"} with no teamKeys, so their threads will not be projected into Linear: ${unprojectable.join(", ")}`,
-		);
-	}
-
-	/**
-	 * One sink per Buzz channel, created on first use. The sink is bound to a
-	 * channel rather than a workspace because Buzz has no workspace concept —
-	 * the channel is what a reply has to be addressed to.
-	 */
-	private getBuzzActivitySinkForChannel(channelId: string): IActivitySink {
-		const existing = this.buzzActivitySinks.get(channelId);
-		if (existing) return existing;
-
-		if (!this.buzzCliClient) {
-			return new NoopActivitySink(`buzz:${channelId}`);
-		}
-
-		const sink = new BuzzActivitySink(
-			this.buzzCliClient,
-			channelId,
-			this.logger,
-			(threadRootId, body) =>
-				this.buzzSessionCoordinator?.recordResponse(threadRootId, body),
-		);
-		this.buzzActivitySinks.set(channelId, sink);
-		return sink;
-	}
-
-	/**
-	 * Handle a GitHub webhook event (forwarded from CYHOST).
-	 *
-	 * This creates a new session for the GitHub PR comment, checks out the PR branch
-	 * via git worktree, and processes the comment as a task prompt.
-	 */
 	/**
 	 * Resolve a GitHub API token from (in priority order):
 	 * 1. Forwarded installation token from CYHOST (cloud/proxy mode)
@@ -1812,8 +1557,6 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 	async stop(): Promise<void> {
 		// Stop config file watcher
 		await this.configManager.stop();
-
-		this.buzzPollingSource?.stop();
 
 		try {
 			await this.savePersistedState();
@@ -4273,19 +4016,6 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 		return async (input, _sessionId, signal) => {
 			// Note: We use linearAgentSessionId (from closure) instead of the passed sessionId
 			// because the passed sessionId is the Claude session ID, not the Linear agent session ID
-
-			// A Buzz session has no Linear agent session to post an elicitation
-			// to, and its answers arrive as chat rather than as a webhook, so it
-			// gets its own handler. Dispatching on session identity keeps the
-			// Linear path untouched.
-			if (this.buzzQuestionHandler?.handles(linearAgentSessionId)) {
-				return this.buzzQuestionHandler.ask(
-					input,
-					linearAgentSessionId,
-					signal,
-				);
-			}
-
 			return this.askUserQuestionHandler.handleAskUserQuestion(
 				input,
 				linearAgentSessionId,
@@ -4538,20 +4268,11 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 			this.repositoryRouter.getIssueRepositoryCache().entries(),
 		);
 
-		// Buzz thread state comes from the coordinator when Buzz is configured.
-		// When it is not, the state read at boot is written back untouched: a
-		// deployment that disables Buzz for one restart must not be how a thread's
-		// phase, program issue and worktree are lost.
-		const buzz = this.buzzSessionCoordinator
-			? this.buzzSessionCoordinator.serialize()
-			: this.persistedBuzzState;
-
 		return {
 			agentSessions: serializedState.sessions,
 			agentSessionEntries: serializedState.entries,
 			childToParentAgentSession,
 			issueRepositoryCache,
-			...(buzz ? { buzz } : {}),
 		};
 	}
 
@@ -4623,36 +4344,6 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 				`Restored ${cache.size} issue-to-repository cache mappings`,
 			);
 		}
-
-		// Buzz threads. Parked rather than applied here: start() loads persisted
-		// state well before initializeComponents() builds the coordinator, so
-		// hydrating at this point would silently do nothing.
-		this.persistedBuzzState = state.buzz;
-		this.hydrateBuzzThreads();
-	}
-
-	/**
-	 * Hand parked Buzz thread state to the coordinator, once there is one.
-	 *
-	 * Called from both ends of the ordering problem — after state is read and
-	 * after the coordinator is built — because either can happen first, and only
-	 * the later of the two can do the work.
-	 */
-	private hydrateBuzzThreads(): void {
-		const coordinator = this.buzzSessionCoordinator;
-		if (!coordinator || !this.persistedBuzzState) return;
-
-		// Deliberately not awaited: hydration posts into the threads whose
-		// questions were lost, so it can block on — or fail against — a relay
-		// that is down, and that must not take startup with it. Safe only because
-		// `hydrate` restores every thread before its first await; see the note on
-		// that method before changing either side.
-		coordinator.hydrate(this.persistedBuzzState).catch((error) => {
-			this.logger.error(
-				"Failed to restore Buzz thread state",
-				error instanceof Error ? error : new Error(String(error)),
-			);
-		});
 	}
 
 	/**
