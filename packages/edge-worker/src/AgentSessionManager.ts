@@ -194,12 +194,11 @@ export class AgentSessionManager extends EventEmitter {
 	 * @param issueId - Issue/PR identifier
 	 * @param issueMinimal - Minimal issue data
 	 * @param workspace - Workspace configuration
-	 * @param platform - Source platform ("linear", "github", "buzz", "slack"). Defaults to "linear".
+	 * @param platform - Source platform ("linear", "github", "slack"). Defaults to "linear".
 	 * @param repositories - Repository contexts for the session (defaults to empty array)
 	 * @param externalSessionId - The conversation this session posts activity back
-	 *   to. Linear sessions reuse their own id (the Linear agent session). Buzz
-	 *   sessions pass the thread root event id, because the thread pre-dates the
-	 *   session. Omitting it disables activity posting for the session — see
+	 *   to. Linear sessions reuse their own id (the Linear agent session).
+	 *   Omitting it disables activity posting for the session — see
 	 *   {@link postToSink}, which skips every activity when it is unset.
 	 */
 	createCyrusAgentSession(
@@ -207,7 +206,7 @@ export class AgentSessionManager extends EventEmitter {
 		issueId: string,
 		issueMinimal: IssueMinimal,
 		workspace: Workspace,
-		platform: "linear" | "github" | "buzz" | "slack" = "linear",
+		platform: "linear" | "github" | "slack" = "linear",
 		repositories: RepositoryContext[] = [],
 		externalSessionId?: string,
 	): CyrusAgentSession {

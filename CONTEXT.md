@@ -7,27 +7,18 @@ one vocabulary. Architecture terms (**module**, **interface**, **seam**,
 
 ## Domain terms
 
-- **Issue** — a record in an issue tracker (today: Linear; partially GitHub). An Issue may
-  originate a Session, or may only hold a Linear projection of work that originated
-  elsewhere.
-- **Surface** — a place where humans and Cyrus exchange messages: an Issue timeline, a pull
-  request conversation, or a Buzz thread. The Surface a Session was started from is that
-  Session's origin.
-- **Buzz thread** — one conversation on Cyrus's chat Surface; the unit of conversation, and
-  an origin for Sessions.
-- **Linear projection** — the Linear record Cyrus writes for work that originated in a Buzz
-  thread. It is a mirror for humans to read: it never originates or steers the Session it
-  describes.
+- **Issue** — a record in an issue tracker (today: Linear; partially GitHub). An Issue
+  typically originates a Session.
+- **Surface** — a place where humans and Cyrus exchange messages: an Issue timeline or a
+  pull request conversation. The Surface a Session was started from is that Session's
+  origin.
 - **Session** — one agent run in an isolated git worktree, against a single origin Surface.
   A Session is bounded by one run, not by a deliverable.
-- **Execution gate** — the human-released boundary between a Buzz thread's conversation and
-  its code changes.
 - **Runner** — an adapter over an agent CLI (Claude Code, Cursor) that streams
   messages. An ACP-backed runner is in design, not in code — see *Planned
   vocabulary — ACP agent profiles* below.
 - **Activity** — a thought / action / response / error a Session emits for its origin
-  Surface. Not every kind reaches every Surface: a Buzz thread takes only conversational
-  activity.
+  Surface.
 - **AgentMessage** — the **neutral** streaming message contract runners emit (see below).
 - **Effective access policy** — the single computed answer to "what may this session
   read/write", rendered into both the tool-permission layer and the OS sandbox layer.
@@ -66,33 +57,6 @@ one vocabulary. Architecture terms (**module**, **interface**, **seam**,
   prompt turn is active and delivered as subsequent turns. Linear records prompts
   and emits webhooks; it does not own this delivery queue.
 
-## Planned vocabulary — Buzz programs (NOT YET IN CODE)
-
-> **None of the terms in this section exist in the codebase.** They are the shared
-> language for the in-design Buzz program and observability work, recorded here so the
-> ADRs in `docs/adr/` (0014, 0015) agree on one vocabulary. Do not read them as
-> descriptions of current behavior, and do not "fix" code to match them.
->
-> What is actually true today: a Buzz thread projects into Linear as **one flat,
-> parentless issue** — the Buzz projection writes no sub-issue tier and no parent
-> record over several units of work, though Cyrus does handle parent and child Issues
-> on Issue-origin sessions. A thread has two phases, triage and execute, with no plan
-> step between them — nothing produces or approves a plan. Nothing in Cyrus emits
-> observer frames, and nothing in Cyrus speaks the relay protocol directly — every
-> relay call is shelled out through the `buzz` CLI. A Session's thoughts and actions
-> reach no Surface at all on a Buzz thread: they are dropped, not posted.
-> Delete this section's gate only when that work lands.
-
-- **Plan** — the ordered set of Work units a Buzz thread commits to before any of
-  them runs.
-- **Program thread** — a Buzz thread that carries a Plan; it projects into Linear as
-  the parent Issue of its Work units.
-- **Work unit** — one shippable change — one Linear sub-issue, one branch, one pull
-  request — executed by exactly one Session, whose origin Surface is the Program
-  thread.
-- **Observer plane** — the channel carrying a Session's in-progress activity to the
-  human who owns Cyrus's Buzz identity, separate from the Buzz thread humans
-  converse in.
 
 ## Seam inventory (target decomposition of EdgeWorker)
 
