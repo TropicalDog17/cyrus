@@ -12,8 +12,16 @@ import { DEFAULT_SERVER_PORT, parsePort } from "./config/constants.js";
 import { ConfigService } from "./services/ConfigService.js";
 import { Logger } from "./services/Logger.js";
 import { WorkerService } from "./services/WorkerService.js";
+import {
+	createDebouncedCallback,
+	snapshotTokenLengths,
+	summarizeTokenLengthChanges,
+} from "./utils/envFileReload.js";
 import { getDefaultReposDir } from "./utils/getDefaultReposDir.js";
 import { getDefaultWorktreesDir } from "./utils/getDefaultWorktreesDir.js";
+
+/** Coalesce multi-fire fs.watch events from atomic .env writes. */
+const ENV_RELOAD_DEBOUNCE_MS = 250;
 
 /**
  * Main application context providing access to services
@@ -27,6 +35,7 @@ export class Application {
 	public readonly errorReporter: ErrorReporter;
 	private envWatcher?: ReturnType<typeof watch>;
 	private configWatcher?: ReturnType<typeof watch>;
+	private envReloadDebounced?: ReturnType<typeof createDebouncedCallback>;
 	private isInSetupWaitingMode = false;
 	private isInIdleMode = false;
 	private readonly envFilePath: string;
@@ -71,19 +80,35 @@ export class Application {
 	}
 
 	/**
-	 * Load environment variables from the configured env file path
+	 * Load environment variables from the configured env file path.
+	 *
+	 * Safe to call on every .env write: dotenv `override: true` updates
+	 * `process.env` in-place. New agent sessions pick up Atlassian MCP tokens
+	 * via `buildAtlassianMcpServerConfig()`; no process restart is required.
 	 */
 	private loadEnvFile(): void {
 		if (existsSync(this.envFilePath)) {
+			const before = snapshotTokenLengths(process.env);
 			dotenv.config({ path: this.envFilePath, override: true });
+			const after = snapshotTokenLengths(process.env);
+			const tokenChanges = summarizeTokenLengthChanges(before, after);
 			this.logger.info(
 				`🔧 Loaded environment variables from ${this.envFilePath}`,
 			);
+			if (tokenChanges.length > 0) {
+				this.logger.info(
+					`🔑 Hot-reloaded secrets (lengths only): ${tokenChanges.join("; ")}`,
+				);
+			}
 		}
 	}
 
 	/**
-	 * Setup file watcher for .env file to reload on changes
+	 * Setup file watcher for .env file to reload on changes.
+	 *
+	 * Debounced so atomic writers (token-refresh scripts, editors) that fire
+	 * multiple fs.watch events only produce one reload — and never require a
+	 * `systemctl restart` that would drop Linear webhooks mid-flight.
 	 */
 	private setupEnvFileWatcher(): void {
 		// Only watch if file exists
@@ -92,10 +117,15 @@ export class Application {
 		}
 
 		try {
+			this.envReloadDebounced = createDebouncedCallback(() => {
+				this.logger.info("🔄 .env file changed, reloading...");
+				this.loadEnvFile();
+			}, ENV_RELOAD_DEBOUNCE_MS);
+
 			this.envWatcher = watch(this.envFilePath, (eventType) => {
-				if (eventType === "change") {
-					this.logger.info("🔄 .env file changed, reloading...");
-					this.loadEnvFile();
+				// "rename" happens on atomic replace (write tmp + rename).
+				if (eventType === "change" || eventType === "rename") {
+					this.envReloadDebounced?.schedule();
 				}
 			});
 
@@ -319,7 +349,8 @@ export class Application {
 	 * Handle graceful shutdown
 	 */
 	async shutdown(): Promise<void> {
-		// Close .env file watcher
+		// Close .env file watcher and cancel any pending debounced reload
+		this.envReloadDebounced?.cancel();
 		if (this.envWatcher) {
 			this.envWatcher.close();
 		}
