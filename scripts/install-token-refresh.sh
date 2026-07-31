@@ -2,10 +2,10 @@
 # Install ops token-refresh scripts into ~/.cyrus and point systemd user units
 # at them. Safe to re-run (idempotent).
 #
-# Why: the previous copies under ~/.cyrus always `systemctl restart cyrus.service`
+# Why: older copies under ~/.cyrus always `systemctl restart cyrus.service`
 # after writing tokens. That drops Linear webhooks for several seconds and has
 # caused Linear to disable the OAuth app after repeated delivery failures.
-# Canonical scripts in this repo hot-reload via .env / config.json watchers.
+# These scripts NEVER restart Cyrus — they only write tokens for hot-reload.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

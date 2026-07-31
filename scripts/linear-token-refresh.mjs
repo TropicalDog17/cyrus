@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-
 // Linear OAuth token refresher for Cyrus.
 //
 // Linear access tokens expire after 24h with a ROTATING refresh token. Cyrus
@@ -9,7 +8,9 @@
 // DEV-186). This timer keeps tokens fresh proactively.
 //
 // Tokens live in config.json → EdgeWorker ConfigManager hot-reloads and calls
-// updateLinearWorkspaceTokens() in-process. No process restart is required.
+// updateLinearWorkspaceTokens() in-process. This script NEVER restarts
+// cyrus.service — a restart drops Linear webhooks and has caused Linear to
+// disable the OAuth app after repeated delivery failures.
 //
 // This script:
 //   1. Reads workspaces from ~/.cyrus/config.json (linearWorkspaces) and
@@ -19,17 +20,15 @@
 //      expiry recorded in the sidecar (~/.cyrus/linear-token-refresh.json).
 //      A workspace with no sidecar entry is refreshed to seed one.
 //   4. Persists BOTH rotated tokens back to config.json (atomic write).
-//   5. Does NOT restart cyrus.service by default — config hot-reload applies
-//      tokens live. Pass --restart only for emergency recovery.
+//   5. Stops. Config hot-reload applies tokens live. No systemctl.
 //
 // Idempotent + safe on a timer: no-ops while the token is comfortably valid.
 // If the refresh token itself is rejected (invalid_grant), it logs that the
 // Cyrus Linear OAuth flow must be re-run.
 //
 // Install: ./scripts/install-token-refresh.sh
-// Run:     node ~/.cyrus/linear-token-refresh.mjs [--force] [--restart]
+// Run:     node ~/.cyrus/linear-token-refresh.mjs [--force]
 
-import { execFileSync } from "node:child_process";
 import { chmodSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -41,12 +40,8 @@ const STATE_PATH = join(HOME, ".cyrus", "linear-token-refresh.json");
 const LOG_PATH = join(HOME, ".cyrus", "linear-token-refresh.log");
 const TOKEN_ENDPOINT = "https://api.linear.app/oauth/token";
 const GRAPHQL_ENDPOINT = "https://api.linear.app/graphql";
-const STATUS_URL = "http://127.0.0.1:3456/status";
 const REFRESH_MARGIN_SEC = 3 * 60 * 60; // refresh when <3h of life remains
-const BUSY_DEFER_FLOOR_SEC = 30 * 60; // only used with --restart
 const FORCE = process.argv.includes("--force");
-const WANT_RESTART = process.argv.includes("--restart");
-const UID = process.getuid();
 
 function log(msg) {
 	const line = `${new Date().toISOString()} ${msg}`;
@@ -112,16 +107,6 @@ async function tokenAlive(accessToken) {
 	}
 }
 
-async function cyrusBusy() {
-	try {
-		const res = await fetch(STATUS_URL, { signal: AbortSignal.timeout(5000) });
-		const body = await res.json();
-		return body?.status && body.status !== "idle";
-	} catch {
-		return false;
-	}
-}
-
 async function refreshWorkspace(wsId, ws, clientId, clientSecret) {
 	const body = new URLSearchParams({
 		grant_type: "refresh_token",
@@ -180,29 +165,6 @@ function persistTokens(wsId, fresh) {
 	renameSync(tmp, CONFIG_PATH);
 }
 
-function maybeRestartCyrus() {
-	if (!WANT_RESTART) {
-		log(
-			"hot-reload path: wrote config.json; EdgeWorker ConfigManager will apply tokens (no restart)",
-		);
-		return;
-	}
-	try {
-		execFileSync("systemctl", ["--user", "restart", "cyrus.service"], {
-			env: {
-				...process.env,
-				XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`,
-			},
-			stdio: "pipe",
-		});
-		log(`restarted cyrus.service (--restart)`);
-	} catch (e) {
-		die(
-			`tokens refreshed but 'systemctl --user restart cyrus.service' failed: ${e.message}`,
-		);
-	}
-}
-
 async function main() {
 	const clientId = readEnvVar("LINEAR_CLIENT_ID");
 	const clientSecret = readEnvVar("LINEAR_CLIENT_SECRET");
@@ -244,20 +206,7 @@ async function main() {
 			continue;
 		}
 
-		// Only defer when --restart would kill live sessions.
-		if (
-			WANT_RESTART &&
-			!FORCE &&
-			alive &&
-			(await cyrusBusy()) &&
-			remainingSec > BUSY_DEFER_FLOOR_SEC
-		) {
-			log(
-				`workspace ${name}: cyrus busy and ${remainingSec}s left — deferring --restart to next run`,
-			);
-			continue;
-		}
-
+		// Always refresh when near expiry / dead — hot-reload is non-disruptive.
 		log(
 			`workspace ${name}: refreshing (${FORCE ? "forced" : alive ? "near expiry" : "token dead"})`,
 		);
@@ -276,7 +225,9 @@ async function main() {
 
 	if (!refreshedAny) return;
 
-	maybeRestartCyrus();
+	log(
+		"hot-reload path: wrote config.json; EdgeWorker ConfigManager applies tokens (never restarts cyrus)",
+	);
 	log(`refresh complete ✅`);
 }
 

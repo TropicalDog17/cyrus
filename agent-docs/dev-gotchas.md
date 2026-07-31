@@ -375,8 +375,7 @@ those failures.
 
 Canonical timers live in-repo: `scripts/atlassian-token-refresh.mjs`,
 `scripts/linear-token-refresh.mjs`. Install with `./scripts/install-token-refresh.sh`.
-They write tokens and **do not** restart by default; pass `--restart` only for
-emergency recovery.
+They write tokens only — **no `systemctl restart` path exists** in those scripts.
 
 If Linear emails "webhooks were disabled", re-enable delivery in the OAuth app
 settings after confirming `POST …/linear-webhook-troppc` reaches troppc (unsigned

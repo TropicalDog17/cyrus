@@ -1,12 +1,14 @@
 #!/usr/bin/env node
-
 // Atlassian remote-MCP OAuth token refresher for Cyrus.
 //
 // The official Atlassian remote MCP server (mcp.atlassian.com) issues short-lived
 // OAuth access tokens (~8h) with a rotating refresh token. Cyrus injects
 // ATLASSIAN_MCP_TOKEN into per-session MCP config via process.env
 // (buildAtlassianMcpServerConfig). The CLI watches ~/.cyrus/.env and hot-reloads
-// dotenv into process.env — no process restart required for new sessions.
+// dotenv into process.env.
+//
+// This script NEVER restarts cyrus.service — a restart drops Linear webhooks
+// and has caused Linear to disable the OAuth app after repeated delivery failures.
 //
 // This script:
 //   1. Finds the newest mcp-remote token cache under ~/.mcp-auth.
@@ -14,17 +16,15 @@
 //      exchanges the refresh_token for a fresh access token at the token endpoint.
 //   3. Persists the new tokens back to the cache (refresh tokens ROTATE — must save).
 //   4. Atomically rewrites ATLASSIAN_MCP_TOKEN in ~/.cyrus/.env (mode 600).
-//   5. Does NOT restart cyrus.service by default — the .env watcher hot-reloads.
-//      Pass --restart only for emergency recovery if hot-reload is broken.
+//   5. Stops. The .env watcher hot-reloads. No systemctl.
 //
 // Idempotent + safe to run on a timer: it no-ops when the token is still
 // comfortably valid. If the refresh_token itself has expired, it logs a clear
 // error telling the user to re-run the mcp-remote browser flow.
 //
 // Install: ./scripts/install-token-refresh.sh
-// Run:     node ~/.cyrus/atlassian-token-refresh.mjs [--force] [--restart]
+// Run:     node ~/.cyrus/atlassian-token-refresh.mjs [--force]
 
-import { execFileSync } from "node:child_process";
 import {
 	chmodSync,
 	readdirSync,
@@ -44,11 +44,7 @@ const AS_METADATA_URL =
 	"https://mcp.atlassian.com/.well-known/oauth-authorization-server";
 const FALLBACK_TOKEN_ENDPOINT = "https://cf.mcp.atlassian.com/v1/token";
 const REFRESH_MARGIN_SEC = 90 * 60; // refresh when <90min of life remains
-const BUSY_DEFER_FLOOR_SEC = 30 * 60; // only used with --restart
-const STATUS_URL = "http://127.0.0.1:3456/status";
 const FORCE = process.argv.includes("--force");
-const WANT_RESTART = process.argv.includes("--restart");
-const UID = process.getuid();
 
 function log(msg) {
 	const line = `${new Date().toISOString()} ${msg}`;
@@ -63,17 +59,6 @@ function log(msg) {
 function die(msg) {
 	log(`ERROR: ${msg}`);
 	process.exit(1);
-}
-
-// Is Cyrus mid-session? Only relevant when --restart is requested.
-async function cyrusBusy() {
-	try {
-		const res = await fetch(STATUS_URL, { signal: AbortSignal.timeout(5000) });
-		const body = await res.json();
-		return body?.status && body.status !== "idle";
-	} catch {
-		return false;
-	}
 }
 
 function findTokenFile() {
@@ -162,29 +147,6 @@ function updateEnvToken(token) {
 	chmodSync(ENV_PATH, 0o600);
 }
 
-function maybeRestartCyrus() {
-	if (!WANT_RESTART) {
-		log(
-			"hot-reload path: wrote .env; cyrus .env watcher will pick up ATLASSIAN_MCP_TOKEN (no restart)",
-		);
-		return;
-	}
-	try {
-		execFileSync("systemctl", ["--user", "restart", "cyrus.service"], {
-			env: {
-				...process.env,
-				XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`,
-			},
-			stdio: "pipe",
-		});
-		log(`restarted cyrus.service (--restart)`);
-	} catch (e) {
-		die(
-			`token refreshed but 'systemctl --user restart cyrus.service' failed: ${e.message}`,
-		);
-	}
-}
-
 async function main() {
 	const tf = findTokenFile();
 	const tokens = JSON.parse(readFileSync(tf.path, "utf8"));
@@ -203,20 +165,7 @@ async function main() {
 		return;
 	}
 
-	// Only defer for --restart path (restart kills in-flight sessions). Hot-reload
-	// is safe anytime — new sessions get the new token; in-flight keep the old one.
-	if (
-		WANT_RESTART &&
-		!FORCE &&
-		remainingSec > BUSY_DEFER_FLOOR_SEC &&
-		(await cyrusBusy())
-	) {
-		log(
-			`cyrus busy and ${remainingSec}s left — deferring --restart to next run`,
-		);
-		return;
-	}
-
+	// Always refresh when near expiry — hot-reload is non-disruptive; no busy-defer.
 	const clientInfo = JSON.parse(
 		readFileSync(join(tf.dir, `${tf.prefix}_client_info.json`), "utf8"),
 	);
@@ -287,8 +236,9 @@ async function main() {
 	log(
 		`new access token written (${fresh.access_token.length} chars, expires_in ${merged.expires_in}s)`,
 	);
-
-	maybeRestartCyrus();
+	log(
+		"hot-reload path: wrote .env; cyrus .env watcher picks up ATLASSIAN_MCP_TOKEN (never restarts cyrus)",
+	);
 	log(`refresh complete ✅`);
 }
 
