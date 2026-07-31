@@ -359,6 +359,29 @@ Use `uuithub.com` instead of `github.com` for unauthenticated source browsing:
 https://uuithub.com/org/repo/blob/main/src/file.ts
 ```
 
+## Token refresh must not restart cyrus.service
+
+Linear disables an OAuth app's webhooks after **repeated delivery failures**.
+Any brief `systemctl --user restart cyrus.service` (even 2–3s) can 502 Linear's
+delivery through the public funnel (tropmini Caddy → troppc:3456) and accumulate
+those failures.
+
+**Do not** restart Cyrus to apply refreshed tokens:
+
+| Token | Write path | Hot-reload path |
+| --- | --- | --- |
+| Linear OAuth | `~/.cyrus/config.json` `linearWorkspaces.*.linearToken` | `ConfigManager` → `EdgeWorker.updateLinearWorkspaceTokens()` |
+| Atlassian MCP | `ATLASSIAN_MCP_TOKEN` in `~/.cyrus/.env` | CLI `Application` `.env` watcher → `dotenv` into `process.env`; new sessions call `buildAtlassianMcpServerConfig()` |
+
+Canonical timers live in-repo: `scripts/atlassian-token-refresh.mjs`,
+`scripts/linear-token-refresh.mjs`. Install with `./scripts/install-token-refresh.sh`.
+They write tokens and **do not** restart by default; pass `--restart` only for
+emergency recovery.
+
+If Linear emails "webhooks were disabled", re-enable delivery in the OAuth app
+settings after confirming `POST …/linear-webhook-troppc` reaches troppc (unsigned
+probe → 401 missing signature is healthy).
+
 ## Working with package SDKs
 
 ```bash
