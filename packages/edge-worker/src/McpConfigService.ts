@@ -6,6 +6,10 @@ import {
 	createCyrusToolsServer,
 } from "cyrus-mcp-tools";
 import { buildAtlassianMcpServerConfig } from "./AtlassianMcpConfig.js";
+import {
+	ExactMcpCatalog,
+	type ExactMcpCatalogResult,
+} from "./agents/ExactMcpCatalog.js";
 
 type CyrusToolsMcpContextEntry = {
 	contextId: string;
@@ -43,9 +47,11 @@ export interface McpConfigServiceDeps {
 export class McpConfigService {
 	private deps: McpConfigServiceDeps;
 	private contexts = new Map<string, CyrusToolsMcpContextEntry>();
+	private exactMcpCatalog: ExactMcpCatalog;
 
 	constructor(deps: McpConfigServiceDeps) {
 		this.deps = deps;
+		this.exactMcpCatalog = new ExactMcpCatalog();
 	}
 
 	/**
@@ -195,6 +201,32 @@ export class McpConfigService {
 		}
 
 		return mcpConfig;
+	}
+
+	/**
+	 * Build the exact ACP MCP catalog for a session (ADR 0006): the Cyrus-owned
+	 * inline servers (linear, cyrus-tools, cyrus-docs, slack/atlassian) merged
+	 * with the repository's `.mcp.json` files, with Cyrus-owned servers as final
+	 * authority. This is the ONLY MCP map handed to ACP-backed runners (OMP) —
+	 * nothing ambient is discovered. Secrets stay in the returned object.
+	 */
+	buildExactAcpCatalog(
+		repoId: string,
+		linearWorkspaceId: string,
+		parentSessionId?: string,
+		mcpConfigFiles?: string | string[] | undefined,
+	): ExactMcpCatalogResult {
+		const inline = this.buildMcpConfig(
+			repoId,
+			linearWorkspaceId,
+			parentSessionId,
+		);
+		const files = mcpConfigFiles
+			? Array.isArray(mcpConfigFiles)
+				? mcpConfigFiles
+				: [mcpConfigFiles]
+			: undefined;
+		return this.exactMcpCatalog.build(inline as Record<string, unknown>, files);
 	}
 
 	/**
