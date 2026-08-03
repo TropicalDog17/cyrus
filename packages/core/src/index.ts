@@ -8,12 +8,16 @@ export type {
 	DirEntry,
 	DirLister,
 	EffectiveAccessPolicy,
+	OmpToolPolicyRender,
 	PolicyPath,
 	SandboxFilesystem,
 } from "./access-policy/AccessPolicy.js";
 export {
 	compute,
+	cyrusToolToOmpOperations,
 	nodeDirLister,
+	renderOmpToolPolicy,
+	sanitizeOmpServerName,
 	toClaudeToolPatterns,
 	toCursorPermissions,
 	toSandboxFilesystem,

@@ -82,18 +82,33 @@ export function buildOmpAcpArgv(
  * Spawn the OMP ACP server (no shell) and wrap its stdio in a
  * newline-delimited JSON {@link Stream}. stderr is forwarded to the provided
  * sink (default: the parent stderr) for diagnostics.
+ *
+ * When a sandbox is configured and enabled, the complete process tree is
+ * wrapped first (SRT) — the wrapped argv/env replace the direct launch, and a
+ * sandbox init failure propagates (OMP is never launched unsandboxed).
  */
-export function spawnOmpAcp(
+export async function spawnOmpAcp(
 	config: OmpRunnerConfig,
 	workingDirectory: string,
 	systemPrompt: string,
 	onStderr?: (chunk: string) => void,
-): OmpAcpProcess {
+): Promise<OmpAcpProcess> {
 	const argv = buildOmpAcpArgv(config, workingDirectory, systemPrompt);
-	const child = spawn(argv[0]!, argv.slice(1), {
+	let spawnArgv = argv;
+	let env: NodeJS.ProcessEnv = process.env;
+
+	if (config.ompSandbox) {
+		const wrapped = await config.ompSandbox.wrapCommand(argv, workingDirectory);
+		if (wrapped) {
+			spawnArgv = wrapped.argv;
+			env = wrapped.env;
+		}
+	}
+
+	const child = spawn(spawnArgv[0]!, spawnArgv.slice(1), {
 		stdio: ["pipe", "pipe", "pipe"],
 		cwd: workingDirectory,
-		env: process.env,
+		env,
 	}) as ChildProcessWithoutNullStreams;
 
 	const stderrSink =

@@ -135,8 +135,10 @@ describe("OmpRunner", () => {
 			makeConfig({ ompPermissionPolicy: { allowsTool: allowSpy } }),
 		);
 
+		// The operation speaks the OMP kind vocabulary (the same the rendered
+		// policy uses), not the timeline's Cyrus display name.
 		expect(allowSpy).toHaveBeenCalledWith(
-			"Bash",
+			"execute",
 			expect.stringContaining("rm -rf"),
 		);
 	});

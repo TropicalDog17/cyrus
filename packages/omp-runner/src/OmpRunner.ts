@@ -91,7 +91,7 @@ export class OmpRunner extends EventEmitter implements IAgentRunner {
 	private messages: AgentMessage[] = [];
 	private mapper: OmpEventMapper;
 	private acpSessionId: string | null = null;
-	private child: ReturnType<typeof spawnOmpAcp>["child"] | null = null;
+	private child: Awaited<ReturnType<typeof spawnOmpAcp>>["child"] | null = null;
 	private connection: ClientSideConnection | null = null;
 	private hasInitMessage = false;
 	/** True only after OMP itself assigned the session id (new/resume). */
@@ -131,7 +131,7 @@ export class OmpRunner extends EventEmitter implements IAgentRunner {
 		const workspace = resolve(this.config.workingDirectory || cwd());
 
 		try {
-			const { child, stream } = spawnOmpAcp(
+			const { child, stream } = await spawnOmpAcp(
 				this.config,
 				workspace,
 				this.config.appendSystemPrompt || "",
@@ -419,9 +419,34 @@ export class OmpRunner extends EventEmitter implements IAgentRunner {
 	}
 }
 
-/** The policy-facing operation name for a permission request's tool call. */
+/**
+ * The policy-facing operation name for a permission request's tool call.
+ *
+ * Speaks the OMP permission vocabulary directly (kind names like `execute`,
+ * `read`, `edit`, `search`, `fetch`) — the SAME vocabulary
+ * `renderOmpToolPolicy` emits into the allow/deny sets. `other`/mcp calls fall
+ * back to the real tool title (e.g. `mcp__linear__issue`). This is policy
+ * matching only; timeline display still uses {@link toolNameFromKind}.
+ */
 export function permissionOperationName(toolCall: ToolCallUpdate): string {
-	return toolNameFromKind(toolCall.kind ?? undefined, toolCall.title);
+	switch (toolCall.kind) {
+		case "read":
+			return "read";
+		case "edit":
+		case "delete":
+			return "edit";
+		case "move":
+		case "execute":
+			return "execute";
+		case "search":
+			return "search";
+		case "fetch":
+			return "fetch";
+		case "think":
+			return "think";
+		default:
+			return toolCall.title ?? "other";
+	}
 }
 
 /** A short human detail (e.g. the Bash command) for policy diagnostics. */

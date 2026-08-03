@@ -261,6 +261,169 @@ export function toSandboxFilesystem(
 	};
 }
 
+// ─── Adapter: OMP tool policy ───────────────────────────────────────────────
+
+/**
+ * The OMP permission-policy render: operation names OMP permission requests
+ * surface as `allow` / `deny` entries (see {@link renderOmpToolPolicy}).
+ */
+export interface OmpToolPolicyRender {
+	/** OMP operation names that are allowed (lowercase, exact or prefix). */
+	allow: string[];
+	/** OMP operation names denied (lowercase, exact or prefix). */
+	deny: string[];
+	/**
+	 * Path-scoped denials that cannot be expressed as bare operation names
+	 * (e.g. `Read(//home/u/.ssh/**)`). Enforced by matching the permission
+	 * request detail; never dropped.
+	 */
+	denyDetails: { operation: string; needle: string }[];
+}
+
+/**
+ * OMP's MCP tool-name sanitizer (mirrors OMP's own `xLi`): lowercase,
+ * non-alphanumeric/underscore → `_`, collapsed. Server names go through this;
+ * tool names keep their real casing/characters.
+ */
+export function sanitizeOmpServerName(name: string): string {
+	const normalized = name
+		.toLowerCase()
+		.replace(/[^a-z_]+/g, "_")
+		.replace(/_+/g, "_")
+		.replace(/^_+|_+$/g, "");
+	return normalized.length > 0 ? normalized : "server";
+}
+
+/**
+ * Cyrus built-in tool names → the OMP permission-operation names they map to.
+ * OMP surfaces built-ins under ACP tool kinds (`read`, `edit`, `execute`,
+ * `search`, `fetch`, …); a Cyrus allow entry must cover the kind its tool
+ * triggers. Keys and values are lowercase.
+ */
+const BUILTIN_TO_OMP_OPERATIONS: Record<string, string[]> = {
+	read: ["read"],
+	edit: ["edit"],
+	write: ["edit"],
+	bash: ["execute"],
+	grep: ["search"],
+	glob: ["search"],
+	websearch: ["fetch"],
+	webfetch: ["fetch"],
+	fetch: ["fetch"],
+	think: ["think"],
+	task: ["task"],
+	taskupdate: ["task"],
+	taskget: ["task"],
+	todowrite: ["todo"],
+	askuserquestion: ["askuserquestion"],
+	agent: ["agent"],
+	exitplanmode: ["exitplanmode"],
+	killshell: ["execute"],
+	notebookedit: ["edit"],
+};
+
+/**
+ * Translate one Cyrus tool name into the OMP operation name(s) a permission
+ * request for it surfaces as. MCP names (`mcp__linear__create_attachment`)
+ * become OMP's `mcp__<sanitized-server>_<tool>` shape. Unknown built-ins keep
+ * their lowercased name (OMP falls back to the real title for those).
+ */
+export function cyrusToolToOmpOperations(tool: string): string[] {
+	const trimmed = tool.trim();
+	if (trimmed.length === 0) return [];
+
+	if (trimmed.toLowerCase().startsWith("mcp__")) {
+		const rest = trimmed.slice(5);
+		const separator = rest.indexOf("_");
+		if (separator < 0) {
+			return [`mcp__${sanitizeOmpServerName(rest)}`];
+		}
+		const server = sanitizeOmpServerName(rest.slice(0, separator));
+		const toolName = rest.slice(separator).replace(/^_+/, "");
+		if (toolName.length === 0) {
+			return [`mcp__${server}`];
+		}
+		return [`mcp__${server}_${toolName.toLowerCase()}`];
+	}
+
+	// A path-scoped pattern like `Read(//home/u/.ssh/**)`: the tool name is
+	// everything before the first `(`.
+	const parenIndex = trimmed.indexOf("(");
+	const base = (
+		parenIndex >= 0 ? trimmed.slice(0, parenIndex) : trimmed
+	).trim();
+	const lower = base.toLowerCase();
+	const aliased = BUILTIN_TO_OMP_OPERATIONS[lower];
+	return aliased ?? (lower.length > 0 ? [lower] : []);
+}
+
+/**
+ * Render the policy into the OMP permission-policy vocabulary (ADR 0005).
+ *
+ * The session's tool allow/deny lists (Cyrus names, e.g. `Read`, `Bash`,
+ * `mcp__linear_issue`) are translated to the OMP operation names permission
+ * requests surface as. Path-scoped denials (the home sibling-exclusion walk
+ * plus config `Read(…/**)` patterns) are NOT expressible as bare operations:
+ * they are captured as `denyDetails` (matched against the request detail) —
+ * an untranslatable denial is a rendering error, never silently dropped.
+ */
+export function renderOmpToolPolicy(
+	policy: EffectiveAccessPolicy,
+	toolLists: { allowedTools: string[]; disallowedTools: string[] },
+): OmpToolPolicyRender {
+	const allow = new Set<string>();
+	for (const tool of toolLists.allowedTools ?? []) {
+		for (const op of cyrusToolToOmpOperations(tool)) {
+			allow.add(op);
+		}
+	}
+
+	const deny = new Set<string>();
+	const denyDetails: { operation: string; needle: string }[] = [];
+
+	const addDeny = (tool: string, source: string): void => {
+		const parenIndex = tool.indexOf("(");
+		if (parenIndex >= 0) {
+			const operations = cyrusToolToOmpOperations(tool);
+			if (operations.length === 0) {
+				throw new Error(
+					`Cannot render OMP tool policy: untranslatable deny pattern "${tool}" (from ${source})`,
+				);
+			}
+			// Path-scoped denial: keep the operation denied only when the request
+			// detail names the restricted path.
+			const needle = tool
+				.slice(parenIndex + 1, tool.lastIndexOf(")"))
+				.replace(/^\//, "");
+			for (const op of operations) {
+				denyDetails.push({ operation: op, needle: needle || tool });
+			}
+			return;
+		}
+
+		const operations = cyrusToolToOmpOperations(tool);
+		if (operations.length === 0) {
+			throw new Error(
+				`Cannot render OMP tool policy: untranslatable deny pattern "${tool}" (from ${source})`,
+			);
+		}
+		for (const op of operations) {
+			deny.add(op);
+		}
+	};
+
+	for (const tool of [...policy.toolDisallow, ...toolLists.disallowedTools]) {
+		addDeny(
+			tool,
+			toolLists.disallowedTools.includes(tool)
+				? "session disallowedTools"
+				: "policy.toolDisallow",
+		);
+	}
+
+	return { allow: [...allow], deny: [...deny], denyDetails };
+}
+
 // ─── Adapter: Cursor permissions ────────────────────────────────────────────
 
 export interface CursorPermissions {

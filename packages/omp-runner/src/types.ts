@@ -67,6 +67,13 @@ export interface OmpRunnerConfig extends AgentRunnerConfig {
 	 */
 	ompPermissionPolicy?: OmpPermissionPolicy;
 
+	/**
+	 * OS sandbox wrapper (SRT). When present and enabled, the complete OMP
+	 * process tree is wrapped; initialization failure makes OMP unavailable
+	 * (never an unsandboxed fallback).
+	 */
+	ompSandbox?: import("./OmpSandbox.js").OmpSandbox;
+
 	/** Bounded wait for the ACP initialize handshake. Default 30s. */
 	ompStartupTimeoutMs?: number;
 
