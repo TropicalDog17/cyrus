@@ -59,6 +59,21 @@ one vocabulary. Architecture terms (**module**, **interface**, **seam**,
   prompt turn is active and delivered as subsequent turns. Linear records prompts
   and emits webhooks; it does not own this delivery queue. Still planned.
 
+## Deterministic closure (ADR 0017)
+
+- **Assignment lease** — the typed state machine (per Issue/repository) that
+  tracks one unreleased unit of work from acquisition to merge, escalation, or
+  needs-input release. Cyrus owns the lease lifecycle and the Linear projection;
+  `agentic-pipeline` owns capture, gate, supersession, integration, and learning
+  artifacts.
+- **Closure fact** — a durable, validated artifact (`.pr.json`, `.human.json`,
+  `.integrate.json`, `.abandoned.json`) that drives a lease transition.
+- **Candidate head** — the PR head SHA the lease currently points at; a push
+  advances it and invalidates all SHA-A gate activity.
+- **Release facts** — the only lease releases: a host-recorded needs-input
+  request, a host/user escalation, or a validated successful merge. Model text
+  and runner success are never closure facts.
+
 
 ## Seam inventory (target decomposition of EdgeWorker)
 
