@@ -67,6 +67,50 @@ export interface RepositoryContext {
 	/** The base branch for PRs (e.g., "main" or a Graphite parent branch) */
 	baseBranchName?: string;
 }
+export type AssignmentLeaseState =
+	| "working"
+	| "awaiting_pr"
+	| "awaiting_gate"
+	| "remediating"
+	| "needs_input"
+	| "escalated"
+	| "merged";
+
+export interface AssignmentLeaseCandidate {
+	repositoryId: string;
+	prNumber: number;
+	runId: string;
+	headSha: string;
+}
+
+export interface NeedsInputFact {
+	type: "needs_input";
+	at: string;
+	reason: string;
+}
+
+export interface EscalationFact {
+	type: "escalated";
+	at: string;
+	reason: string;
+}
+
+export interface MergeFact {
+	type: "merged";
+	at: string;
+	candidate: AssignmentLeaseCandidate;
+}
+
+export interface AssignmentLease {
+	generation: number;
+	state: AssignmentLeaseState;
+	acquiredAt: string;
+	updatedAt: string;
+	candidate?: AssignmentLeaseCandidate;
+	gateActivityId?: string;
+	releasedAt?: string;
+	releaseFact?: NeedsInputFact | EscalationFact | MergeFact;
+}
 
 export interface CyrusAgentSession {
 	/** Unique session identifier (was linearAgentActivitySessionId in v2.0) */
@@ -102,6 +146,8 @@ export interface CyrusAgentSession {
 	/** Opaque runner-assigned conversation identifier, meaningful only when
 	 * paired with {@link agentProfileId}. */
 	runnerSessionId?: string;
+	/** Durable lifecycle state for deterministic OMP assignment closure. */
+	assignmentLease?: AssignmentLease;
 	agentRunner?: IAgentRunner;
 	metadata?: {
 		model?: string;

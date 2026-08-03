@@ -103,11 +103,17 @@ export {
 	withLinearMcpPruned,
 } from "./allowed-tools-defaults.js";
 export type {
+	AssignmentLease,
+	AssignmentLeaseCandidate,
+	AssignmentLeaseState,
 	BaseBranchResolution,
 	CyrusAgentSession,
 	CyrusAgentSessionEntry,
+	EscalationFact,
 	IssueContext,
 	IssueMinimal,
+	MergeFact,
+	NeedsInputFact,
 	RepositoryContext,
 	Workspace,
 } from "./CyrusAgentSession.js";
