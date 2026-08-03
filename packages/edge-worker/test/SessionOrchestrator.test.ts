@@ -359,14 +359,15 @@ describe("SessionOrchestrator", () => {
 			expect(buildIssueConfig.mock.calls[0][0].resumeSessionId).toBeUndefined();
 		});
 
-		it("passes the existing claude session id as resumeSessionId (resume branch)", async () => {
+		it("passes the existing runner session id as resumeSessionId (resume branch)", async () => {
 			const { deps, buildIssueConfig } = makeDeps();
 			const orch = new SessionOrchestrator(deps);
 			const session: any = {
 				id: "sess-1",
 				issueContext: { issueId: "issue-1" },
 				workspace: { path: "/repo/wt/ISS-1" },
-				claudeSessionId: "claude-existing",
+				agentProfileId: "claude",
+				runnerSessionId: "claude-existing",
 			};
 
 			await orch.resumeSession(
@@ -470,7 +471,8 @@ describe("SessionOrchestrator", () => {
 				id: "sess-1",
 				issueContext: { issueId: "issue-1" },
 				workspace: { path: "/repo/wt/ISS-1" },
-				claudeSessionId: "claude-existing",
+				agentProfileId: "claude",
+				runnerSessionId: "claude-existing",
 			};
 
 			const p1 = resume(orch, session, deps);
@@ -492,7 +494,8 @@ describe("SessionOrchestrator", () => {
 				id: "sess-1",
 				issueContext: { issueId: "issue-1" },
 				workspace: { path: "/repo/wt/ISS-1" },
-				claudeSessionId: "claude-existing",
+				agentProfileId: "claude",
+				runnerSessionId: "claude-existing",
 			};
 			const addStreamMessage = vi.fn();
 			h.behavior.current = {
@@ -535,7 +538,8 @@ describe("SessionOrchestrator", () => {
 				id,
 				issueContext: { issueId: "issue-1" },
 				workspace: { path: "/repo/wt/ISS-1" },
-				claudeSessionId: "claude-existing",
+				agentProfileId: "claude",
+				runnerSessionId: "claude-existing",
 			});
 
 			const p1 = resume(orch, mk("sess-1"), deps);
@@ -560,7 +564,8 @@ describe("SessionOrchestrator", () => {
 				id: "sess-1",
 				issueContext: { issueId: "issue-1" },
 				workspace: { path: "/repo/wt/ISS-1" },
-				claudeSessionId: "claude-existing",
+				agentProfileId: "claude",
+				runnerSessionId: "claude-existing",
 			};
 
 			const p1 = resume(orch, session, deps);

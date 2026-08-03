@@ -285,8 +285,10 @@ export class AgentSessionManager extends EventEmitter {
 
 	/**
 	 * Update Agent Session with session ID from system initialization.
-	 * Records the session id against the runner that produced it (Claude or
-	 * Cursor) so resumes stick with the same harness.
+	 * Records the opaque runner session id (paired with the session's
+	 * `agentProfileId`) so resumes stick with the same harness. The profile
+	 * identity is decided at selection time; a legacy session that predates
+	 * the generic pair derives it from the runner's provider tag.
 	 */
 	updateAgentSessionWithRunnerSessionId(
 		sessionId: string,
@@ -299,13 +301,8 @@ export class AgentSessionManager extends EventEmitter {
 			return;
 		}
 
-		if (linearSession.agentRunner?.provider === "cursor") {
-			linearSession.cursorSessionId = initMessage.sessionId;
-		} else if (linearSession.agentRunner?.provider === "codex") {
-			linearSession.codexSessionId = initMessage.sessionId;
-		} else {
-			linearSession.claudeSessionId = initMessage.sessionId;
-		}
+		linearSession.runnerSessionId = initMessage.sessionId;
+		linearSession.agentProfileId ??= linearSession.agentRunner?.provider;
 
 		// A new `system/init` means a fresh runner process, whose `result.usage`
 		// counts up from zero again. Drop the per-process baseline so the next
@@ -342,14 +339,11 @@ export class AgentSessionManager extends EventEmitter {
 		const sdkError = message.type === "assistant" ? message.error : undefined;
 
 		// Record the runner session id against the runner that produced it.
-		const runner = this.sessions.get(sessionId)?.agentRunner;
+		const session = this.sessions.get(sessionId);
 
 		const sessionEntry: CyrusAgentSessionEntry = {
-			...(runner?.provider === "cursor"
-				? { cursorSessionId: message.sessionId }
-				: runner?.provider === "codex"
-					? { codexSessionId: message.sessionId }
-					: { claudeSessionId: message.sessionId }),
+			agentProfileId: session?.agentProfileId,
+			runnerSessionId: message.sessionId,
 			type: message.type,
 			content: this.extractContent(message),
 			metadata: {
@@ -802,13 +796,10 @@ export class AgentSessionManager extends EventEmitter {
 			}
 		}
 
-		const runner = this.sessions.get(sessionId)?.agentRunner;
+		const session = this.sessions.get(sessionId);
 		const resultEntry: CyrusAgentSessionEntry = {
-			...(runner?.provider === "cursor"
-				? { cursorSessionId: resultMessage.sessionId }
-				: runner?.provider === "codex"
-					? { codexSessionId: resultMessage.sessionId }
-					: { claudeSessionId: resultMessage.sessionId }),
+			agentProfileId: session?.agentProfileId,
+			runnerSessionId: resultMessage.sessionId,
 			type: "result",
 			content,
 			metadata: {
@@ -1180,6 +1171,10 @@ export class AgentSessionManager extends EventEmitter {
 		}
 
 		session.agentRunner = agentRunner;
+		// Profile identity is decided at selection time; `??=` keeps an explicit
+		// `agentProfileId` (persisted or set by the orchestrator) and fills the
+		// generic pair for legacy sessions from the runner's provider tag.
+		session.agentProfileId ??= agentRunner.provider;
 		session.updatedAt = Date.now();
 		log.debug(`Added agent runner`);
 	}

@@ -8,10 +8,11 @@ import type {
 	IssueContext,
 	IssueMinimal,
 } from "./CyrusAgentSession.js";
+import { AgentSessionStatus } from "./issue-tracker/types.js";
 import { createLogger, type ILogger } from "./logging/index.js";
 
 /** Current persistence format version */
-export const PERSISTENCE_VERSION = "5.0";
+export const PERSISTENCE_VERSION = "6.0";
 
 // Serialized versions with Date fields as strings
 export type SerializedCyrusAgentSession = CyrusAgentSession;
@@ -26,6 +27,36 @@ export type SerializedCyrusAgentSessionEntry = CyrusAgentSessionEntry;
 //     timestamp?: string
 //   }
 // }
+
+/**
+ * v5.0 session format (migration input only): the current format plus the
+ * legacy provider-specific runner session id fields. New sessions never write
+ * these; persistence v6 folded them into `agentProfileId` + `runnerSessionId`.
+ */
+export interface V5CyrusAgentSession extends SerializedCyrusAgentSession {
+	claudeSessionId?: string; // Claude-specific session ID
+	geminiSessionId?: string; // Gemini-specific session ID
+	codexSessionId?: string; // Codex-specific session ID
+	cursorSessionId?: string; // Cursor-specific session ID
+}
+
+/** v5.0 entry format (migration input only). */
+export interface V5CyrusAgentSessionEntry
+	extends SerializedCyrusAgentSessionEntry {
+	claudeSessionId?: string;
+	geminiSessionId?: string;
+	codexSessionId?: string;
+	cursorSessionId?: string;
+}
+
+/**
+ * v5.0 state format (migration input only): the current format whose sessions
+ * and entries may still carry legacy provider-specific session ids.
+ */
+export type V5SerializableEdgeWorkerState = SerializableEdgeWorkerState & {
+	agentSessions?: Record<string, V5CyrusAgentSession>;
+	agentSessionEntries?: Record<string, V5CyrusAgentSessionEntry[]>;
+};
 
 /**
  * v2.0 session format (for migration purposes)
@@ -208,6 +239,19 @@ export type V4SerializableEdgeWorkerState = Omit<
 >;
 
 /**
+ * Legacy provider-specific session-id field → profile id mapping, in the
+ * order Cyrus historically wrote them. The migration copies exactly one
+ * populated field into the generic pair; a record with more than one is a
+ * corrupted migration input and fails closed (see `migrateSessionV5ToV6`).
+ */
+const LEGACY_PROVIDER_SESSION_FIELDS = [
+	["claudeSessionId", "claude"],
+	["cursorSessionId", "cursor"],
+	["codexSessionId", "codex"],
+	["geminiSessionId", "gemini"],
+] as const;
+
+/**
  * Manages persistence of critical mappings to survive restarts
  */
 export class PersistenceManager {
@@ -360,26 +404,43 @@ export class PersistenceManager {
 
 			// Handle version migration
 			if (stateData.version === "2.0") {
-				this.logger.info("Migrating state from v2.0 to v3.0 to v4.0 to v5.0");
+				this.logger.info(
+					"Migrating state from v2.0 to v3.0 to v4.0 to v5.0 to v6.0",
+				);
 				const v3State = this.migrateV2ToV3(stateData.state);
-				const migratedState = this.migrateV4ToV5(this.migrateV3ToV4(v3State));
+				const migratedState = this.migrateV5ToV6(
+					this.migrateV4ToV5(this.migrateV3ToV4(v3State)),
+				);
 				await this.persistMigratedState(migratedState);
 				return migratedState;
 			}
 
 			if (stateData.version === "3.0") {
-				this.logger.info("Migrating state from v3.0 to v4.0 to v5.0");
-				const migratedState = this.migrateV4ToV5(
-					this.migrateV3ToV4(stateData.state as V3SerializableEdgeWorkerState),
+				this.logger.info("Migrating state from v3.0 to v4.0 to v5.0 to v6.0");
+				const migratedState = this.migrateV5ToV6(
+					this.migrateV4ToV5(
+						this.migrateV3ToV4(
+							stateData.state as V3SerializableEdgeWorkerState,
+						),
+					),
 				);
 				await this.persistMigratedState(migratedState);
 				return migratedState;
 			}
 
 			if (stateData.version === "4.0") {
-				this.logger.info("Migrating state from v4.0 to v5.0");
-				const migratedState = this.migrateV4ToV5(
-					stateData.state as V4SerializableEdgeWorkerState,
+				this.logger.info("Migrating state from v4.0 to v5.0 to v6.0");
+				const migratedState = this.migrateV5ToV6(
+					this.migrateV4ToV5(stateData.state as V4SerializableEdgeWorkerState),
+				);
+				await this.persistMigratedState(migratedState);
+				return migratedState;
+			}
+
+			if (stateData.version === "5.0") {
+				this.logger.info("Migrating state from v5.0 to v6.0");
+				const migratedState = this.migrateV5ToV6(
+					stateData.state as V5SerializableEdgeWorkerState,
 				);
 				await this.persistMigratedState(migratedState);
 				return migratedState;
@@ -541,6 +602,123 @@ export class PersistenceManager {
 			...v4State,
 			buzz: { threads: {}, repoMru: [] },
 		};
+	}
+
+	/**
+	 * Migrate v5.0 state format to v6.0 format.
+	 *
+	 * Changes:
+	 * - Fold exactly one populated legacy provider-specific session id
+	 *   (`claudeSessionId` / `cursorSessionId` / `codexSessionId` /
+	 *   `geminiSessionId`) into the generic pair `agentProfileId` +
+	 *   `runnerSessionId`. New sessions never write the legacy fields.
+	 * - A record with **more than one** populated legacy id is corrupted input:
+	 *   no precedence is chosen. The record is retained for diagnosis (legacy
+	 *   fields kept as-is), marked non-resumable (Error when it was Active or
+	 *   AwaitingInput), and the conflicting field names are logged.
+	 */
+	private migrateV5ToV6(
+		v5State: V5SerializableEdgeWorkerState,
+	): SerializableEdgeWorkerState {
+		const migratedSessions: Record<string, SerializedCyrusAgentSession> = {};
+		if (v5State.agentSessions) {
+			for (const [sessionId, session] of Object.entries(
+				v5State.agentSessions,
+			)) {
+				migratedSessions[sessionId] = this.migrateSessionV5ToV6(session);
+			}
+		}
+
+		const migratedEntries: Record<string, SerializedCyrusAgentSessionEntry[]> =
+			{};
+		if (v5State.agentSessionEntries) {
+			for (const [sessionId, entries] of Object.entries(
+				v5State.agentSessionEntries,
+			)) {
+				migratedEntries[sessionId] = entries.map((entry) =>
+					this.migrateEntryV5ToV6(entry),
+				);
+			}
+		}
+
+		return {
+			...v5State,
+			...(v5State.agentSessions ? { agentSessions: migratedSessions } : {}),
+			...(v5State.agentSessionEntries
+				? { agentSessionEntries: migratedEntries }
+				: {}),
+		};
+	}
+
+	/**
+	 * Migrate one v5 session into the profile-scoped identity pair. See
+	 * {@link migrateV5ToV6} for the fail-closed rule.
+	 */
+	private migrateSessionV5ToV6(
+		session: V5CyrusAgentSession,
+	): SerializedCyrusAgentSession {
+		const populated = LEGACY_PROVIDER_SESSION_FIELDS.filter(
+			([field]) => session[field],
+		);
+
+		if (populated.length === 1) {
+			const [field, profileId] = populated[0]!;
+			const { [field]: legacyId, ...rest } = session;
+			return {
+				...rest,
+				agentProfileId: profileId,
+				runnerSessionId: legacyId,
+			};
+		}
+
+		if (populated.length > 1) {
+			const conflicting = populated.map(([field]) => field);
+			this.logger.warn(
+				`Session ${session.id} has multiple legacy runner session ids (${conflicting.join(", ")}); retaining the record for diagnosis and marking it non-resumable. Do not choose by precedence.`,
+			);
+			const resumable =
+				session.status === AgentSessionStatus.Active ||
+				session.status === AgentSessionStatus.AwaitingInput;
+			return {
+				...session,
+				...(resumable ? { status: AgentSessionStatus.Error } : {}),
+			};
+		}
+
+		return session;
+	}
+
+	/**
+	 * Migrate one v5 entry: a single legacy provider id becomes the generic
+	 * pair (entries carry them for timeline attribution only). A conflicting
+	 * entry is retained without identity and logged; entries have no status to
+	 * fail closed with, and nothing resumes from an entry.
+	 */
+	private migrateEntryV5ToV6(
+		entry: V5CyrusAgentSessionEntry,
+	): SerializedCyrusAgentSessionEntry {
+		const populated = LEGACY_PROVIDER_SESSION_FIELDS.filter(
+			([field]) => entry[field],
+		);
+
+		if (populated.length === 1) {
+			const [field, profileId] = populated[0]!;
+			const { [field]: legacyId, ...rest } = entry;
+			return {
+				...rest,
+				agentProfileId: profileId,
+				runnerSessionId: legacyId,
+			};
+		}
+
+		if (populated.length > 1) {
+			const conflicting = populated.map(([field]) => field);
+			this.logger.warn(
+				`An entry for session ${entry.type} has multiple legacy runner session ids (${conflicting.join(", ")}); retaining the record without identity.`,
+			);
+		}
+
+		return entry;
 	}
 
 	/**

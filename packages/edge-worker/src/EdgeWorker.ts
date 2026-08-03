@@ -701,13 +701,13 @@ export class EdgeWorker extends EventEmitter {
 			maybeSummarizeColdResume: (
 				session,
 				linearAgentSessionId,
-				claudeSessionId,
+				runnerSessionId,
 				linearWorkspaceId,
 			) =>
 				this.maybeSummarizeColdResume(
 					session,
 					linearAgentSessionId,
-					claudeSessionId,
+					runnerSessionId,
 					linearWorkspaceId,
 				),
 			determineSystemPromptFromLabels: (labels, repository) =>
@@ -3905,13 +3905,15 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 	 * Returns `undefined` — meaning "fall through to a normal resume" — when the
 	 * feature is disabled, the estimate is at/below the threshold, no transcript
 	 * is found, or summarization fails/times out. This can NEVER break a resume
-	 * that would otherwise succeed, and it NEVER clears `session.claudeSessionId`
-	 * (runner pinning and the init-message rebind both still depend on it).
+	 * that would otherwise succeed, and it NEVER clears `session.runnerSessionId`
+	 * (profile pinning and the init-message rebind both still depend on it). The
+	 * caller guarantees this is a Claude-profile session; the id passed is the
+	 * generic runner session id.
 	 */
 	private async maybeSummarizeColdResume(
 		session: CyrusAgentSession,
 		linearAgentSessionId: string,
-		claudeSessionId: string,
+		runnerSessionId: string,
 		linearWorkspaceId: string,
 	): Promise<string | undefined> {
 		const threshold = this.resolveColdResumeThreshold();
@@ -3919,10 +3921,10 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 			return undefined;
 		}
 
-		const transcriptPath = await findTranscriptPath(claudeSessionId);
+		const transcriptPath = await findTranscriptPath(runnerSessionId);
 		if (!transcriptPath) {
 			this.logger.debug(
-				`Cold-resume summarize: no transcript found for Claude session ${claudeSessionId}; resuming normally`,
+				`Cold-resume summarize: no transcript found for Claude session ${runnerSessionId}; resuming normally`,
 			);
 			return undefined;
 		}

@@ -239,18 +239,13 @@ export class CyrusToolsHost {
 		const session = exact ?? prefix;
 		if (!session) return null;
 
-		const runnerType: RunnerType | null = session.claudeSessionId
-			? "claude"
-			: session.cursorSessionId
-				? "cursor"
-				: session.codexSessionId
-					? "codex"
-					: null;
-		const runnerSessionId =
-			session.claudeSessionId ??
-			session.cursorSessionId ??
-			session.codexSessionId ??
-			null;
+		const runnerType: RunnerType | null =
+			session.agentProfileId === "claude" ||
+			session.agentProfileId === "cursor" ||
+			session.agentProfileId === "codex"
+				? session.agentProfileId
+				: null;
+		const runnerSessionId = session.runnerSessionId ?? null;
 
 		const sessionSource = session.id.startsWith("github-")
 			? "github"

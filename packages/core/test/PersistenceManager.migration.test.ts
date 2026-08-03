@@ -136,8 +136,10 @@ describe("PersistenceManager", () => {
 				branchName: "test-branch",
 			});
 
-			// Should preserve other fields
-			expect(migratedSession.claudeSessionId).toBe("claude-789");
+			// Should preserve other fields — the v2→v6 chain ends with the
+			// profile-scoped pair replacing the legacy claudeSessionId.
+			expect(migratedSession.agentProfileId).toBe("claude");
+			expect(migratedSession.runnerSessionId).toBe("claude-789");
 			expect(migratedSession.workspace.path).toBe("/tmp/worktree");
 
 			// Should have repositories populated from the repo key during v3→v4 flattening
@@ -348,14 +350,14 @@ describe("PersistenceManager", () => {
 			});
 		});
 
-		it("should save migrated v3→v5 state with correct version", async () => {
+		it("should save migrated v3→v6 state with correct version", async () => {
 			vi.mocked(existsSync).mockReturnValue(true);
 			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v3State));
 
 			await persistenceManager.loadEdgeWorkerState();
 
 			expect(handleWriteFile).toHaveBeenCalled();
-			expect(lastSavedData().version).toBe("5.0");
+			expect(lastSavedData().version).toBe(PERSISTENCE_VERSION);
 		});
 	});
 
@@ -396,14 +398,14 @@ describe("PersistenceManager", () => {
 			});
 		});
 
-		it("should save the migrated state as v5.0", async () => {
+		it("should save the migrated state as the current version", async () => {
 			vi.mocked(existsSync).mockReturnValue(true);
 			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v4State));
 
 			await persistenceManager.loadEdgeWorkerState();
 
 			expect(handleWriteFile).toHaveBeenCalled();
-			expect(lastSavedData().version).toBe("5.0");
+			expect(lastSavedData().version).toBe(PERSISTENCE_VERSION);
 		});
 
 		// Writing the migrated file back is an optimisation; loading must not
@@ -426,6 +428,178 @@ describe("PersistenceManager", () => {
 				...v4State.state,
 				buzz: { threads: {}, repoMru: [] },
 			});
+		});
+	});
+
+	describe("v5.0 to v6.0 Migration (profile-scoped runner session identity)", () => {
+		const baseV5Session = {
+			id: "session-1",
+			externalSessionId: "session-1",
+			status: "active",
+			workspace: { path: "/tmp/worktree", isGitWorktree: true },
+			repositories: [{ repositoryId: "repo-1" }],
+		};
+
+		const v5StateWith = (agentSessions: Record<string, unknown>) => ({
+			version: "5.0",
+			savedAt: "2025-01-15T12:00:00.000Z",
+			state: { agentSessions },
+		});
+
+		it("migrates a single claudeSessionId to agentProfileId + runnerSessionId", async () => {
+			vi.mocked(existsSync).mockReturnValue(true);
+			vi.mocked(readFileSync).mockReturnValue(
+				JSON.stringify(
+					v5StateWith({
+						"session-1": {
+							...baseV5Session,
+							claudeSessionId: "claude-789",
+						},
+					}),
+				),
+			);
+
+			const result = await persistenceManager.loadEdgeWorkerState();
+			const migrated = result!.agentSessions!["session-1"];
+
+			expect(migrated.agentProfileId).toBe("claude");
+			expect(migrated.runnerSessionId).toBe("claude-789");
+			expect(
+				(migrated as Record<string, unknown>).claudeSessionId,
+			).toBeUndefined();
+			expect(
+				(migrated as Record<string, unknown>).cursorSessionId,
+			).toBeUndefined();
+		});
+
+		it("migrates cursor and codex provider ids to their profile ids", async () => {
+			vi.mocked(existsSync).mockReturnValue(true);
+			vi.mocked(readFileSync).mockReturnValue(
+				JSON.stringify(
+					v5StateWith({
+						"session-cur": {
+							...baseV5Session,
+							id: "session-cur",
+							cursorSessionId: "cursor-456",
+						},
+						"session-cod": {
+							...baseV5Session,
+							id: "session-cod",
+							codexSessionId: "codex-101",
+						},
+					}),
+				),
+			);
+
+			const result = await persistenceManager.loadEdgeWorkerState();
+
+			expect(result!.agentSessions!["session-cur"]).toMatchObject({
+				agentProfileId: "cursor",
+				runnerSessionId: "cursor-456",
+			});
+			expect(result!.agentSessions!["session-cod"]).toMatchObject({
+				agentProfileId: "codex",
+				runnerSessionId: "codex-101",
+			});
+		});
+
+		it("fails closed on a session with multiple provider ids", async () => {
+			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+			vi.mocked(existsSync).mockReturnValue(true);
+			vi.mocked(readFileSync).mockReturnValue(
+				JSON.stringify(
+					v5StateWith({
+						"session-conflict": {
+							...baseV5Session,
+							id: "session-conflict",
+							claudeSessionId: "claude-789",
+							cursorSessionId: "cursor-456",
+						},
+					}),
+				),
+			);
+
+			const result = await persistenceManager.loadEdgeWorkerState();
+			const retained = result!.agentSessions!["session-conflict"];
+
+			// Record retained for diagnosis, never resumable, no precedence choice.
+			expect(retained).toBeDefined();
+			expect(retained.status).toBe("error");
+			expect(retained.agentProfileId).toBeUndefined();
+			expect(retained.runnerSessionId).toBeUndefined();
+			// The conflicting field names are logged for diagnosis.
+			const conflictWarning = warnSpy.mock.calls.find((call) =>
+				String(call[0]).includes("claudeSessionId"),
+			);
+			expect(conflictWarning).toBeDefined();
+			expect(String(conflictWarning![0])).toContain("cursorSessionId");
+			warnSpy.mockRestore();
+		});
+
+		it("leaves a session with no provider ids unchanged", async () => {
+			vi.mocked(existsSync).mockReturnValue(true);
+			vi.mocked(readFileSync).mockReturnValue(
+				JSON.stringify(
+					v5StateWith({
+						"session-plain": { ...baseV5Session, id: "session-plain" },
+					}),
+				),
+			);
+
+			const result = await persistenceManager.loadEdgeWorkerState();
+			const migrated = result!.agentSessions!["session-plain"];
+
+			expect(migrated.agentProfileId).toBeUndefined();
+			expect(migrated.runnerSessionId).toBeUndefined();
+			expect(migrated.id).toBe("session-plain");
+		});
+
+		it("migrates entry-level provider ids to runnerSessionId", async () => {
+			vi.mocked(existsSync).mockReturnValue(true);
+			vi.mocked(readFileSync).mockReturnValue(
+				JSON.stringify({
+					version: "5.0",
+					savedAt: "2025-01-15T12:00:00.000Z",
+					state: {
+						agentSessionEntries: {
+							"session-1": [
+								{
+									claudeSessionId: "claude-789",
+									type: "assistant",
+									content: "hello",
+								},
+							],
+						},
+					},
+				}),
+			);
+
+			const result = await persistenceManager.loadEdgeWorkerState();
+			const entry = result!.agentSessionEntries!["session-1"][0];
+
+			expect(entry.runnerSessionId).toBe("claude-789");
+			expect(
+				(entry as Record<string, unknown>).claudeSessionId,
+			).toBeUndefined();
+		});
+
+		it("saves migrated state as the current version", async () => {
+			vi.mocked(existsSync).mockReturnValue(true);
+			vi.mocked(readFileSync).mockReturnValue(
+				JSON.stringify(
+					v5StateWith({
+						"session-1": {
+							...baseV5Session,
+							claudeSessionId: "claude-789",
+						},
+					}),
+				),
+			);
+
+			await persistenceManager.loadEdgeWorkerState();
+
+			expect(handleWriteFile).toHaveBeenCalled();
+			expect(lastSavedData().version).toBe(PERSISTENCE_VERSION);
 		});
 	});
 
@@ -522,15 +696,16 @@ describe("PersistenceManager", () => {
 			},
 		};
 
-		it("should load v5.0 state without migration", async () => {
+		it("should load v5.0 state through the v6.0 migration without changing it", async () => {
 			vi.mocked(existsSync).mockReturnValue(true);
 			vi.mocked(readFileSync).mockReturnValue(JSON.stringify(v5State));
 
 			const result = await persistenceManager.loadEdgeWorkerState();
 
+			// The fixture carries no sessions/entries, so the v5→v6 hop changes
+			// nothing; the write-back is the migration's optimization, not a change.
 			expect(result).toEqual(v5State.state);
-			// Should not write anything since no migration is needed
-			expect(handleWriteFile).not.toHaveBeenCalled();
+			expect(handleWriteFile).toHaveBeenCalled();
 		});
 
 		it("should round-trip a whole Buzz thread record through a save and load", async () => {
@@ -543,7 +718,7 @@ describe("PersistenceManager", () => {
 			// JSON.parse(JSON.stringify(...)) preserves an unknown `buzz` key on
 			// *any* version of this file, so without this line the assertion below
 			// passes against the pre-bump source and proves nothing.
-			expect(JSON.parse(payload).version).toBe("5.0");
+			expect(JSON.parse(payload).version).toBe("6.0");
 
 			vi.mocked(existsSync).mockReturnValue(true);
 			vi.mocked(readFileSync).mockReturnValue(payload);
@@ -680,8 +855,8 @@ describe("PersistenceManager", () => {
 	});
 
 	describe("PERSISTENCE_VERSION constant", () => {
-		it("should be 5.0", () => {
-			expect(PERSISTENCE_VERSION).toBe("5.0");
+		it("should be 6.0", () => {
+			expect(PERSISTENCE_VERSION).toBe("6.0");
 		});
 	});
 });

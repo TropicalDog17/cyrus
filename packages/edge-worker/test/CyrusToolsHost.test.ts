@@ -18,7 +18,8 @@ vi.mock("fastify-mcp", () => {
 function makeSession(overrides: Record<string, unknown> = {}) {
 	return {
 		id: "sess-1",
-		claudeSessionId: "claude-1",
+		agentProfileId: "claude",
+		runnerSessionId: "claude-1",
 		workspace: { path: "/repo/worktrees/S-1" },
 		issueContext: { issueIdentifier: "S-1", trackerId: "linear" },
 		...overrides,
@@ -156,18 +157,21 @@ describe("CyrusToolsHost", () => {
 			).toBe("nested");
 		});
 
-		it("derives a cursor runner when only cursorSessionId is set", () => {
+		it("derives a cursor runner when agentProfileId is cursor", () => {
 			withSessions([
-				makeSession({ claudeSessionId: undefined, cursorSessionId: "cur-1" }),
+				makeSession({
+					agentProfileId: "cursor",
+					runnerSessionId: "cur-1",
+				}),
 			]);
 			const result = host.resolveSessionFromCwd("/repo/worktrees/S-1");
 			expect(result?.runnerType).toBe("cursor");
 			expect(result?.runnerSessionId).toBe("cur-1");
 		});
 
-		it("reports a null runner when neither runner session id is set", () => {
+		it("reports a null runner when no profile identity is set", () => {
 			withSessions([
-				makeSession({ claudeSessionId: undefined, cursorSessionId: undefined }),
+				makeSession({ agentProfileId: undefined, runnerSessionId: undefined }),
 			]);
 			const result = host.resolveSessionFromCwd("/repo/worktrees/S-1");
 			expect(result?.runnerType).toBeNull();

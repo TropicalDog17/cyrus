@@ -108,9 +108,15 @@ export class WarmSessionPool {
 
 		const allSessions = agentSessionManager.getAllSessions();
 
-		// Only warm Claude sessions that have a persisted session ID and a workspace path
+		// Only warm Claude-profile sessions that have a persisted runner session
+		// ID and a workspace path.
 		const candidates = allSessions
-			.filter((s) => s.claudeSessionId && s.workspace?.path)
+			.filter(
+				(s) =>
+					s.agentProfileId === "claude" &&
+					s.runnerSessionId &&
+					s.workspace?.path,
+			)
 			.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
 			.slice(0, count);
 
@@ -250,7 +256,7 @@ export class WarmSessionPool {
 
 					const warm = await startup({
 						options: {
-							resume: session.claudeSessionId,
+							resume: session.runnerSessionId,
 							model,
 							cwd: session.workspace.path,
 							...(Object.keys(mcpServers).length > 0 && { mcpServers }),

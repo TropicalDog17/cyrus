@@ -151,12 +151,14 @@ export interface SessionOrchestratorDeps {
 	 * whole transcript into the prompt cache. Returns `undefined` when the
 	 * feature is disabled, not applicable, or on any failure (so the caller falls
 	 * through to a normal resume — this must never break a resume that would
-	 * otherwise succeed). Never clears `session.claudeSessionId`.
+	 * otherwise succeed). The session is guaranteed to be a Claude-profile
+	 * session by the caller; the id passed is the generic runner session id.
+	 * Never clears `session.runnerSessionId`.
 	 */
 	maybeSummarizeColdResume(
 		session: CyrusAgentSession,
 		linearAgentSessionId: string,
-		claudeSessionId: string,
+		runnerSessionId: string,
 		linearWorkspaceId: string,
 	): Promise<string | undefined>;
 	determineSystemPromptFromLabels(
@@ -763,12 +765,9 @@ export class SessionOrchestrator {
 		// Fetch issue labels early to determine runner type
 		const labels = await this.deps.fetchIssueLabels(fullIssue);
 
-		// Determine whether to resume based on the existing runner session ID
-		// (Claude, Cursor, or Codex — whichever originally created the session).
-		const existingRunnerSessionId =
-			session.claudeSessionId ??
-			session.cursorSessionId ??
-			session.codexSessionId;
+		// Determine whether to resume based on the persisted generic runner
+		// session ID (paired with the session's `agentProfileId`).
+		const existingRunnerSessionId = session.runnerSessionId;
 		const hasExistingSession =
 			!isNewSession && Boolean(existingRunnerSessionId);
 		const needsNewSession = isNewSession || !hasExistingSession;
@@ -828,21 +827,22 @@ export class SessionOrchestrator {
 		// whose stored transcript is too large, replace the full-transcript resume
 		// with a Haiku summary + fresh session. `maybeSummarizeColdResume` returns
 		// undefined (falling through to a normal resume) unless the feature is
-		// enabled, this is a Claude resume, and the transcript exceeds the
-		// configured threshold. It NEVER clears `session.claudeSessionId` — runner
-		// pinning and the init-message rebind both still depend on it being set.
+		// enabled, this is a Claude-profile resume, and the transcript exceeds
+		// the configured threshold. It NEVER clears `session.runnerSessionId` —
+		// profile pinning and the init-message rebind both still depend on it.
 		let effectiveResumeSessionId = resumeSessionId;
 		let buildAsNewSession = isNewSession;
 		let previousSessionSummary: string | undefined;
 		if (
 			!needsNewSession &&
-			session.claudeSessionId &&
-			resumeSessionId === session.claudeSessionId
+			session.agentProfileId === "claude" &&
+			session.runnerSessionId &&
+			resumeSessionId === session.runnerSessionId
 		) {
 			const summary = await this.deps.maybeSummarizeColdResume(
 				session,
 				sessionId,
-				session.claudeSessionId,
+				session.runnerSessionId,
 				resolvedWorkspaceId,
 			);
 			if (summary) {

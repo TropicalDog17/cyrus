@@ -1,14 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager";
 import type { IActivitySink } from "../src/sinks/IActivitySink";
-import { systemInitMessage } from "./agent-message-builders";
+import { resultSuccess, systemInitMessage } from "./agent-message-builders";
 
 /**
- * Phase B replaced the deleted `constructor.name === "CursorRunner"` sniff with
- * `IAgentRunner.provider` dispatch. A neutral system/init message must record
- * its session id against the field matching the runner's provider.
+ * Persistence v6 replaced the provider-specific session id fields
+ * (`claudeSessionId` / `cursorSessionId` / `codexSessionId`) with the generic
+ * pair `agentProfileId` + `runnerSessionId`. A neutral system/init message must
+ * record its runner session id generically, and the profile identity is derived
+ * from the runner at attach time (never branched per provider).
  */
-describe("AgentSessionManager - provider-based session id routing", () => {
+describe("AgentSessionManager - generic runner session identity", () => {
 	let manager: AgentSessionManager;
 	const sessionId = "session-provider";
 	const issueId = "issue-provider";
@@ -44,25 +46,54 @@ describe("AgentSessionManager - provider-based session id routing", () => {
 		vi.clearAllMocks();
 	});
 
-	it("records the session id on claudeSessionId for a claude runner", async () => {
+	it("records the runner session id generically for a claude runner", async () => {
 		setup("claude");
 		await manager.handleClaudeMessage(
 			sessionId,
 			systemInitMessage({ sessionId: "runner-abc" }),
 		);
 		const session = manager.getSession(sessionId);
-		expect(session?.claudeSessionId).toBe("runner-abc");
-		expect(session?.cursorSessionId).toBeUndefined();
+		expect(session?.runnerSessionId).toBe("runner-abc");
+		expect(session?.agentProfileId).toBe("claude");
 	});
 
-	it("records the session id on cursorSessionId for a cursor runner", async () => {
+	it("records the runner session id generically for a cursor runner", async () => {
 		setup("cursor");
 		await manager.handleClaudeMessage(
 			sessionId,
 			systemInitMessage({ sessionId: "runner-xyz" }),
 		);
 		const session = manager.getSession(sessionId);
-		expect(session?.cursorSessionId).toBe("runner-xyz");
-		expect(session?.claudeSessionId).toBeUndefined();
+		expect(session?.runnerSessionId).toBe("runner-xyz");
+		expect(session?.agentProfileId).toBe("cursor");
+	});
+
+	it("keeps an explicit agentProfileId over the runner-derived one", async () => {
+		setup("cursor");
+		const session = manager.getSession(sessionId);
+		session!.agentProfileId = "codex";
+		await manager.handleClaudeMessage(
+			sessionId,
+			systemInitMessage({ sessionId: "runner-xyz" }),
+		);
+		expect(manager.getSession(sessionId)?.agentProfileId).toBe("codex");
+		expect(manager.getSession(sessionId)?.runnerSessionId).toBe("runner-xyz");
+	});
+
+	it("records the generic pair on result entries", async () => {
+		setup("claude");
+		await manager.handleClaudeMessage(
+			sessionId,
+			resultSuccess("done", { sessionId: "runner-abc" }),
+		);
+		const entries = manager.getSessionEntries(sessionId);
+		expect(entries[0]).toMatchObject({
+			agentProfileId: "claude",
+			runnerSessionId: "runner-abc",
+			type: "result",
+		});
+		expect(
+			(entries[0] as Record<string, unknown>).claudeSessionId,
+		).toBeUndefined();
 	});
 });

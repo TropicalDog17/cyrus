@@ -95,7 +95,8 @@ describe("EdgeWorker - Feedback Delivery", () => {
 			hasAgentRunner: vi.fn().mockReturnValue(true),
 			getSession: vi.fn().mockReturnValue({
 				issueId: "CHILD-456",
-				claudeSessionId: "child-claude-session-456",
+				agentProfileId: "claude",
+				runnerSessionId: "child-claude-session-456",
 				workspace: { path: "/test/workspaces/CHILD-456" },
 				claudeRunner: mockClaudeRunner,
 			}),
@@ -243,7 +244,7 @@ describe("EdgeWorker - Feedback Delivery", () => {
 			// Verify the CHILD session is resumed, not the parent
 			expect(sessionId).toBe(childSessionId);
 			expect(childSession.issueId).toBe("CHILD-456");
-			expect(childSession.claudeSessionId).toBe("child-claude-session-456");
+			expect(childSession.runnerSessionId).toBe("child-claude-session-456");
 
 			// Verify correct prompt format with enhanced markdown: feedback FROM parent TO child
 			expect(prompt).toBe(

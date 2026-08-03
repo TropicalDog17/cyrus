@@ -22,7 +22,8 @@ const REPO = {
 function makeSession(overrides: Record<string, unknown> = {}) {
 	return {
 		id: "sess-1",
-		claudeSessionId: "claude-1",
+		agentProfileId: "claude",
+		runnerSessionId: "claude-1",
 		workspace: { path: "/repo/worktrees/S-1" },
 		updatedAt: 1,
 		metadata: {},
@@ -124,13 +125,17 @@ describe("WarmSessionPool", () => {
 			expect(pool.size()).toBe(0);
 		});
 
-		it("warms only sessions with claudeSessionId + workspace.path, newest-first, capped at count", async () => {
+		it("warms only claude-profile sessions with runnerSessionId + workspace.path, newest-first, capped at count", async () => {
 			process.env.CYRUS_ENABLE_WARM_SESSIONS = "1";
 			const sessions = [
 				makeSession({ id: "old", updatedAt: 1 }),
 				makeSession({ id: "newest", updatedAt: 3 }),
 				makeSession({ id: "mid", updatedAt: 2 }),
-				makeSession({ id: "no-claude", claudeSessionId: undefined }),
+				makeSession({
+					id: "no-claude",
+					agentProfileId: "cursor",
+					runnerSessionId: undefined,
+				}),
 				makeSession({ id: "no-workspace", workspace: undefined }),
 			];
 			const { deps } = makeDeps({

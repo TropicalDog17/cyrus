@@ -270,19 +270,22 @@ export class RunnerConfigBuilder {
 
 		// When resuming a session, keep the runner that originally created it —
 		// even if the labels/tags now select a different one — so a session never
-		// switches harness mid-flight. The runner-specific session id recorded on
-		// the session tells us which one to stick with.
-		if (input.session.claudeSessionId && runnerType !== "claude") {
+		// switches harness mid-flight. The persisted `agentProfileId` tells us
+		// which profile to stick with. Unknown profile ids (e.g. a canary
+		// profile) are left to the profile registry, which is authoritative for
+		// anything outside the legacy `RunnerType` union.
+		const pinnedProfile = input.session.agentProfileId;
+		if (pinnedProfile === "claude" && runnerType !== "claude") {
 			runnerType = "claude";
 			modelOverride = this.runnerSelector.getDefaultModelForRunner("claude");
 			fallbackModelOverride =
 				this.runnerSelector.getDefaultFallbackModelForRunner("claude");
-		} else if (input.session.cursorSessionId && runnerType !== "cursor") {
+		} else if (pinnedProfile === "cursor" && runnerType !== "cursor") {
 			runnerType = "cursor";
 			modelOverride = this.runnerSelector.getDefaultModelForRunner("cursor");
 			fallbackModelOverride =
 				this.runnerSelector.getDefaultFallbackModelForRunner("cursor");
-		} else if (input.session.codexSessionId && runnerType !== "codex") {
+		} else if (pinnedProfile === "codex" && runnerType !== "codex") {
 			runnerType = "codex";
 			modelOverride = this.runnerSelector.getDefaultModelForRunner("codex");
 			fallbackModelOverride =

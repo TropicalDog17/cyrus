@@ -100,7 +100,7 @@ describe("AgentSessionManager - Model Notification", () => {
 		// Verify session metadata was updated
 		const session = manager.getSession(sessionId);
 		expect(session?.metadata?.model).toBe("claude-3-sonnet-20240229");
-		expect(session?.claudeSessionId).toBe("claude-session-123");
+		expect(session?.runnerSessionId).toBe("claude-session-123");
 	});
 
 	it("should handle error when posting model notification fails", async () => {

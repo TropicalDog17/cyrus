@@ -581,7 +581,7 @@ Issue: {{issue_identifier}}`;
 	});
 
 	describe("Session Continuation", () => {
-		it("should pass claudeSessionId as resumeSessionId for claude continuations", async () => {
+		it("should pass runnerSessionId as resumeSessionId for claude continuations", async () => {
 			const mockIssue = createMockIssueWithLabels(["claude"]);
 			vi.spyOn(edgeWorker as any, "fetchFullIssueDetails").mockResolvedValue(
 				mockIssue,
@@ -597,7 +597,8 @@ Issue: {{issue_identifier}}`;
 				issueId: "issue-123",
 				workspace: { path: "/test/workspaces/TEST-123" },
 				issue: { identifier: "TEST-123" },
-				claudeSessionId: "claude-session-existing",
+				agentProfileId: "claude",
+				runnerSessionId: "claude-session-existing",
 			};
 
 			await (edgeWorker as any).resumeAgentSession(
@@ -633,7 +634,8 @@ Issue: {{issue_identifier}}`;
 				issueId: "issue-123",
 				workspace: { path: "/test/workspaces/TEST-123" },
 				issue: { identifier: "TEST-123" },
-				cursorSessionId: "cursor-session-existing",
+				agentProfileId: "cursor",
+				runnerSessionId: "cursor-session-existing",
 			};
 
 			await (edgeWorker as any).resumeAgentSession(

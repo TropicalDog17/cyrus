@@ -90,11 +90,18 @@ export interface CyrusAgentSession {
 	/** Repository contexts for this session (always array, never undefined) */
 	repositories: RepositoryContext[];
 	workspace: Workspace;
-	// NOTE: Only one of these will be populated
-	claudeSessionId?: string; // Claude-specific session ID (assigned once it initializes)
-	geminiSessionId?: string; // Gemini-specific session ID (assigned once it initializes)
-	codexSessionId?: string; // Codex-specific session ID (assigned once it initializes)
-	cursorSessionId?: string; // Cursor-specific session ID (assigned once it initializes)
+	/**
+	 * Stable Cyrus identity of the agent profile that created this session
+	 * (e.g. `claude`, `cursor`, `codex`, `omp`). Resolves the launch
+	 * configuration that can resume `runnerSessionId`; the protocol is derived
+	 * from the profile rather than duplicated here. Legacy provider-specific
+	 * session ID fields (`claudeSessionId` etc.) were migrated into this pair
+	 * at persistence v6 and exist only on the v5 migration input type.
+	 */
+	agentProfileId?: string;
+	/** Opaque runner-assigned conversation identifier, meaningful only when
+	 * paired with {@link agentProfileId}. */
+	runnerSessionId?: string;
 	agentRunner?: IAgentRunner;
 	metadata?: {
 		model?: string;
@@ -118,10 +125,10 @@ export interface CyrusAgentSession {
 }
 
 export interface CyrusAgentSessionEntry {
-	claudeSessionId?: string; // originated in this Claude session (if using Claude)
-	geminiSessionId?: string; // originated in this Gemini session (if using Gemini)
-	codexSessionId?: string; // originated in this Codex session (if using Codex)
-	cursorSessionId?: string; // originated in this Cursor session (if using Cursor)
+	/** Profile that produced this entry (may be absent on pre-v6 records). */
+	agentProfileId?: string;
+	/** Runner session id of the session that produced this entry. */
+	runnerSessionId?: string;
 	linearAgentActivityId?: string; // got assigned this ID in linear, after creation, for this 'agent activity'
 	type: "user" | "assistant" | "system" | "result";
 	content: string;

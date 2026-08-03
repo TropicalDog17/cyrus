@@ -56,7 +56,8 @@ function createTestWorker() {
 function makeSession(usage?: Record<string, number>) {
 	return {
 		id: "session-1",
-		claudeSessionId: CLAUDE_SESSION_ID,
+		agentProfileId: "claude",
+		runnerSessionId: CLAUDE_SESSION_ID,
 		repositories: [{ branchName: "feature/x" }],
 		workspace: { path: "/test/repo" },
 		metadata: usage ? { usage } : {},
@@ -119,8 +120,8 @@ describe("EdgeWorker cold-resume summarize", () => {
 			expect(summary).toBe("A summary");
 			expect(mockSummarizeTranscript).toHaveBeenCalledTimes(1);
 			expect(postThought).toHaveBeenCalledTimes(1);
-			// Invariant: never clear the Claude session ID on success.
-			expect(session.claudeSessionId).toBe(CLAUDE_SESSION_ID);
+			// Invariant: never clear the runner session ID on success.
+			expect(session.runnerSessionId).toBe(CLAUDE_SESSION_ID);
 		});
 
 		it("returns undefined without summarizing when disabled (unset)", async () => {
