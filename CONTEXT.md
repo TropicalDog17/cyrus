@@ -14,48 +14,50 @@ one vocabulary. Architecture terms (**module**, **interface**, **seam**,
   origin.
 - **Session** — one agent run in an isolated git worktree, against a single origin Surface.
   A Session is bounded by one run, not by a deliverable.
-- **Runner** — an adapter over an agent CLI (Claude Code, Cursor) that streams
-  messages. An ACP-backed runner is in design, not in code — see *Planned
-  vocabulary — ACP agent profiles* below.
+- **Runner** — an adapter over an agent CLI (Claude Code, Cursor, Codex, OMP) that
+  streams messages. ACP-backed runners (Codex, OMP) use the profile registry — see
+  **Agent profile** below.
 - **Activity** — a thought / action / response / error a Session emits for its origin
   Surface.
 - **AgentMessage** — the **neutral** streaming message contract runners emit (see below).
 - **Effective access policy** — the single computed answer to "what may this session
   read/write", rendered into both the tool-permission layer and the OS sandbox layer.
 
-## Planned vocabulary — ACP agent profiles (NOT YET IN CODE)
+## ACP agent profiles
 
-> **None of the terms in this section exist in the codebase.** They are the shared
-> language for the in-design ACP runner work, recorded here so the ADRs in
-> `docs/adr/` (0001–0010) agree on one vocabulary. Do not read them as descriptions
-> of current behavior, and do not "fix" code to match them.
->
-> What is actually true today: ACP *transport* exists for one agent — Codex
-> (`packages/codex-runner/`, `acpProcess.ts` + `CodexEventMapper.ts`) — but the
-> **profile-registry abstraction does not**. There is no `agentProfileId`. Runner
-> selection is still a hardcoded union: `IAgentRunner` carries
-> `readonly provider: "claude" | "cursor" | "codex"`
-> (`packages/core/src/agent-runner-types.ts`) and `RunnerSelectionService` dispatches
-> by string-sniffing model/label heuristics. Building the registry (ADR 0009) is
-> Phase C of the modularity program. Delete this section's gate only when it lands.
+> The profile-registry abstraction and the generic runner-session identity landed
+> with the OMP canary work (ADRs 0001, 0009, 0016). Runner selection resolves an
+> `agentProfileId` through the built-in profile registry
+> (`packages/edge-worker/src/agents/`) instead of a hardcoded `RunnerType` union;
+> sessions persist `agentProfileId` + `runnerSessionId` (persistence v6) rather than
+> provider-specific session ID fields, which remain migration inputs only. The terms
+> below mark implemented versus still-planned.
 
 - **Agent profile** — the stable Cyrus identity and launch configuration for an
   agent. A profile selects its runner protocol, command, environment, and defaults.
+  Implemented: `claude`, `cursor`, `codex`, and the canary-only `omp` are registered
+  in the built-in registry (`packages/edge-worker/src/agents/builtInProfiles.ts`).
 - **Profile authentication** — credentials established outside Issue sessions and
-  shared by the ACP host for one Agent profile.
+  shared by the ACP host for one Agent profile. Still planned.
 - **Runner session ID** — the opaque conversation identifier assigned by a runner,
-  meaningful only when paired with the Agent profile that can resume it.
+  meaningful only when paired with the Agent profile that can resume it. Implemented
+  as the persisted `runnerSessionId` (v6), written by ACP-backed runners.
 - **Prompt turn** — one prompt-and-response cycle inside a Runner session; a
-  Cyrus Session may contain many sequential Prompt turns.
-- **ACP host** — the long-lived, profile-scoped agent process and initialized ACP
-  connection shared by the Runner sessions for one Agent profile.
+  Cyrus Session may contain many sequential Prompt turns. Implemented (OMP); for
+  OMP, a successful result ends the Prompt turn, not the assignment (ADR 0017).
+- **ACP host** — the agent process and initialized ACP connection that serves Runner
+  sessions for one Agent profile. Implemented for Codex per ADR 0002; OMP is an
+  isolated-host exception per ADR 0016 — one `omp acp` process per active session.
 - **Required agent capability** — an ACP capability an Agent profile must negotiate
   before Cyrus can safely make that profile available for a requested session.
+  Still planned as a profile-registry concern.
 - **Session MCP catalog** — the complete set of MCP servers Cyrus grants to one
   Runner session; ACP sessions do not inherit ambient Agent configuration.
+  Implemented: `ExactMcpCatalog` (`packages/edge-worker/src/agents/`) is the sole
+  source of the MCP map handed to ACP sessions.
 - **Prompt queue** — the per-Runner-session FIFO of prompts accepted while an ACP
   prompt turn is active and delivered as subsequent turns. Linear records prompts
-  and emits webhooks; it does not own this delivery queue.
+  and emits webhooks; it does not own this delivery queue. Still planned.
 
 
 ## Seam inventory (target decomposition of EdgeWorker)
