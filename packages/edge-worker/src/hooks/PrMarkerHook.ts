@@ -51,6 +51,10 @@ export interface PrMarkerProvider {
 	ensureMarker(cwd: string, log: ILogger): PrMarkerResult | null;
 }
 
+export type PrPublicationCallback = (
+	result: PrMarkerResult,
+) => Promise<void> | void;
+
 /**
  * Append the marker to a body, preserving a single trailing newline.
  * Idempotent: returns the original body when the marker is already present.
@@ -228,6 +232,7 @@ export function buildPrMarkerHook(
 		new GitHubPrMarkerProvider(),
 		new GitLabMrMarkerProvider(),
 	],
+	onPublication?: PrPublicationCallback,
 ): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
 	return {
 		PostToolUse: [
@@ -244,7 +249,8 @@ export function buildPrMarkerHook(
 							return {};
 						}
 						try {
-							provider.ensureMarker(post.cwd, log);
+							const result = provider.ensureMarker(post.cwd, log);
+							if (result) await onPublication?.(result);
 						} catch (err) {
 							log.warn(
 								`[PrMarkerHook] ${provider.name} provider threw: ${

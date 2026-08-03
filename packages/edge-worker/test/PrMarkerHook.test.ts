@@ -150,6 +150,28 @@ describe("buildPrMarkerHook", () => {
 		expect(b.ensureMarker).not.toHaveBeenCalled();
 	});
 
+	it("publishes confirmed PR facts after the marker provider succeeds", async () => {
+		const a = fakeProvider("a", /\bgh pr create\b/);
+		const facts = {
+			provider: "github",
+			number: 42,
+			headBranch: "cyrus/ENG-42",
+			headSha: "sha-a",
+			baseBranch: "main",
+			url: "https://github.test/pr/42",
+		};
+		a.ensureMarker.mockReturnValue(facts);
+		const onPublication = vi.fn();
+		const hook = buildPrMarkerHook(silentLogger, [a.provider], onPublication);
+
+		await runHook(
+			hook.PostToolUse![0],
+			makeHookInput("gh pr create", "/work/repo"),
+		);
+
+		expect(onPublication).toHaveBeenCalledWith(facts);
+	});
+
 	it("is a no-op when no provider matches the command", async () => {
 		const a = fakeProvider("a", /\bgh pr create\b/);
 
