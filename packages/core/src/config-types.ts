@@ -6,6 +6,7 @@ import type { Workspace } from "./CyrusAgentSession.js";
 import type { EdgeConfig, RepositoryConfig } from "./config-schemas.js";
 // Value imports for the registry-driven path normalizer below.
 import {
+	AgenticPipelineConfigSchema,
 	EdgeConfigSchema,
 	pathRegistry,
 	RepositoryConfigSchema,
@@ -14,6 +15,8 @@ import type { Issue } from "./issue-tracker/types.js";
 
 // Re-export schemas and types from config-schemas
 export {
+	type AgenticPipelineConfig,
+	AgenticPipelineConfigSchema,
 	DEFAULT_CLAUDE_SESSION_KEEP_ALIVE_MINUTES,
 	type EdgeConfig,
 	type EdgeConfigPayload,
@@ -114,8 +117,22 @@ export function normalizeConfigPaths(
 						normalizePathValue(repo[key]);
 				}
 			}
+
 			return clonedRepo;
 		});
+	}
+
+	if (config.agenticPipeline) {
+		const pipeline = { ...config.agenticPipeline };
+		for (const [field, schema] of Object.entries(
+			AgenticPipelineConfigSchema.shape,
+		)) {
+			if (pathRegistry.has(schema)) {
+				const key = field as keyof typeof pipeline;
+				pipeline[key] = normalizePathValue(pipeline[key]) as never;
+			}
+		}
+		normalized.agenticPipeline = pipeline;
 	}
 
 	return normalized;

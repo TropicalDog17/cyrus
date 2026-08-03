@@ -520,6 +520,22 @@
 				"additionalProperties": false
 			}
 		},
+		"agenticPipeline": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				},
+				"projectPath": {
+					"type": "string"
+				},
+				"dataPath": {
+					"type": "string"
+				}
+			},
+			"required": ["enabled", "projectPath"],
+			"additionalProperties": false
+		},
 		"linearWorkspaces": {
 			"type": "object",
 			"propertyNames": {

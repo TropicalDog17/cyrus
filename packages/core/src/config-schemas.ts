@@ -395,6 +395,20 @@ export const RepositoryConfigSchema = z.object({
 export const DEFAULT_CLAUDE_SESSION_KEEP_ALIVE_MINUTES = 50;
 
 /**
+ * Optional integration with the external agentic-pipeline checkout. It stays
+ * disabled until configured explicitly; no machine-specific project path is
+ * assumed.
+ */
+export const AgenticPipelineConfigSchema = z
+	.object({
+		enabled: z.boolean(),
+		projectPath: z.string().register(pathRegistry, { path: true }),
+		dataPath: z.string().optional().register(pathRegistry, { path: true }),
+	})
+	.strict();
+export type AgenticPipelineConfig = z.infer<typeof AgenticPipelineConfigSchema>;
+
+/**
  * Edge configuration - the serializable configuration stored in ~/.cyrus/config.json
  *
  * This schema defines all settings that can be persisted to disk.
@@ -404,6 +418,8 @@ export const DEFAULT_CLAUDE_SESSION_KEEP_ALIVE_MINUTES = 50;
 export const EdgeConfigSchema = z.object({
 	/** Array of repository configurations */
 	repositories: z.array(RepositoryConfigSchema),
+	/** Optional deterministic-closure pipeline integration. */
+	agenticPipeline: AgenticPipelineConfigSchema.optional(),
 
 	/**
 	 * Linear workspace credentials keyed by workspace ID.

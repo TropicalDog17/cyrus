@@ -101,6 +101,23 @@ describe("normalizeConfigPaths", () => {
 		expect(config.repositories[0].repositoryPath).toBe("~/repo");
 		expect(config.linearMcpConfigs).toEqual(["~/.cyrus/linear.json"]);
 	});
+
+	it("validates and expands agentic-pipeline paths", () => {
+		const config = EdgeConfigSchema.parse({
+			repositories: [],
+			agenticPipeline: {
+				enabled: true,
+				projectPath: "~/agentic-pipeline",
+				dataPath: "~/.cyrus/pipeline-data",
+			},
+		});
+
+		expect(normalizeConfigPaths(config).agenticPipeline).toEqual({
+			enabled: true,
+			projectPath: resolve(home, "agentic-pipeline"),
+			dataPath: resolve(home, ".cyrus/pipeline-data"),
+		});
+	});
 });
 
 describe("json-schema export guard", () => {
