@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager } from "../src/AgentSessionManager";
 import { resultSuccess } from "./agent-message-builders";
 
@@ -196,5 +196,40 @@ describe("AgentSessionManager.getSessionsByBaseBranch", () => {
 
 		const sessions = manager.getSessionsByBaseBranch("main", "repo-a");
 		expect(sessions).toHaveLength(0);
+	});
+
+	it("emits the terminal session facts after a successful completion", async () => {
+		manager.createCyrusAgentSession(
+			"session-1",
+			"issue-1",
+			{ id: "issue-1", identifier: "TEST-1", title: "Test Issue" },
+			{ path: "/tmp/ws1", isGitWorktree: true },
+			"linear",
+			[
+				{
+					repositoryId: "repo-a",
+					branchName: "test-1",
+					baseBranchName: "main",
+				},
+			],
+		);
+		const completed = vi.fn();
+		manager.on("sessionComplete", completed);
+
+		await manager.completeSession(
+			"session-1",
+			resultSuccess("done", { sessionId: "sdk-session" }),
+		);
+
+		expect(completed).toHaveBeenCalledWith(
+			expect.objectContaining({
+				sessionId: "session-1",
+				issueId: "issue-1",
+				issueIdentifier: "TEST-1",
+				repositoryId: "repo-a",
+				worktree: "/tmp/ws1",
+				status: "complete",
+			}),
+		);
 	});
 });

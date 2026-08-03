@@ -33,6 +33,7 @@ import type {
 	AcpMcpServer,
 	ExactMcpCatalogResult,
 } from "./agents/ExactMcpCatalog.js";
+import type { PrMarkerResult } from "./hooks/PrMarkerHook.js";
 
 /**
  * The concrete runner config the builder produces — a Claude, Cursor, Codex,
@@ -113,7 +114,14 @@ export type IssueRunnerConfigInput = Omit<
 	| "mcpConfigPath"
 	| "hooks"
 	| "resolvedWorkspaceId"
->;
+> & {
+	onPrPublication?: (publication: {
+		sessionId: string;
+		repository: RepositoryConfig;
+		repositoryPath: string;
+		result: PrMarkerResult;
+	}) => Promise<void> | void;
+};
 
 export function resolveIssueMcpConfigPath(
 	repository: RepositoryConfig,
@@ -179,7 +187,17 @@ export class RunnerConfigBuilder {
 		// Configure hooks: PostToolUse for screenshot tools + PR-marker enforcement,
 		// plus the Stop hook that blocks the session when work is unshipped.
 		const screenshotHooks = this.buildScreenshotHooks(log);
-		const prMarkerHook = buildPrMarkerHook(log);
+		const prMarkerHook = buildPrMarkerHook(log, undefined, (result) => {
+			const repositoryPath =
+				input.session.workspace.repoPaths?.[input.repository.id] ??
+				input.session.workspace.path;
+			return input.onPrPublication?.({
+				sessionId: input.sessionId,
+				repository: input.repository,
+				repositoryPath,
+				result,
+			});
+		});
 		const intentToAddHook = buildIntentToAddHook(log);
 		const stopHook = this.buildStopHook(log);
 		const hooks: Partial<Record<HookEvent, HookCallbackMatcher[]>> = {

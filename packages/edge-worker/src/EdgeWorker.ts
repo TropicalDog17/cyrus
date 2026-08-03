@@ -94,6 +94,8 @@ import { AgentProfileRegistry } from "./agents/AgentProfileRegistry.js";
 import { BUILT_IN_PROFILES } from "./agents/builtInProfiles.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
 import { CyrusToolsHost } from "./CyrusToolsHost.js";
+import { AgenticPipelineClient } from "./closure/AgenticPipelineClient.js";
+import { AssignmentLeaseController } from "./closure/AssignmentLeaseController.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
 import { GitHubUsernameResolver } from "./GitHubUsernameResolver.js";
 import { GitService } from "./GitService.js";
@@ -150,6 +152,7 @@ export class EdgeWorker extends EventEmitter {
 	private sessionRepositories: Map<string, string> = new Map(); // Maps session ID to repository ID
 	private lastStopTimeBySession: Map<string, number> = new Map(); // Maps session ID to timestamp of last stop signal (for double-stop detection)
 	private warmPool!: WarmSessionPool; // Pre-warmed Claude session subprocess pool
+	private assignmentLeaseController!: AssignmentLeaseController;
 	private warmSessionRegistry!: WarmSessionRegistry; // LRU cap over concurrently-warm idle Claude sessions
 	private parkedRegistry!: ParkedSessionRegistry; // Sessions parked behind blocked-by dependencies
 	private sessionOrchestrator!: SessionOrchestrator; // Runner creation + message wiring
@@ -654,6 +657,66 @@ export class EdgeWorker extends EventEmitter {
 			cyrusHome: this.cyrusHome,
 			logger: this.logger,
 		});
+		const pipeline = new AgenticPipelineClient({
+			config: this.config.agenticPipeline,
+			cyrusConfigPath: this.configPath ?? join(this.cyrusHome, "config.json"),
+		});
+		this.assignmentLeaseController = new AssignmentLeaseController({
+			pipeline,
+			getSession: (sessionId) => this.agentSessionManager.getSession(sessionId),
+			saveSession: () => this.savePersistedState(),
+			postGate: async ({ session, candidate, review }) => {
+				if (!session.externalSessionId) {
+					throw new Error("Lease session has no external session ID");
+				}
+				const activityId =
+					await this.agentSessionManager.createResponseActivity(
+						session.externalSessionId,
+						[
+							`Gate review for PR #${candidate.prNumber} at \`${candidate.headSha}\`.`,
+							review.note || "Inspect the gate evidence before approving.",
+						].join("\n\n"),
+					);
+				return activityId ?? undefined;
+			},
+			getRepositoryPath: (session, candidate) =>
+				session.workspace.repoPaths?.[candidate.repositoryId] ??
+				session.workspace.path,
+			resume: async (session, prompt) => {
+				const repository = this.repositories.get(
+					session.repositories[0]?.repositoryId ?? "",
+				);
+				if (!repository || !session.externalSessionId) {
+					throw new Error("Lease session cannot be resumed");
+				}
+				await this.resumeAgentSession(
+					session,
+					repository,
+					session.externalSessionId,
+					this.agentSessionManager,
+					prompt,
+				);
+			},
+			getCurrentHeadSha: async () => undefined,
+			onLearningError: (error, session) =>
+				this.logger.warn(
+					`Pipeline learning failed for ${session.id}: ${error.message}`,
+				),
+			now: () => new Date().toISOString(),
+		});
+		this.agentSessionManager.on("sessionComplete", ({ sessionId, status }) => {
+			if (status !== "complete") return;
+			const session = this.agentSessionManager.getSession(sessionId);
+			if (session?.agentProfileId !== "omp") return;
+			void this.assignmentLeaseController
+				.onRunnerSucceeded(sessionId)
+				.catch((error: unknown) => {
+					this.logger.error(
+						`Failed to record successful OMP assignment ${sessionId}:`,
+						error,
+					);
+				});
+		});
 		this.sessionOrchestrator = new SessionOrchestrator({
 			logger: this.logger,
 			cyrusHome: this.cyrusHome,
@@ -737,6 +800,39 @@ export class EdgeWorker extends EventEmitter {
 			createAskUserQuestionCallback: (sid, wid) =>
 				this.createAskUserQuestionCallback(sid, wid),
 			savePersistedState: () => this.savePersistedState(),
+			onPrPublication: async ({
+				sessionId,
+				repository,
+				repositoryPath,
+				result,
+			}) => {
+				if (!result.headSha) {
+					this.logger.warn(
+						`Ignoring PR #${result.number}: marker provider returned no head SHA`,
+					);
+					return;
+				}
+				await this.assignmentLeaseController.onPrPublished({
+					sessionId,
+					repositoryId: repository.id,
+					repositoryName: repository.name,
+					repositoryPath,
+					prNumber: result.number,
+					prUrl: result.url,
+					baseBranch: result.baseBranch,
+					headBranch: result.headBranch,
+					headSha: result.headSha,
+				});
+			},
+			onAgentProfileSelected: async (sessionId, agentProfileId) => {
+				const session = this.agentSessionManager.getSession(sessionId);
+				if (!session) throw new Error(`Unknown Cyrus session ${sessionId}`);
+				if (session.agentProfileId !== agentProfileId) {
+					session.agentProfileId = agentProfileId;
+					await this.savePersistedState();
+				}
+				await this.assignmentLeaseController.acquire(sessionId);
+			},
 			postInstantAcknowledgment: (sessionId, linearWorkspaceId) =>
 				this.postInstantAcknowledgment(sessionId, linearWorkspaceId),
 			postSystemPromptSelectionThought: (

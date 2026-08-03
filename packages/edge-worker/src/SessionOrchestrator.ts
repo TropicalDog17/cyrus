@@ -42,6 +42,7 @@ import {
 import type { AgentSessionManager } from "./AgentSessionManager.js";
 import type { AgentProfileRegistry } from "./agents/AgentProfileRegistry.js";
 import type { GitService } from "./GitService.js";
+import type { PrMarkerResult } from "./hooks/PrMarkerHook.js";
 import type { PromptAssembler } from "./prompt-assembly/PromptAssembler.js";
 import type { PromptAssemblyInput } from "./prompt-assembly/types.js";
 import type {
@@ -191,6 +192,16 @@ export interface SessionOrchestratorDeps {
 		organizationId: string,
 	): AgentRunnerConfig["onAskUserQuestion"];
 	savePersistedState(): Promise<void>;
+	onPrPublication(publication: {
+		sessionId: string;
+		repository: RepositoryConfig;
+		repositoryPath: string;
+		result: PrMarkerResult;
+	}): Promise<void>;
+	onAgentProfileSelected(
+		sessionId: string,
+		agentProfileId: string,
+	): Promise<void>;
 	postInstantAcknowledgment(
 		sessionId: string,
 		linearWorkspaceId: string,
@@ -1214,11 +1225,15 @@ export class SessionOrchestrator {
 			createAskUserQuestionCallback: (sid, wid) =>
 				this.deps.createAskUserQuestionCallback(sid, wid)!,
 			requireLinearWorkspaceId,
+			onPrPublication: (publication) => this.deps.onPrPublication(publication),
 			// Runtime-only launch deps for the profile's `createRunner` (Claude
 			// SessionStore + warm-pool liveness). Not config fields.
 			claudeSessionStore: this.deps.getClaudeSessionStore(),
 			warmEnabled: this.deps.warmPool.isEnabled(),
 		});
+		if (result.agentProfileId === "omp") {
+			await this.deps.onAgentProfileSelected(sessionId, result.agentProfileId);
+		}
 
 		// Attach pre-warmed session if available (only for Claude profile).
 		// acquireWarm is a no-op (returns undefined) when warm sessions are

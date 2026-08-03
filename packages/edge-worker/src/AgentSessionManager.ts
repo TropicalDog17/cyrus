@@ -426,6 +426,15 @@ export class AgentSessionManager extends EventEmitter {
 
 		// Post final result to issue tracker
 		await this.addResultEntry(sessionId, resultMessage);
+		this.emit("sessionComplete", {
+			sessionId,
+			issueId: session.issueContext?.issueId ?? session.issueId,
+			issueIdentifier:
+				session.issueContext?.issueIdentifier ?? session.issue?.identifier,
+			repositoryId: session.repositories[0]?.repositoryId,
+			worktree: session.workspace.path,
+			status,
+		});
 
 		// When the turn ended with work still scheduled or in flight
 		// (ScheduleWakeup/cron timers, backgrounded tasks), the runner holds
@@ -1329,8 +1338,11 @@ export class AgentSessionManager extends EventEmitter {
 	/**
 	 * Create a response activity
 	 */
-	async createResponseActivity(sessionId: string, body: string): Promise<void> {
-		await this.postActivity(
+	async createResponseActivity(
+		sessionId: string,
+		body: string,
+	): Promise<string | null> {
+		return this.postActivity(
 			sessionId,
 			{ content: { type: "response", body } },
 			"response",
