@@ -18,6 +18,8 @@ import type {
 	OnAskUserQuestion,
 	RepositoryConfig,
 } from "cyrus-core";
+import type { OmpPermissionPolicy, OmpSandbox } from "cyrus-omp-runner";
+import type { AcpMcpServer } from "./ExactMcpCatalog.js";
 
 /**
  * Everything a profile's `buildConfig` needs beyond the shared baseline.
@@ -90,10 +92,11 @@ export interface ProfileBuildInput {
 	sandboxSettings?: SandboxSettings;
 	/** CA cert path for MITM TLS termination — passed via child process env. */
 	egressCaCertPath?: string;
-	/** Final resolved model (selector precedence already applied). */
-	model: string;
-	/** Final resolved fallback model. */
-	fallbackModel: string;
+	/** Final resolved model (selector precedence already applied). The OMP
+	 * canary has no default model, so this is undefined unless explicit. */
+	model?: string;
+	/** Final resolved fallback model (same canary caveat). */
+	fallbackModel?: string;
 	/** Final MCP server map for the session (exact catalog). */
 	mcpConfig: Record<string, McpServerConfig>;
 	mcpConfigPath: string | string[] | undefined;
@@ -105,6 +108,22 @@ export interface ProfileBuildInput {
 	claudeSessionStore?: unknown;
 	/** Whether the warm session pool is enabled (Claude runner only). */
 	warmEnabled: boolean;
+	/**
+	 * Exact ACP MCP catalog for the session (ADR 0006): the ONLY servers the
+	 * OMP process may connect to — nothing ambient is discovered. OMP only.
+	 */
+	ompMcpServers?: AcpMcpServer[];
+	/**
+	 * Permission policy rendered from the session's EffectiveAccessPolicy
+	 * (OmpToolPolicy). OMP only.
+	 */
+	ompPermissionPolicy?: OmpPermissionPolicy;
+	/** OS sandbox wrapper (SRT) for the OMP process tree. OMP only. */
+	ompSandbox?: OmpSandbox;
+	/** Session-private OMP state dir passed as `--session-dir`. OMP only. */
+	ompSessionDir?: string;
+	/** Generated OMP overlay config path (mode 0600, outside worktree). OMP only. */
+	ompOverlayConfigPath?: string;
 }
 
 /**

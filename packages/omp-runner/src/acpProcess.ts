@@ -59,6 +59,12 @@ export function buildOmpAcpArgv(
 		argv.push("--no-tools");
 	}
 
+	// An explicitly-selected model is forwarded; the canary otherwise has no
+	// model inference and OMP picks its own default.
+	if (config.model) {
+		argv.push("--model", config.model);
+	}
+
 	// always-ask: unknown operations reach the permission handler, where the
 	// rendered Cyrus policy decides. Never yolo/auto-approve.
 	argv.push("--approval-mode", "always-ask");

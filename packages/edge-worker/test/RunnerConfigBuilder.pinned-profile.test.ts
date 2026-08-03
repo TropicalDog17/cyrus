@@ -25,6 +25,7 @@ describe("RunnerConfigBuilder — resumed-session profile pinning", () => {
 		const mcpConfigProvider: IMcpConfigProvider = {
 			buildMcpConfig: () => ({}),
 			buildMergedMcpConfigPath: () => undefined,
+			buildExactAcpCatalog: () => ({ servers: [], diagnostics: [] }),
 		};
 		const runnerSelector: IRunnerSelector = {
 			determineRunnerSelection: () => ({
@@ -86,22 +87,18 @@ describe("RunnerConfigBuilder — resumed-session profile pinning", () => {
 
 	it("pins to the omp canary for a resumed omp session", () => {
 		const builder = makeBuilder();
-		const build = () =>
-			builder.buildIssueConfig({
-				...baseInput,
-				session: makeSession("omp", "omp-runner-1"),
-				labels: ["claude"],
-				issueDescription: "Use [agent=claude] now",
-				resumeSessionId: "omp-runner-1",
-			});
+		const { agentProfileId, config } = builder.buildIssueConfig({
+			...baseInput,
+			session: makeSession("omp", "omp-runner-1"),
+			labels: ["claude"],
+			issueDescription: "Use [agent=claude] now",
+			resumeSessionId: "omp-runner-1",
+		});
 
 		// The pin happens even though omp is not default-eligible: resuming is
-		// not defaulting. omp's buildConfig is wired in a later PR; until then
-		// the profile fails closed rather than silently building a claude config
-		// for a resumed omp session. The wiring PR replaces this throw assertion
-		// with config-shape assertions.
-		expect(() => build()).toThrow(
-			/OMP profile is registered but its runner is not wired/,
-		);
+		// not defaulting. The resumed session stays on the OMP harness and
+		// keeps its runner session identity.
+		expect(agentProfileId).toBe("omp");
+		expect(config.resumeSessionId).toBe("omp-runner-1");
 	});
 });

@@ -187,13 +187,32 @@ Which model a session runs on, and how hard it reasons, can be set at several le
 
 For a given session the model is chosen from the first source that is set:
 
-1. **Description tag** — a `model:` (or `cyrus-model:`) tag in the issue description. Highest priority; lets a single issue override everything.
+1. **Description tag** — a `[model=<model>]` tag in the issue description (e.g. `[model=opus]`; escaped brackets `\[model=opus\]` are also accepted). Highest priority; lets a single issue override everything.
 2. **Model label** — a Linear label whose name maps to a model (e.g. `opus`, `sonnet`).
 3. **Label-prompt `model`** — the `model` on the matched `labelPrompts` entry (advanced format).
 4. **Repository `model`** — the repository-level default below.
 5. **Runner default** — the built-in default for the selected runner (`claudeDefaultModel`, `cursorDefaultModel`, …).
 
 A model implies a runner (a `composer-*` model selects Cursor, a `gpt-*`/`o3`/`codex` model selects Codex, an `opus`/`sonnet`/`haiku` model selects Claude). If a **`model`** or **`fallbackModel`** override names a family that conflicts with the runner already resolved for the session, that override is ignored rather than silently switching runners — Cyrus does not change repositories or runner families mid-issue.
+
+### Agent (runner) selection
+
+Which runner a session uses is resolved from the first source that is set:
+
+1. **`[agent=<profile>]` description tag** — e.g. `[agent=claude]`, `[agent=cursor]`, `[agent=codex]`. Highest priority; overrides labels and model inference.
+2. **Agent label** — a Linear label named `claude`, `cursor`, or `codex`.
+3. **Model inference** — an explicit model whose family implies a runner (see above).
+4. **Configured default** — `defaultAgentProfile` (or the backward-compatible `defaultRunner`), else auto-detection from the sole credentialed runner, else `claude`.
+
+A session never switches runner mid-flight: a resumed session always resolves its persisted `agentProfileId`, ignoring changed labels or tags.
+
+#### OMP canary (experimental)
+
+Oh My Pi is available as a **canary-only** agent profile, selected ONLY by an explicit `[agent=omp]` description tag or an `omp` label:
+
+- OMP is **never** chosen by model inference (it has no model family).
+- OMP is **not** accepted by `defaultAgentProfile` or `defaultRunner` (schema-restricted to `claude`/`cursor`/`codex`).
+- Model precedence applies as usual: an explicit `[model=…]` tag is honored; otherwise OMP uses its own default model.
 
 ### `model` (string, repository-level)
 

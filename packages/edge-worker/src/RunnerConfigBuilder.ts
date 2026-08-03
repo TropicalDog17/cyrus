@@ -1,4 +1,7 @@
 import { execSync } from "node:child_process";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import type {
 	ClaudeRunnerConfig,
 	HookCallbackMatcher,
@@ -8,22 +11,40 @@ import type {
 	StopHookInput,
 } from "cyrus-claude-runner";
 import type { CodexRunnerConfig } from "cyrus-codex-runner";
-import type { AgentRunnerConfig, ILogger, RepositoryConfig } from "cyrus-core";
+import {
+	type AgentRunnerConfig,
+	compute,
+	type ILogger,
+	nodeDirLister,
+	type RepositoryConfig,
+	renderOmpToolPolicy,
+	toSandboxFilesystem,
+} from "cyrus-core";
 import type { CursorRunnerConfig } from "cyrus-cursor-runner";
+import {
+	type OmpRunnerConfig,
+	OmpSandbox,
+	OmpToolPolicy,
+} from "cyrus-omp-runner";
 import type { ProfileBuildInput } from "./agents/AgentProfile.js";
 import { AgentProfileRegistry } from "./agents/AgentProfileRegistry.js";
 import { BUILT_IN_PROFILES } from "./agents/builtInProfiles.js";
+import type {
+	AcpMcpServer,
+	ExactMcpCatalogResult,
+} from "./agents/ExactMcpCatalog.js";
 
 /**
- * The concrete runner config the builder produces — a Claude, Cursor, or Codex
- * config (OMP joins the union once its runner package lands). All extend the
- * neutral `AgentRunnerConfig` base; this union preserves the provider-specific
- * extras without an untyped `& Record<string, unknown>` escape hatch.
+ * The concrete runner config the builder produces — a Claude, Cursor, Codex,
+ * or OMP config. All extend the neutral `AgentRunnerConfig` base; this union
+ * preserves the provider-specific extras without an untyped
+ * `& Record<string, unknown>` escape hatch.
  */
 export type RunnerConfig =
 	| ClaudeRunnerConfig
 	| CursorRunnerConfig
-	| CodexRunnerConfig;
+	| CodexRunnerConfig
+	| OmpRunnerConfig;
 
 import { buildIntentToAddHook } from "./hooks/IntentToAddHook.js";
 import { buildPrMarkerHook } from "./hooks/PrMarkerHook.js";
@@ -46,6 +67,16 @@ export interface IMcpConfigProvider {
 	buildMergedMcpConfigPath(
 		repositories: RepositoryConfig | RepositoryConfig[],
 	): string | string[] | undefined;
+	/**
+	 * The exact ACP MCP catalog (ADR 0006): Cyrus-owned inline servers merged
+	 * with the repository `.mcp.json` files, Cyrus-owned as final authority.
+	 */
+	buildExactAcpCatalog(
+		repoId: string,
+		linearWorkspaceId: string,
+		parentSessionId?: string,
+		mcpConfigFiles?: string | string[] | undefined,
+	): ExactMcpCatalogResult;
 }
 
 /**
@@ -204,12 +235,20 @@ export class RunnerConfigBuilder {
 		// returns one. Do NOT re-add a `|| repository.model || default` chain
 		// here — that historically shadowed the selector and left
 		// `repository.model` dead (DEV-174).
+		// The OMP canary has no default model (no model-family inference): its
+		// model stays undefined unless explicitly selected, so the default fill
+		// is skipped for it.
+		const isOmp = agentProfileId === "omp";
 		const finalModel =
 			modelOverride ??
-			this.runnerSelector.getDefaultModelForRunner(agentProfileId);
+			(isOmp
+				? undefined
+				: this.runnerSelector.getDefaultModelForRunner(agentProfileId));
 		const finalFallbackModel =
 			fallbackModelOverride ??
-			this.runnerSelector.getDefaultFallbackModelForRunner(agentProfileId);
+			(isOmp
+				? undefined
+				: this.runnerSelector.getDefaultFallbackModelForRunner(agentProfileId));
 
 		const resolvedWorkspaceId =
 			input.linearWorkspaceId ??
@@ -305,11 +344,116 @@ export class RunnerConfigBuilder {
 			resolvedWorkspaceId,
 			claudeSessionStore: input.claudeSessionStore,
 			warmEnabled: input.warmEnabled,
+			// OMP-only session artifacts (ADR 0016): exact MCP catalog, rendered
+			// tool policy, SRT sandbox, session-private state dir, generated
+			// overlay. Built only for the OMP profile.
+			...(agentProfileId === "omp"
+				? this.buildOmpFields(
+						input,
+						cwd,
+						mcpConfigPath,
+						resolvedWorkspaceId,
+						log,
+					)
+				: {}),
 		};
 
 		const config = profile.buildConfig(profileInput, baseline) as RunnerConfig;
 
 		return { config, agentProfileId };
+	}
+
+	/**
+	 * Build the OMP-only session artifacts (ADR 0016). The exact MCP catalog is
+	 * the ONLY server set the OMP process receives; the tool policy is rendered
+	 * from the session's EffectiveAccessPolicy (paths never recomputed here);
+	 * the SRT sandbox wraps the whole process tree when sandboxing is enabled;
+	 * the session-private state dir and the generated overlay config are both
+	 * created under `cyrusHome/runner-data/omp/<cyrusSessionId>` with mode
+	 * 0600 (overlay removed by the runner after process exit; never holds
+	 * tokens).
+	 */
+	private buildOmpFields(
+		input: IssueRunnerConfigInput,
+		cwd: string,
+		mcpConfigPath: string | string[] | undefined,
+		resolvedWorkspaceId: string,
+		log: ILogger,
+	): Partial<ProfileBuildInput> {
+		// 1. Exact ACP MCP catalog — nothing ambient is discovered.
+		const exact = this.mcpConfigProvider.buildExactAcpCatalog(
+			input.repository.id,
+			resolvedWorkspaceId,
+			input.sessionId,
+			mcpConfigPath,
+		);
+		for (const diagnostic of exact.diagnostics) {
+			log.warn(
+				`OMP MCP catalog: ${diagnostic.serverName}: ${diagnostic.reason}`,
+			);
+		}
+
+		// 2. Permission policy from the SAME compute() the other layers use.
+		const policy = compute({
+			homeDir: homedir(),
+			dirLister: nodeDirLister,
+			cwd,
+			allowReadDirectories: input.allowedDirectories,
+			writeDirectories: [cwd],
+		});
+		const rendered = renderOmpToolPolicy(policy, {
+			allowedTools: input.allowedTools,
+			disallowedTools: input.disallowedTools,
+		});
+
+		// 3. Session-private OMP state dir + generated overlay (0600, outside
+		// the worktree, no secrets).
+		const ompRoot = join(input.cyrusHome, "runner-data", "omp");
+		const sessionDir = join(ompRoot, input.sessionId);
+		mkdirSync(sessionDir, { recursive: true });
+		const overlayPath = join(ompRoot, `${input.sessionId}.overlay.yml`);
+		writeFileSync(
+			overlayPath,
+			"# Cyrus-generated OMP overlay — never contains secrets\n",
+			{ mode: 0o600 },
+		);
+
+		// 4. SRT sandbox: filesystem from toSandboxFilesystem, network from the
+		// exact catalog hosts, egress via Cyrus's configured proxy ports.
+		const fsConfig = toSandboxFilesystem(policy);
+		const runtimePaths = resolveOmpRuntimePaths();
+		const sandbox = new OmpSandbox({
+			enabled: Boolean(input.sandboxSettings?.enabled),
+			filesystem: {
+				denyRead: fsConfig.denyRead,
+				allowRead: dedupPaths([
+					".",
+					...fsConfig.allowRead,
+					sessionDir,
+					...runtimePaths,
+				]),
+				allowWrite: dedupPaths([...fsConfig.allowWrite, sessionDir]),
+				denyWrite: [],
+			},
+			allowedDomains: mcpHostsFromCatalog(exact.servers),
+			deniedDomains: ["*"],
+			...(input.sandboxSettings?.network?.httpProxyPort
+				? {
+						parentProxy: {
+							http: `http://127.0.0.1:${input.sandboxSettings.network.httpProxyPort}`,
+							https: `http://127.0.0.1:${input.sandboxSettings.network.httpProxyPort}`,
+						},
+					}
+				: {}),
+		});
+
+		return {
+			ompMcpServers: exact.servers as unknown as AcpMcpServer[],
+			ompPermissionPolicy: new OmpToolPolicy(rendered),
+			ompSandbox: sandbox,
+			ompSessionDir: sessionDir,
+			ompOverlayConfigPath: overlayPath,
+		};
 	}
 
 	/**
@@ -432,6 +576,73 @@ export function buildStopHook(
  * `git add --intent-to-add` by `IntentToAddHook` so they still show as a
  * tracked diff and block the stop when left uncommitted.
  */
+function dedupPaths(paths: string[]): string[] {
+	return [...new Set(paths.filter((p): p is string => Boolean(p)))];
+}
+
+/**
+ * The network hosts the session's exact MCP catalog may reach, extracted from
+ * the ACP server entries. The SRT network allowlist is derived from this — an
+ * MCP endpoint the catalog grants is a host the sandbox must permit.
+ */
+export function mcpHostsFromCatalog(
+	servers: readonly AcpMcpServer[],
+): string[] {
+	const hosts = new Set<string>();
+	for (const server of servers) {
+		const url = "url" in server ? server.url : undefined;
+		if (!url) continue;
+		try {
+			hosts.add(new URL(url).hostname);
+		} catch {
+			// Unparseable URL — the spawn will surface it; nothing to allow.
+		}
+	}
+	return [...hosts];
+}
+
+/**
+ * Resolve the OMP binary to its real path (the pinned `@oh-my-pi/pi-coding-agent`
+ * bin from the workspace, or a system `omp`). Returns undefined when not
+ * found. The runner is launched with this explicit path so the pinned binary
+ * is what executes — never an ambient global of a different version.
+ */
+export function resolveOmpBinaryPath(): string | undefined {
+	try {
+		const raw = execSync("which omp", { encoding: "utf8" }).trim();
+		if (!raw) return undefined;
+		return realpathSync(raw);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The operational runtime paths the pinned OMP/Bun binaries need to execute
+ * under the sandbox: the resolved `omp` binary, its directory, and its
+ * interpreter (from the shebang). NOT the whole home directory.
+ */
+export function resolveOmpRuntimePaths(): string[] {
+	try {
+		const binPath = resolveOmpBinaryPath();
+		if (!binPath) return [];
+		const paths = [binPath, dirname(binPath)];
+		const shebang = readFileSync(binPath, "utf8").split("\n")[0];
+		const interpreter = shebang?.replace(/^#!(\S+).*$/, "$1").trim();
+		if (
+			interpreter &&
+			interpreter.length > 0 &&
+			interpreter !== "/usr/bin/env"
+		) {
+			paths.push(interpreter);
+		}
+		return paths;
+	} catch {
+		// omp not on PATH — the spawn will surface it; nothing to allow.
+		return [];
+	}
+}
+
 export function inspectGitGuardrail(cwd: string, log: ILogger): string | null {
 	const runGit = (args: string): string => {
 		return execSync(`git ${args}`, {

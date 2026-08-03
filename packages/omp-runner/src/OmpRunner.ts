@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
+import { unlink } from "node:fs/promises";
 import { resolve } from "node:path";
 import { cwd } from "node:process";
 import {
@@ -411,6 +412,13 @@ export class OmpRunner extends EventEmitter implements IAgentRunner {
 		this.connection = null;
 		if (child && !child.killed) {
 			child.kill("SIGTERM");
+		}
+		// The generated overlay config (mode 0600, outside the worktree) is
+		// session-scoped and never needed after the process exits. Best-effort
+		// removal; the session state dir itself is retained for resume.
+		if (this.config.ompOverlayConfigPath) {
+			const overlay = this.config.ompOverlayConfigPath;
+			void unlink(overlay).catch(() => {});
 		}
 	}
 

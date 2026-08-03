@@ -6,6 +6,9 @@ import { CodexRunner } from "cyrus-codex-runner";
 import { compute, nodeDirLister, toSandboxFilesystem } from "cyrus-core";
 import type { CursorRunnerConfig } from "cyrus-cursor-runner";
 import { CursorRunner } from "cyrus-cursor-runner";
+import type { OmpRunnerConfig } from "cyrus-omp-runner";
+import { OmpRunner } from "cyrus-omp-runner";
+import { resolveOmpBinaryPath } from "../RunnerConfigBuilder.js";
 import type { AgentProfile, ProfileBuildInput } from "./AgentProfile.js";
 
 const CURSOR_DEFAULT_MODEL = "composer-2.5";
@@ -190,15 +193,39 @@ export const BUILT_IN_PROFILES: AgentProfile[] = [
 		defaultFallbackModel() {
 			return undefined;
 		},
-		buildConfig(_input, _baseline) {
-			throw new Error(
-				"OMP profile is registered but its runner is not wired yet; use a claude/cursor/codex profile",
-			);
+		buildConfig(input, baseline) {
+			const ompConfig: OmpRunnerConfig = {
+				...baseline,
+				// Launch-scoped authorization inputs (ADR 0016): cwd comes from
+				// the baseline; extra worktrees become repeated --add-dir flags;
+				// the exact catalog is the ONLY MCP set; the rendered policy and
+				// SRT sandbox enforce the EffectiveAccessPolicy; the session
+				// state dir and generated overlay are passed through. The pinned
+				// OMP binary is resolved explicitly so the launch never falls
+				// back to an ambient global of a different version.
+				ompCommand: resolveOmpBinaryPath() ?? "omp",
+				...(baseline.additionalDirectories?.length
+					? { ompAdditionalDirectories: baseline.additionalDirectories }
+					: {}),
+				// Wire-identical shapes; the SDK's union discriminates its http/sse
+				// variants with an explicit `type` field the catalog does not carry,
+				// so the conversion is a documented cast at this boundary.
+				ompMcpServers: (input.ompMcpServers ??
+					[]) as unknown as OmpRunnerConfig["ompMcpServers"],
+				ompPermissionPolicy: input.ompPermissionPolicy,
+				ompSandbox: input.ompSandbox,
+				ompSessionDir: input.ompSessionDir,
+				ompOverlayConfigPath: input.ompOverlayConfigPath,
+			};
+
+			// Claude-only hooks, warm sessions, SDK plugins, effort, and
+			// compaction fields are intentionally NOT forwarded: OMP owns its
+			// own loop and its own permission/approval handling.
+			if (input.model) ompConfig.model = input.model;
+			return ompConfig;
 		},
-		createRunner(_config, _runtime) {
-			throw new Error(
-				"OMP profile is registered but its runner is not wired yet; use a claude/cursor/codex profile",
-			);
+		createRunner(config) {
+			return new OmpRunner(config as OmpRunnerConfig);
 		},
 	},
 ];

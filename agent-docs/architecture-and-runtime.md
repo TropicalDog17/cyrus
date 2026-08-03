@@ -47,6 +47,8 @@ cyrus/
     ├── core/                      # Shared types, config schemas, issue-tracker interfaces
     ├── claude-runner/             # Claude Code SDK wrapper
     ├── cursor-runner/             # Cursor Agent SDK wrapper
+    ├── codex-runner/              # Codex ACP adapter
+    ├── omp-runner/                # Oh My Pi ACP adapter (canary profile)
     ├── edge-worker/               # Orchestrator (webhooks, sessions, routing, MCP)
     ├── linear-event-transport/    # Linear webhooks + LinearIssueTrackerService
     ├── github-event-transport/    # GitHub webhook handling
@@ -58,8 +60,17 @@ cyrus/
 **Runtime flow:** Linear/GitHub webhooks → event transport
 (`LinearEventTransport` / `GitHubEventTransport`) on `SharedApplicationServer`
 → `EdgeWorker` routes the issue → `GitService` creates a worktree →
-`RunnerSelectionService` picks Claude or Cursor → runner streams SDK messages →
-`AgentSessionManager` posts activities via `LinearActivitySink`.
+`RunnerSelectionService` resolves an `agentProfileId` through the built-in
+profile registry (`packages/edge-worker/src/agents/`) → the selected profile's
+`createRunner` builds the runner (Claude, Cursor, Codex, or the OMP canary) →
+runner streams neutral `AgentMessage`s → `AgentSessionManager` posts activities
+via `LinearActivitySink`.
+
+Sessions persist the generic pair `agentProfileId` + `runnerSessionId`
+(persistence v6); provider-specific session IDs exist only as migration inputs.
+OMP runs one `omp acp --print` process per active session with launch-scoped
+authorization inputs (ADR 0016): exact ACP MCP catalog, rendered tool policy,
+and an SRT OS-sandbox wrapper when sandboxing is enabled.
 
 F1 uses the same `EdgeWorker` with `platform: "cli"` and an in-memory issue
 tracker.
@@ -71,6 +82,10 @@ tracker.
 | Linear webhooks + API | `packages/linear-event-transport/src/LinearEventTransport.ts`, `LinearIssueTrackerService.ts` |
 | Claude execution | `packages/claude-runner/src/ClaudeRunner.ts` |
 | Cursor execution | `packages/cursor-runner/src/CursorRunner.ts` |
+| Codex execution | `packages/codex-runner/src/CodexRunner.ts` |
+| OMP execution (canary) | `packages/omp-runner/src/OmpRunner.ts` |
+| Agent profile registry | `packages/edge-worker/src/agents/AgentProfileRegistry.ts` |
+| Exact ACP MCP catalog | `packages/edge-worker/src/agents/ExactMcpCatalog.ts` |
 | Session + activity mapping | `packages/edge-worker/src/AgentSessionManager.ts` |
 | Edge worker orchestration | `packages/edge-worker/src/EdgeWorker.ts` |
 | GitHub token resolution | `EdgeWorker.resolveGitHubToken()` — CYHOST-forwarded install token → self-minted GitHub App token (`GitHubAppTokenProvider`) → `GITHUB_TOKEN` PAT |
