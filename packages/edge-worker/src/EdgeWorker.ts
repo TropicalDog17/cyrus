@@ -697,7 +697,11 @@ export class EdgeWorker extends EventEmitter {
 					prompt,
 				);
 			},
-			getCurrentHeadSha: async () => undefined,
+			getCurrentHeadSha: async (publication) =>
+				this.getGitHubPullRequestHeadSha(
+					publication.repositoryId,
+					publication.prNumber,
+				),
 			onLearningError: (error, session) =>
 				this.logger.warn(
 					`Pipeline learning failed for ${session.id}: ${error.message}`,
@@ -891,6 +895,7 @@ export class EdgeWorker extends EventEmitter {
 		// Load persisted state for each repository
 		await this.loadPersistedState();
 
+		await this.reconcilePersistedAssignmentLeases();
 		// Reconcile sessions that were mid-flight when we last shut down. Their
 		// in-memory runners are gone, so they'd otherwise linger as zombies that
 		// show a working indicator in Linear forever and ignore stop signals.
@@ -4453,6 +4458,72 @@ Your base branch \`${branchName}\` has received ${commitCount} new commit(s). Co
 				`Restored ${cache.size} issue-to-repository cache mappings`,
 			);
 		}
+	}
+	private async reconcilePersistedAssignmentLeases(): Promise<void> {
+		for (const session of this.agentSessionManager.getAllSessions()) {
+			if (
+				session.agentProfileId !== "omp" ||
+				!session.assignmentLease ||
+				session.assignmentLease.releasedAt
+			) {
+				continue;
+			}
+			try {
+				await this.assignmentLeaseController.reconcile(session.id);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.logger.error(
+					`Failed to reconcile OMP assignment ${session.id}:`,
+					error,
+				);
+				if (session.externalSessionId) {
+					await this.agentSessionManager.createErrorActivity(
+						session.externalSessionId,
+						`Assignment reconciliation failed; the lease remains held: ${message}`,
+					);
+				}
+			}
+		}
+	}
+
+	private async getGitHubPullRequestHeadSha(
+		repositoryId: string,
+		prNumber: number,
+	): Promise<string | undefined> {
+		const repository = this.repositories.get(repositoryId);
+		const tokenProvider = this.gitHubAppTokenProvider;
+		if (!repository?.githubUrl || !tokenProvider) {
+			return undefined;
+		}
+
+		let ownerAndRepository: string;
+		try {
+			const url = new URL(repository.githubUrl);
+			ownerAndRepository = url.pathname
+				.replace(/^\/+|\/+$/g, "")
+				.replace(/\.git$/, "");
+		} catch {
+			return undefined;
+		}
+		if (ownerAndRepository.split("/").length !== 2) return undefined;
+
+		const response = await fetch(
+			`https://api.github.com/repos/${ownerAndRepository}/pulls/${prNumber}`,
+			{
+				headers: {
+					Accept: "application/vnd.github+json",
+					Authorization: `Bearer ${await tokenProvider.getToken()}`,
+					"X-GitHub-Api-Version": "2022-11-28",
+				},
+			},
+		);
+		if (!response.ok) {
+			throw new Error(
+				`GitHub PR head lookup failed: ${response.status} ${response.statusText}`,
+			);
+		}
+		const body = (await response.json()) as { head?: { sha?: unknown } };
+		return typeof body.head?.sha === "string" ? body.head.sha : undefined;
 	}
 
 	/**
