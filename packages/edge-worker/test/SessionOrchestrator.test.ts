@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { AgentProfileRegistry } from "../src/agents/AgentProfileRegistry.js";
+import { BUILT_IN_PROFILES } from "../src/agents/builtInProfiles.js";
 import {
 	SessionOrchestrator,
 	type SessionOrchestratorDeps,
@@ -73,7 +75,7 @@ function makeDeps(overrides: Partial<SessionOrchestratorDeps> = {}): {
 	const runnerType = { current: "claude" as "claude" | "cursor" };
 	const buildIssueConfig = vi.fn((input: any) => ({
 		config: { model: "m", _input: input } as any,
-		runnerType: runnerType.current,
+		agentProfileId: runnerType.current,
 	}));
 	const warmPool = {
 		isEnabled: vi.fn(() => false),
@@ -103,6 +105,7 @@ function makeDeps(overrides: Partial<SessionOrchestratorDeps> = {}): {
 		} as any,
 		warmPool: warmPool as any,
 		runnerConfigBuilder: { buildIssueConfig } as any,
+		agentProfileRegistry: new AgentProfileRegistry(BUILT_IN_PROFILES),
 		skillsPluginResolver: {
 			resolve: vi.fn(async () => []),
 			discoverSkillNames: vi.fn(async () => []),

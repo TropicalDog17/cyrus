@@ -24,7 +24,7 @@ function makeBuilder(runnerType: RunnerType): RunnerConfigBuilder {
 		buildMergedMcpConfigPath: () => undefined,
 	};
 	const runnerSelector: IRunnerSelector = {
-		determineRunnerSelection: () => ({ runnerType }),
+		determineRunnerSelection: () => ({ agentProfileId: runnerType }),
 		getDefaultModelForRunner: () => "opus",
 		getDefaultFallbackModelForRunner: () => "sonnet",
 	};
@@ -86,8 +86,8 @@ describe("RunnerConfigBuilder autoCompactWindow passthrough", () => {
 	});
 
 	it("does not set the window on the Cursor runner config (Cursor manages its own context)", () => {
-		const { config, runnerType } = buildIssueConfig("cursor", 120000);
-		expect(runnerType).toBe("cursor");
+		const { config, agentProfileId } = buildIssueConfig("cursor", 120000);
+		expect(agentProfileId).toBe("cursor");
 		expect(
 			(config as { autoCompactWindow?: number }).autoCompactWindow,
 		).toBeUndefined();

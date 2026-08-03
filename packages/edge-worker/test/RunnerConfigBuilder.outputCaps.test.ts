@@ -24,7 +24,7 @@ function makeBuilder(runnerType: RunnerType): RunnerConfigBuilder {
 		buildMergedMcpConfigPath: () => undefined,
 	};
 	const runnerSelector: IRunnerSelector = {
-		determineRunnerSelection: () => ({ runnerType }),
+		determineRunnerSelection: () => ({ agentProfileId: runnerType }),
 		getDefaultModelForRunner: () => "opus",
 		getDefaultFallbackModelForRunner: () => "sonnet",
 	};
@@ -101,11 +101,11 @@ describe("RunnerConfigBuilder tool-output caps passthrough", () => {
 	});
 
 	it("does not set the caps on the Cursor runner config (Cursor manages its own tool output)", () => {
-		const { config, runnerType } = buildIssueConfig("cursor", {
+		const { config, agentProfileId } = buildIssueConfig("cursor", {
 			bashMaxOutputLength: 30000,
 			mcpMaxOutputTokens: 25000,
 		});
-		expect(runnerType).toBe("cursor");
+		expect(agentProfileId).toBe("cursor");
 		expect((config as OutputCapConfig).bashMaxOutputLength).toBeUndefined();
 		expect((config as OutputCapConfig).mcpMaxOutputTokens).toBeUndefined();
 	});

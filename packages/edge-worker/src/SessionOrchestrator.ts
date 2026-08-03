@@ -6,8 +6,6 @@ import type {
 	SessionStore,
 	WarmSessionRegistry,
 } from "cyrus-claude-runner";
-import { ClaudeRunner } from "cyrus-claude-runner";
-import { CodexRunner } from "cyrus-codex-runner";
 import type {
 	AgentActivityCreateInput,
 	AgentMessage,
@@ -22,14 +20,12 @@ import type {
 	Issue,
 	IssueMinimal,
 	RepositoryConfig,
-	RunnerType,
 } from "cyrus-core";
 import {
 	DEFAULT_CLAUDE_SESSION_KEEP_ALIVE_MINUTES,
 	getReadParentDirectories,
 	requireLinearWorkspaceId,
 } from "cyrus-core";
-import { CursorRunner } from "cyrus-cursor-runner";
 import type {
 	GitHubAppTokenProvider,
 	GitHubCommentService,
@@ -44,6 +40,7 @@ import {
 	extractRepoOwner,
 } from "cyrus-github-event-transport";
 import type { AgentSessionManager } from "./AgentSessionManager.js";
+import type { AgentProfileRegistry } from "./agents/AgentProfileRegistry.js";
 import type { GitService } from "./GitService.js";
 import type { PromptAssembler } from "./prompt-assembly/PromptAssembler.js";
 import type { PromptAssemblyInput } from "./prompt-assembly/types.js";
@@ -109,6 +106,8 @@ export interface SessionOrchestratorDeps {
 	agentSessionManager: AgentSessionManager;
 	warmPool: WarmSessionPool;
 	runnerConfigBuilder: RunnerConfigBuilder;
+	/** Built-in Agent profile registry (ADR 0009) — resolves the runner. */
+	agentProfileRegistry: AgentProfileRegistry;
 	skillsPluginResolver: SkillsPluginResolver;
 	gitService: GitService;
 	promptAssembler: PromptAssembler;
@@ -561,8 +560,8 @@ export class SessionOrchestrator {
 				this.deps.getConfig().claudeDefaultEffort;
 
 			// Create agent runner with system prompt from assembly
-			// buildAgentRunnerConfig now determines runner type from labels internally
-			const { config: runnerConfig, runnerType } =
+			// buildAgentRunnerConfig now determines the agent profile from labels internally
+			const { config: runnerConfig, agentProfileId } =
 				await this.buildAgentRunnerConfig(
 					session,
 					primaryRepo,
@@ -582,10 +581,10 @@ export class SessionOrchestrator {
 				);
 
 			log.debug(
-				`Label-based runner selection for new session: ${runnerType} (session ${sessionId})`,
+				`Label-based profile selection for new session: ${agentProfileId} (session ${sessionId})`,
 			);
 
-			const runner = this.createRunnerForType(runnerType, runnerConfig);
+			const runner = this.createRunnerForProfile(agentProfileId, runnerConfig);
 
 			// Store runner by comment ID
 			agentSessionManager.addAgentRunner(sessionId, runner);
@@ -855,7 +854,7 @@ export class SessionOrchestrator {
 		// Create runner configuration
 		// buildAgentRunnerConfig determines runner type from labels for new sessions
 		// For existing sessions, we still need labels for model override but ignore runner type
-		const { config: runnerConfig, runnerType } =
+		const { config: runnerConfig, agentProfileId } =
 			await this.buildAgentRunnerConfig(
 				session,
 				repository,
@@ -874,8 +873,8 @@ export class SessionOrchestrator {
 				effort, // Resolved reasoning effort (Claude-only)
 			);
 
-		// Create the appropriate runner based on session state
-		const runner = this.createRunnerForType(runnerType, runnerConfig);
+		// Create the runner for the resolved profile
+		const runner = this.createRunnerForProfile(agentProfileId, runnerConfig);
 
 		// Store runner
 		agentSessionManager.addAgentRunner(sessionId, runner);
@@ -1127,7 +1126,7 @@ export class SessionOrchestrator {
 		 * Defaults to `"linear"` (the pre-platform-aware behavior).
 		 */
 		sessionPlatform: "linear" | "github" = "linear",
-	): Promise<{ config: RunnerConfig; runnerType: RunnerType }> {
+	): Promise<{ config: RunnerConfig; agentProfileId: string }> {
 		const log = this.deps.logger.withContext({
 			sessionId,
 			platform: session.issueContext?.trackerId,
@@ -1215,13 +1214,17 @@ export class SessionOrchestrator {
 			createAskUserQuestionCallback: (sid, wid) =>
 				this.deps.createAskUserQuestionCallback(sid, wid)!,
 			requireLinearWorkspaceId,
+			// Runtime-only launch deps for the profile's `createRunner` (Claude
+			// SessionStore + warm-pool liveness). Not config fields.
+			claudeSessionStore: this.deps.getClaudeSessionStore(),
+			warmEnabled: this.deps.warmPool.isEnabled(),
 		});
 
-		// Attach pre-warmed session if available (only for Claude runner).
+		// Attach pre-warmed session if available (only for Claude profile).
 		// acquireWarm is a no-op (returns undefined) when warm sessions are
 		// disabled or no slot exists.
 		const warm = this.deps.warmPool.acquireWarm(sessionId);
-		if (result.runnerType === "claude" && warm) {
+		if (result.agentProfileId === "claude" && warm) {
 			(result.config as ClaudeRunnerConfig).warmSession = warm;
 			log.debug("Attaching pre-warmed session to runner config");
 		}
@@ -1230,30 +1233,22 @@ export class SessionOrchestrator {
 	}
 
 	/**
-	 * Instantiate the appropriate runner for the given type (was
-	 * `EdgeWorker.createRunnerForType`).
+	 * Instantiate the runner for the resolved agent profile (was
+	 * `EdgeWorker.createRunnerForType`). The profile owns its constructor;
+	 * unknown profile ids fail closed rather than falling back.
 	 */
-	createRunnerForType(
-		runnerType: RunnerType,
+	createRunnerForProfile(
+		agentProfileId: string,
 		config: RunnerConfig,
 	): IAgentRunner {
-		switch (runnerType) {
-			case "claude": {
-				// Inject the hosted SessionStore at the last moment so it only
-				// attaches to Claude runners (the field is Claude-specific).
-				const store = this.deps.getClaudeSessionStore();
-				const claudeConfig: ClaudeRunnerConfig = store
-					? { ...config, sessionStore: store }
-					: config;
-				return new ClaudeRunner(claudeConfig, this.deps.warmPool.isEnabled());
-			}
-			case "cursor":
-				return new CursorRunner(config);
-			case "codex":
-				return new CodexRunner(config);
-			default:
-				throw new Error(`Unknown runner type: ${runnerType satisfies never}`);
+		const profile = this.deps.agentProfileRegistry.get(agentProfileId);
+		if (!profile) {
+			throw new Error(`Unknown agent profile: ${agentProfileId}`);
 		}
+		return profile.createRunner(config, {
+			claudeSessionStore: this.deps.getClaudeSessionStore() ?? undefined,
+			warmEnabled: this.deps.warmPool.isEnabled(),
+		});
 	}
 
 	/** onMessage wiring target — forwards to AgentSessionManager ingestion. */
@@ -1546,7 +1541,7 @@ export class SessionOrchestrator {
 		const allowedDirectories: string[] = [repository.repositoryPath];
 
 		// Create agent runner using the standard config builder
-		const { config: runnerConfig, runnerType } =
+		const { config: runnerConfig, agentProfileId } =
 			await this.buildAgentRunnerConfig(
 				session,
 				repository,
@@ -1566,7 +1561,7 @@ export class SessionOrchestrator {
 				"github", // sessionPlatform → uses githubMcpConfigs override
 			);
 
-		const runner = this.createRunnerForType(runnerType, runnerConfig);
+		const runner = this.createRunnerForProfile(agentProfileId, runnerConfig);
 
 		// Store the runner in the session manager
 		agentSessionManager.addAgentRunner(githubSessionId, runner);
@@ -1581,7 +1576,7 @@ export class SessionOrchestrator {
 		);
 
 		this.deps.logger.info(
-			`Starting ${runnerType} runner for GitHub PR ${repoFullName}#${prNumber}`,
+			`Starting ${agentProfileId} profile runner for GitHub PR ${repoFullName}#${prNumber}`,
 		);
 
 		// Start the session and handle completion

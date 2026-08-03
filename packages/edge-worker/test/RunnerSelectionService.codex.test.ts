@@ -84,7 +84,7 @@ describe("RunnerSelectionService — Codex routing", () => {
 				defaultRunner: "claude",
 			}).determineRunnerSelection(["codex"]);
 			expect(result).toEqual({
-				runnerType: "codex",
+				agentProfileId: "codex",
 				modelOverride: "gpt-5-codex",
 				fallbackModelOverride: "gpt-5-codex",
 			});
@@ -94,7 +94,7 @@ describe("RunnerSelectionService — Codex routing", () => {
 			const result = makeService({
 				defaultRunner: "claude",
 			}).determineRunnerSelection([], "Please fix [agent=codex] now");
-			expect(result.runnerType).toBe("codex");
+			expect(result.agentProfileId).toBe("codex");
 			expect(result.modelOverride).toBe("gpt-5-codex");
 		});
 
@@ -103,7 +103,7 @@ describe("RunnerSelectionService — Codex routing", () => {
 				defaultRunner: "claude",
 			}).determineRunnerSelection(["gpt-5"]);
 			expect(result).toEqual({
-				runnerType: "codex",
+				agentProfileId: "codex",
 				modelOverride: "gpt-5",
 				fallbackModelOverride: "gpt-5-codex",
 			});
@@ -113,7 +113,7 @@ describe("RunnerSelectionService — Codex routing", () => {
 			const result = makeService({
 				defaultRunner: "claude",
 			}).determineRunnerSelection([], "Try [model=o3] on this");
-			expect(result.runnerType).toBe("codex");
+			expect(result.agentProfileId).toBe("codex");
 			expect(result.modelOverride).toBe("o3");
 		});
 
@@ -121,7 +121,7 @@ describe("RunnerSelectionService — Codex routing", () => {
 			const result = makeService({
 				defaultRunner: "claude",
 			}).determineRunnerSelection(["cursor"], "[agent=codex]");
-			expect(result.runnerType).toBe("codex");
+			expect(result.agentProfileId).toBe("codex");
 		});
 
 		it("drops a claude model that conflicts with an explicit [agent=codex]", () => {
@@ -129,7 +129,7 @@ describe("RunnerSelectionService — Codex routing", () => {
 				defaultRunner: "claude",
 			}).determineRunnerSelection([], "[agent=codex] [model=opus]");
 			// The mismatched model is discarded; codex falls back to its default.
-			expect(result.runnerType).toBe("codex");
+			expect(result.agentProfileId).toBe("codex");
 			expect(result.modelOverride).toBe("gpt-5-codex");
 		});
 	});

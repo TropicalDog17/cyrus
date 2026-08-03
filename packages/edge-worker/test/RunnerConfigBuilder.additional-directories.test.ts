@@ -20,7 +20,7 @@ function makeBuilder(): RunnerConfigBuilder {
 		buildMergedMcpConfigPath: () => undefined,
 	};
 	const runnerSelector: IRunnerSelector = {
-		determineRunnerSelection: () => ({ runnerType: "claude" as const }),
+		determineRunnerSelection: () => ({ agentProfileId: "claude" as const }),
 		getDefaultModelForRunner: () => "opus",
 		getDefaultFallbackModelForRunner: () => "sonnet",
 	};

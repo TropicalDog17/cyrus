@@ -24,7 +24,7 @@ function makeBuilder(runnerType: RunnerType): RunnerConfigBuilder {
 		buildMergedMcpConfigPath: () => undefined,
 	};
 	const runnerSelector: IRunnerSelector = {
-		determineRunnerSelection: () => ({ runnerType }),
+		determineRunnerSelection: () => ({ agentProfileId: runnerType }),
 		getDefaultModelForRunner: () => "opus",
 		getDefaultFallbackModelForRunner: () => "sonnet",
 	};
@@ -86,8 +86,8 @@ describe("RunnerConfigBuilder sessionKeepAliveMs passthrough", () => {
 	});
 
 	it("does not set the idle window on the Cursor runner config (Cursor owns its session lifetime)", () => {
-		const { config, runnerType } = buildIssueConfig("cursor", 3_000_000);
-		expect(runnerType).toBe("cursor");
+		const { config, agentProfileId } = buildIssueConfig("cursor", 3_000_000);
+		expect(agentProfileId).toBe("cursor");
 		expect(
 			(config as { sessionKeepAliveMs?: number }).sessionKeepAliveMs,
 		).toBeUndefined();
@@ -137,8 +137,11 @@ describe("RunnerConfigBuilder warmSessionRegistry passthrough", () => {
 	});
 
 	it("does not set the registry on the Cursor runner config", () => {
-		const { config, runnerType } = buildWithRegistry("cursor", fakeRegistry);
-		expect(runnerType).toBe("cursor");
+		const { config, agentProfileId } = buildWithRegistry(
+			"cursor",
+			fakeRegistry,
+		);
+		expect(agentProfileId).toBe("cursor");
 		expect(
 			(config as { warmSessionRegistry?: unknown }).warmSessionRegistry,
 		).toBeUndefined();

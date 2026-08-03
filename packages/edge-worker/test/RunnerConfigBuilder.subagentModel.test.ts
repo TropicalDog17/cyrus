@@ -24,7 +24,7 @@ function makeBuilder(runnerType: RunnerType): RunnerConfigBuilder {
 		buildMergedMcpConfigPath: () => undefined,
 	};
 	const runnerSelector: IRunnerSelector = {
-		determineRunnerSelection: () => ({ runnerType }),
+		determineRunnerSelection: () => ({ agentProfileId: runnerType }),
 		getDefaultModelForRunner: () => "opus",
 		getDefaultFallbackModelForRunner: () => "sonnet",
 	};
@@ -76,8 +76,8 @@ describe("RunnerConfigBuilder — explore subagent model", () => {
 	});
 
 	it("does not set it on the Cursor config (Cursor has no agent registration)", () => {
-		const { config, runnerType } = buildIssueConfig("cursor", "haiku");
-		expect(runnerType).toBe("cursor");
+		const { config, agentProfileId } = buildIssueConfig("cursor", "haiku");
+		expect(agentProfileId).toBe("cursor");
 		expect(
 			(config as { subagentModel?: string }).subagentModel,
 		).toBeUndefined();

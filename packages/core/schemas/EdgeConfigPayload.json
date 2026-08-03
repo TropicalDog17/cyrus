@@ -614,6 +614,10 @@
 		"codexDefaultFallbackModel": {
 			"type": "string"
 		},
+		"defaultAgentProfile": {
+			"type": "string",
+			"enum": ["claude", "cursor", "codex"]
+		},
 		"defaultRunner": {
 			"type": "string",
 			"enum": ["claude", "cursor", "codex"]

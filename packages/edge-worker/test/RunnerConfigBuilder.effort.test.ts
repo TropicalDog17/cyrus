@@ -25,7 +25,7 @@ function makeBuilder(runnerType: RunnerType): RunnerConfigBuilder {
 		buildMergedMcpConfigPath: () => undefined,
 	};
 	const runnerSelector: IRunnerSelector = {
-		determineRunnerSelection: () => ({ runnerType }),
+		determineRunnerSelection: () => ({ agentProfileId: runnerType }),
 		getDefaultModelForRunner: () => "opus",
 		getDefaultFallbackModelForRunner: () => "sonnet",
 	};
@@ -83,8 +83,8 @@ describe("RunnerConfigBuilder effort passthrough", () => {
 	});
 
 	it("does not set effort on the Cursor runner config (Cursor has no such knob)", () => {
-		const { config, runnerType } = buildIssueConfig("cursor", "max");
-		expect(runnerType).toBe("cursor");
+		const { config, agentProfileId } = buildIssueConfig("cursor", "max");
+		expect(agentProfileId).toBe("cursor");
 		expect((config as { effort?: EffortLevel }).effort).toBeUndefined();
 	});
 });

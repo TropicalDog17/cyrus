@@ -90,6 +90,8 @@ import {
 	formatRepoSetupHookActivity,
 	formatRoutingThought,
 } from "./activity/index.js";
+import { AgentProfileRegistry } from "./agents/AgentProfileRegistry.js";
+import { BUILT_IN_PROFILES } from "./agents/builtInProfiles.js";
 import { ConfigManager, type RepositoryChanges } from "./ConfigManager.js";
 import { CyrusToolsHost } from "./CyrusToolsHost.js";
 import { DefaultSkillsDeployer } from "./DefaultSkillsDeployer.js";
@@ -175,6 +177,7 @@ export class EdgeWorker extends EventEmitter {
 	private logger: ILogger;
 	// Extracted service modules
 	private attachmentService!: AttachmentService;
+	private agentProfileRegistry!: AgentProfileRegistry;
 	private runnerSelectionService!: RunnerSelectionService;
 	private toolPermissionResolver!: ToolPermissionResolver;
 	private mcpConfigService!: McpConfigService;
@@ -527,7 +530,13 @@ export class EdgeWorker extends EventEmitter {
 			this.cyrusHome,
 			this.config.linearWorkspaces || {},
 		);
-		this.runnerSelectionService = new RunnerSelectionService(this.config);
+		// Built-in Agent profile registry (ADR 0009): selection, config building,
+		// and runner construction all resolve through this one instance.
+		this.agentProfileRegistry = new AgentProfileRegistry(BUILT_IN_PROFILES);
+		this.runnerSelectionService = new RunnerSelectionService(
+			this.config,
+			this.agentProfileRegistry,
+		);
 		this.toolPermissionResolver = new ToolPermissionResolver(
 			this.config,
 			this.logger,
@@ -575,6 +584,7 @@ export class EdgeWorker extends EventEmitter {
 		this.runnerConfigBuilder = new RunnerConfigBuilder(
 			this.mcpConfigService,
 			this.runnerSelectionService,
+			this.agentProfileRegistry,
 		);
 		this.activityPoster = new ActivityPoster(
 			this.issueTrackers,
@@ -650,6 +660,7 @@ export class EdgeWorker extends EventEmitter {
 			agentSessionManager: this.agentSessionManager,
 			warmPool: this.warmPool,
 			runnerConfigBuilder: this.runnerConfigBuilder,
+			agentProfileRegistry: this.agentProfileRegistry,
 			skillsPluginResolver: this.skillsPluginResolver,
 			gitService: this.gitService,
 			promptAssembler: this.promptAssembler,

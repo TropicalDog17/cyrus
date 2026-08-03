@@ -562,9 +562,21 @@ export const EdgeConfigSchema = z.object({
 	codexDefaultFallbackModel: z.string().optional(),
 
 	/**
+	 * Default agent profile to use when no profile is specified via labels or
+	 * description tags. Restricted to the three default-eligible profiles:
+	 * "claude", "cursor", and "codex". Canary profiles (e.g. `omp`) are
+	 * never selectable as a default — they require an explicit `[agent=…]`
+	 * tag or label. If omitted, falls back to "claude".
+	 */
+	defaultAgentProfile: RunnerTypeSchema.optional(),
+
+	/**
 	 * Default runner/harness to use when no runner is specified via labels or
 	 * description tags. This fork supports "claude", "cursor", and "codex". If
 	 * omitted, falls back to "claude".
+	 *
+	 * Backward-compatible alias for existing configurations; `defaultAgentProfile`
+	 * takes precedence when both are set.
 	 */
 	defaultRunner: RunnerTypeSchema.optional(),
 

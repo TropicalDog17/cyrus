@@ -25,7 +25,7 @@ function makeBuilder(runnerType: RunnerType): RunnerConfigBuilder {
 		buildMergedMcpConfigPath: () => undefined,
 	};
 	const runnerSelector: IRunnerSelector = {
-		determineRunnerSelection: () => ({ runnerType }),
+		determineRunnerSelection: () => ({ agentProfileId: runnerType }),
 		getDefaultModelForRunner: () => "opus",
 		getDefaultFallbackModelForRunner: () => "sonnet",
 	};
@@ -102,8 +102,11 @@ describe("RunnerConfigBuilder issue-comment policy passthrough", () => {
 	});
 
 	it("applies to the Cursor runner as well", () => {
-		const { config, runnerType } = buildIssueConfig("cursor", "Base prompt.");
-		expect(runnerType).toBe("cursor");
+		const { config, agentProfileId } = buildIssueConfig(
+			"cursor",
+			"Base prompt.",
+		);
+		expect(agentProfileId).toBe("cursor");
 		expect(config.appendSystemPrompt).toContain(
 			ISSUE_COMMENT_POLICY_PROMPT_ADDENDUM,
 		);

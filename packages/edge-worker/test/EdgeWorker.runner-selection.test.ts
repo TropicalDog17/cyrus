@@ -430,7 +430,7 @@ Issue: {{issue_identifier}}`;
 				edgeWorker as any
 			).runnerSelectionService.determineRunnerSelection(["opus"]);
 
-			expect(runnerSelection.runnerType).toBe("claude");
+			expect(runnerSelection.agentProfileId).toBe("claude");
 			expect(runnerSelection.modelOverride).toBe("opus");
 			expect(runnerSelection.fallbackModelOverride).toBe("sonnet");
 		});
@@ -440,7 +440,7 @@ Issue: {{issue_identifier}}`;
 				edgeWorker as any
 			).runnerSelectionService.determineRunnerSelection(["bug"]);
 
-			expect(runnerSelection.runnerType).toBe("claude");
+			expect(runnerSelection.agentProfileId).toBe("claude");
 			expect(runnerSelection.modelOverride).toBe("opus");
 		});
 
@@ -449,7 +449,7 @@ Issue: {{issue_identifier}}`;
 				edgeWorker as any
 			).runnerSelectionService.determineRunnerSelection(["cursor"]);
 
-			expect(runnerSelection.runnerType).toBe("cursor");
+			expect(runnerSelection.agentProfileId).toBe("cursor");
 			expect(runnerSelection.modelOverride).toBe("composer-2.5");
 		});
 
@@ -500,7 +500,7 @@ Issue: {{issue_identifier}}`;
 				repositoryModel: "haiku",
 			});
 
-			expect(result.runnerType).toBe("cursor");
+			expect(result.agentProfileId).toBe("cursor");
 			expect(result.modelOverride).toBe("composer-2.5");
 		});
 
@@ -512,7 +512,7 @@ Issue: {{issue_identifier}}`;
 				repositoryFallbackModel: "haiku",
 			});
 
-			expect(result.runnerType).toBe("claude");
+			expect(result.agentProfileId).toBe("claude");
 			expect(result.modelOverride).toBe("opus");
 			expect(result.fallbackModelOverride).toBe("haiku");
 		});
