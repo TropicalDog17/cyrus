@@ -29,7 +29,7 @@ interface ToolCall {
  * place.
  */
 export function normalizeTool(
-	provider: "claude" | "cursor" | "codex",
+	provider: "claude" | "cursor" | "codex" | "omp",
 	rawName: string,
 	rawInput: unknown,
 	workingDirectory?: string,

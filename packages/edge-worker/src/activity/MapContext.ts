@@ -13,7 +13,7 @@ export interface MapContext {
 	 * already emits canonical tool names (its runner normalizes them), so it
 	 * takes the same passthrough path as Claude.
 	 */
-	provider: "claude" | "cursor" | "codex";
+	provider: "claude" | "cursor" | "codex" | "omp";
 	/**
 	 * The originating tool_use for a tool_result's `tool_use_id`.
 	 * Old: `this.toolCallsByToolUseId.get(id)`.

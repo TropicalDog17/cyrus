@@ -1,0 +1,29 @@
+{
+	"name": "cyrus-omp-runner",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Oh My Pi runner for Cyrus, driven over the Agent Client Protocol (ACP)",
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "tsc",
+		"dev": "tsc --watch",
+		"test": "vitest",
+		"test:run": "vitest run --passWithNoTests",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@agentclientprotocol/sdk": "1.2.1",
+		"@oh-my-pi/pi-coding-agent": "17.2.4",
+		"cyrus-core": "workspace:*"
+	},
+	"devDependencies": {
+		"@types/node": "^20.0.0",
+		"typescript": "^5.3.3",
+		"vitest": "^4.1.9"
+	}
+}
